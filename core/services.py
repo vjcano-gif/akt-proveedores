@@ -933,6 +933,35 @@ def registrar_averia(s, *, proveedor_id, articulo, cantidad, motivo,
     return av
 
 
+def ajustar_averia(s, *, averia_id, documento_ajuste, numero_ajuste,
+                   usuario, actor=None) -> Averia:
+    """Da de baja una avería previamente reclasificada a RESTRINGIDO."""
+    _exigir_rol(actor, "INVENTARIOS")
+    if documento_ajuste not in ("TD90", "TD96"):
+        raise ReglaNegocio("El documento de ajuste debe ser TD90 o TD96.")
+    if not str(numero_ajuste or "").strip():
+        raise ReglaNegocio("Debe indicar el número del ajuste.")
+    av = s.get(Averia, averia_id)
+    if not av:
+        raise ReglaNegocio("Avería inexistente.")
+    if av.estado == "AJUSTADA":
+        raise ReglaNegocio("La avería ya fue ajustada.")
+    doc = crear_documento(
+        s, "AJUSTE", proveedor_id=av.proveedor_id,
+        referencia=f"{documento_ajuste} {numero_ajuste}", creado_por=usuario)
+    descontar_distribuido(
+        s, proveedor_id=av.proveedor_id, articulo=av.articulo,
+        cantidad=av.cantidad, tipo="AJUSTE_AVERIA",
+        estado=av.estado_inventario, condicion="RESTRINGIDO",
+        documento_id=doc.id, referencia=doc.referencia, usuario=usuario)
+    av.estado = "AJUSTADA"
+    av.documento_ajuste = documento_ajuste
+    s.flush()
+    auditar(s, usuario, _actor_rol(actor), "AJUSTAR_AVERIA", "averias", av.id,
+            f"{documento_ajuste} {numero_ajuste}")
+    return av
+
+
 def tolerancia_averias(s, proveedor_id=None, desde=None, hasta=None):
     """
     Compara las averías del periodo contra el margen de tolerancia pactado
