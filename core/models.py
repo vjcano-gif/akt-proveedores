@@ -101,7 +101,7 @@ class Bom(Base):
 
     __table_args__ = (
         UniqueConstraint("articulo_transformado", "componente", "secuencia",
-                         name="uq_bom_linea"),
+                         "proveedor_codigo", name="uq_bom_linea_proveedor"),
     )
 
 
