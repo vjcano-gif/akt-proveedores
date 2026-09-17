@@ -9,7 +9,7 @@ from core.auth import alcance_proveedor, puede
 from core.db import session_scope
 from core.models import Averia, Proveedor
 from core.services import (MOTIVOS_AVERIA, ReglaNegocio, crear_documento,
-                           descontar_distribuido, guardar_archivo, registrar_averia,
+                           descontar_distribuido, guardar_archivo, leer_archivo, registrar_averia,
                            tolerancia_averias)
 
 MOMENTOS = ["RECIBO", "ALMACENAMIENTO", "PRODUCCION"]
@@ -88,7 +88,7 @@ def _panel(user):
                 a = s.get(Averia, aid)
                 if a.evidencia:
                     st.download_button(f"Ver evidencia: {a.evidencia.nombre}",
-                                       a.evidencia.contenido or b"",
+                                       leer_archivo(a.evidencia),
                                        file_name=a.evidencia.nombre, key=f"eva_{aid}")
             c1, c2 = st.columns(2)
             doc = c1.selectbox("Documento de ajuste", ["TD90", "TD96"], key="av_doc")
