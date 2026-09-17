@@ -8,16 +8,19 @@ Condición:             DISPONIBLE | RESTRINGIDO
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import math
+import re
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from core.models import (
     Archivo, Articulo, Averia, Bom, ConsumoProduccion, ConteoEjecutado,
     ConteoProgramado, Despacho, DespachoLinea, Documento, FotoInventarioERP,
     Inventario, MovimientoInventario, Novedad, OrdenCompra, OrdenProduccion,
-    ProgramaProduccion, Proveedor, Recibo, ReciboLinea, Auditoria,
+    ProgramaProduccion, Proveedor, Recibo, ReciboLinea, Auditoria, Ubicacion,
 )
 
 TOL = 1e-6
@@ -25,6 +28,38 @@ TOL = 1e-6
 
 class ReglaNegocio(Exception):
     """Error de validación de negocio (se muestra al usuario)."""
+
+
+def _actor_rol(actor):
+    return (actor or {}).get("rol") if isinstance(actor, dict) else None
+
+
+def _exigir_rol(actor, *roles):
+    """Defensa en profundidad; actor=None conserva compatibilidad de pruebas."""
+    if actor is not None and _actor_rol(actor) not in roles:
+        raise ReglaNegocio("Su rol no está autorizado para ejecutar esta operación.")
+
+
+def _exigir_proveedor(actor, proveedor_id):
+    if actor is not None and _actor_rol(actor) == "PROVEEDOR":
+        if int((actor or {}).get("proveedor_id") or 0) != int(proveedor_id or 0):
+            raise ReglaNegocio("No puede operar inventario de otro proveedor.")
+
+
+def _validar_ubicacion_movimiento(s, proveedor_id, ubicacion, condicion, cantidad):
+    codigo = (ubicacion or "").strip().upper()
+    if not codigo:
+        return
+    u = s.query(Ubicacion).filter(Ubicacion.codigo == codigo).first()
+    if not u:
+        raise ReglaNegocio(f"La ubicación {codigo} no existe en el maestro.")
+    if not u.activo or u.cerrada:
+        raise ReglaNegocio(f"La ubicación {codigo} está inactiva o cerrada.")
+    if u.proveedor_id and int(u.proveedor_id) != int(proveedor_id):
+        raise ReglaNegocio(f"La ubicación {codigo} pertenece a otro proveedor.")
+    if float(cantidad or 0) > 0 and condicion == "DISPONIBLE" and (u.restringida or u.inspeccion):
+        raise ReglaNegocio(
+            f"La ubicación {codigo} es restringida/de inspección y no admite producto DISPONIBLE.")
 
 
 # =========================================================================
@@ -39,24 +74,40 @@ PREFIJOS = {
 
 
 def nuevo_trz(s, tipo: str) -> str:
+    """Consecutivo atómico por tipo/año, seguro ante usuarios concurrentes."""
     anio = dt.date.today().year
     pre = PREFIJOS.get(tipo, "DOC")
-    patron = f"TRZ-{pre}-{anio}-%"
-    n = s.query(func.count(Documento.id)).filter(Documento.trz.like(patron)).scalar() or 0
-    while True:
-        n += 1
+    clave = f"{pre}:{anio}"
+    sql = text("""
+        INSERT INTO consecutivos_documento (clave, valor)
+        VALUES (:clave, 1)
+        ON CONFLICT(clave) DO UPDATE
+        SET valor = consecutivos_documento.valor + 1
+        RETURNING valor
+    """)
+    for _ in range(100000):
+        n = int(s.execute(sql, {"clave": clave}).scalar_one())
         cand = f"TRZ-{pre}-{anio}-{n:06d}"
         if not s.query(Documento.id).filter(Documento.trz == cand).first():
             return cand
-
+    raise ReglaNegocio("No fue posible generar un consecutivo de trazabilidad único.")
 
 def crear_documento(s, tipo, proveedor_id=None, referencia=None, archivo_id=None,
-                    creado_por=None, fecha_documento=None, observaciones=None) -> Documento:
+                    creado_por=None, fecha_documento=None, observaciones=None,
+                    extraccion=None) -> Documento:
+    extraccion_json = None
+    confianza = None
+    estado_extraccion = None
+    if extraccion:
+        extraccion_json = json.dumps(extraccion, ensure_ascii=False, default=str)
+        confianza = float(extraccion.get("confianza_global") or 0)
+        estado_extraccion = "REVISION" if extraccion.get("requiere_revision", True) else "EXTRAIDO"
     doc = Documento(
         trz=nuevo_trz(s, tipo), tipo=tipo, proveedor_id=proveedor_id,
         referencia=referencia, archivo_id=archivo_id, creado_por=creado_por,
         fecha_documento=fecha_documento or dt.date.today(),
-        observaciones=observaciones,
+        observaciones=observaciones, extraccion_json=extraccion_json,
+        confianza_extraccion=confianza, estado_extraccion=estado_extraccion,
     )
     s.add(doc)
     s.flush()
@@ -64,12 +115,43 @@ def crear_documento(s, tipo, proveedor_id=None, referencia=None, archivo_id=None
 
 
 def guardar_archivo(s, nombre, contenido: bytes, mime=None, usuario=None) -> Archivo:
-    a = Archivo(nombre=nombre, contenido=contenido, mime=mime,
-                tamano=len(contenido or b""), subido_por=usuario)
+    """Guarda evidencia en Storage si está configurado; si no, usa fallback binario."""
+    contenido = contenido or b""
+    digest = hashlib.sha256(contenido).hexdigest()
+    existente = s.query(Archivo).filter(Archivo.sha256 == digest).first()
+    if existente:
+        return existente
+
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(nombre or "archivo"))[:180]
+    path = f"{dt.date.today():%Y/%m}/{digest[:20]}-{safe}"
+    storage_path = None
+    db_content = contenido
+    try:
+        from core import storage
+        if storage.configured():
+            storage_path = storage.upload_bytes(path, contenido, mime)
+            db_content = None
+    except Exception:
+        storage_path = None
+        db_content = contenido
+
+    a = Archivo(nombre=nombre, contenido=db_content, mime=mime,
+                tamano=len(contenido), storage_path=storage_path, sha256=digest,
+                subido_por=usuario)
     s.add(a)
     s.flush()
     return a
 
+
+def leer_archivo(archivo: Archivo) -> bytes:
+    if archivo is None:
+        return b""
+    if archivo.contenido is not None:
+        return bytes(archivo.contenido)
+    if archivo.storage_path:
+        from core import storage
+        return storage.download_bytes(archivo.storage_path)
+    return b""
 
 def auditar(s, usuario, rol, accion, entidad, entidad_id, detalle=""):
     s.add(Auditoria(usuario=usuario, rol=rol, accion=accion, entidad=entidad,
@@ -88,6 +170,7 @@ def _clave(proveedor_id, articulo, ubicacion, estado, condicion):
 def obtener_saldo(s, proveedor_id, articulo, ubicacion="", estado="CRUDO",
                   condicion="DISPONIBLE") -> float:
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
+    _validar_ubicacion_movimiento(s, p, u, c, cantidad)
     row = s.query(Inventario).filter_by(
         proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c).first()
     return float(row.cantidad) if row else 0.0
@@ -230,7 +313,7 @@ class LineaRecibo:
     articulo: str
     descripcion: str = ""
     cantidad_documento: float = 0.0
-    cantidad_fisica: float = 0.0
+    cantidad_fisica: float | None = None
     lote: str = ""
     serial: str = ""
     ubicacion_desde: str = ""
@@ -240,48 +323,57 @@ class LineaRecibo:
 def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
                  referencia=None, usuario=None, es_reproceso=False,
                  ubicacion_destino="", archivo_id=None, fecha_documento=None,
-                 observaciones=None) -> Recibo:
-    """
-    origen:
-      BIN_A_BIN  -> materia prima cruda desde AKT MOTOS hacia el proveedor
-      FACTURA    -> producto que llega desde otro proveedor ORIGEN
-      REGISTRO   -> registro manual (PDF o foto) con artículo, descripción y cantidad
-    """
+                 observaciones=None, proveedor_origen_id=None, extraccion=None,
+                 actor=None) -> Recibo:
+    """Crea el recibo. BIN/FACTURA no impactan inventario hasta completar match por línea."""
     if origen not in ("BIN_A_BIN", "FACTURA", "REGISTRO"):
         raise ReglaNegocio(f"Origen de recibo no válido: {origen}")
     if not lineas:
         raise ReglaNegocio("El recibo debe tener al menos una línea.")
+    _exigir_rol(actor, "PROVEEDOR", "RECIBO_AKT", "INVENTARIOS")
+    _exigir_proveedor(actor, proveedor_id)
 
     prov = s.get(Proveedor, proveedor_id)
     if not prov or not prov.activo:
         raise ReglaNegocio("Proveedor inexistente o inactivo.")
+    if proveedor_origen_id:
+        po = s.get(Proveedor, proveedor_origen_id)
+        if not po or not po.activo:
+            raise ReglaNegocio("Proveedor origen inexistente o inactivo.")
 
-    doc = crear_documento(s, origen, proveedor_id=proveedor_id, referencia=referencia,
-                          archivo_id=archivo_id, creado_por=usuario,
-                          fecha_documento=fecha_documento, observaciones=observaciones)
-    r = Recibo(documento_id=doc.id, proveedor_id=proveedor_id, origen=origen,
-               estado="BORRADOR", es_reproceso=bool(es_reproceso),
-               ubicacion_destino=(ubicacion_destino or "").upper(),
-               creado_por=usuario)
+    doc = crear_documento(
+        s, origen, proveedor_id=proveedor_id, referencia=referencia,
+        archivo_id=archivo_id, creado_por=usuario, fecha_documento=fecha_documento,
+        observaciones=observaciones, extraccion=extraccion)
+    estado_inicial = "PENDIENTE_MATCH" if origen == "BIN_A_BIN" else "BORRADOR"
+    r = Recibo(
+        documento_id=doc.id, proveedor_id=proveedor_id,
+        proveedor_origen_id=proveedor_origen_id, origen=origen,
+        estado=estado_inicial, es_reproceso=bool(es_reproceso),
+        ubicacion_destino=(ubicacion_destino or "").upper(), creado_por=usuario)
     s.add(r)
     s.flush()
 
+    creadas = 0
     for ln in lineas:
         cod = str(ln.articulo).strip()
         if not cod:
             continue
         qdoc = float(ln.cantidad_documento or 0)
-        qfis = float(ln.cantidad_fisica if ln.cantidad_fisica not in (None, 0) else qdoc)
+        qfis = qdoc if ln.cantidad_fisica is None else float(ln.cantidad_fisica or 0)
         s.add(ReciboLinea(
             recibo_id=r.id, articulo=cod, descripcion=ln.descripcion or "",
             cantidad_documento=qdoc, cantidad_fisica=qfis,
             lote=ln.lote or "", serial=ln.serial or "",
             ubicacion_desde=(ln.ubicacion_desde or "").upper(),
-            ubicacion_hasta=(ln.ubicacion_hasta or ubicacion_destino or "").upper()))
+            ubicacion_hasta=(ln.ubicacion_hasta or ubicacion_destino or "").upper(),
+            estado_match="PENDIENTE"))
+        creadas += 1
+    if not creadas:
+        raise ReglaNegocio("El recibo no contiene líneas válidas.")
     s.flush()
-    auditar(s, usuario, None, "CREAR_RECIBO", "recibos", r.id, f"{origen} {doc.trz}")
+    auditar(s, usuario, _actor_rol(actor), "CREAR_RECIBO", "recibos", r.id, f"{origen} {doc.trz}")
     return r
-
 
 def validar_bin_a_bin(s, recibo: Recibo, proveedor_id_logueado: int) -> list[str]:
     """
@@ -303,7 +395,7 @@ def validar_bin_a_bin(s, recibo: Recibo, proveedor_id_logueado: int) -> list[str
     return alertas
 
 
-def sellar_recibo(s, recibo_id: int, usuario: str) -> Recibo:
+def sellar_recibo(s, recibo_id: int, usuario: str, actor=None) -> Recibo:
     """
     El proveedor de transformación 'sella' / certifica que recibió el producto
     que llegó desde otro proveedor ORIGEN. Queda a la espera de la factura y
@@ -312,6 +404,8 @@ def sellar_recibo(s, recibo_id: int, usuario: str) -> Recibo:
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
+    _exigir_rol(actor, "PROVEEDOR")
+    _exigir_proveedor(actor, r.proveedor_id)
     if r.origen != "FACTURA":
         raise ReglaNegocio("Solo se sellan los recibos con origen FACTURA (proveedor origen).")
     if r.estado not in ("BORRADOR",):
