@@ -28,8 +28,29 @@ def _b(v):
     return str(v).strip().lower() in ("true", "1", "y", "si", "sí", "yes")
 
 
-def sembrar(force=False, con_demo=True) -> dict:
-    """Idempotente: solo carga lo que falta."""
+def _setting(nombre, default=None):
+    try:
+        import streamlit as st
+        valor = st.secrets.get(nombre)
+        if valor not in (None, ""):
+            return valor
+    except Exception:
+        pass
+    return os.environ.get(nombre, default)
+
+
+def demo_mode() -> bool:
+    """Demo explícito o ejecución sin DATABASE_URL (SQLite local)."""
+    v = _setting("DEMO_MODE")
+    if v is not None:
+        return _b(v)
+    return not bool(_setting("DATABASE_URL"))
+
+
+def sembrar(force=False, con_demo=None) -> dict:
+    """Idempotente. Producción nunca crea credenciales demo conocidas."""
+    if con_demo is None:
+        con_demo = demo_mode()
     init_db()
     res = {}
     with session_scope() as s:
@@ -119,28 +140,40 @@ def sembrar(force=False, con_demo=True) -> dict:
                 s.bulk_save_objects(objs); s.flush()
             res["bom"] = n
 
-        # ---------- usuarios demo ----------
+        # ---------- usuario inicial / usuarios demo ----------
         if s.query(func.count(Usuario.id)).scalar() == 0:
             prov = (s.query(Proveedor).filter(Proveedor.nombre.ilike("%DL Plus%")).first()
                     or s.query(Proveedor).order_by(Proveedor.id).first())
-            usuarios = [
-                ("proveedor@akt.com", "Proveedor de Transformación", "PROVEEDOR",
-                 prov.id if prov else None),
-                ("recibo@akt.com", "Equipo Recibo AKT", "RECIBO_AKT", None),
-                ("inventarios@akt.com", "Equipo Inventarios", "INVENTARIOS", None),
-                ("planeacion@akt.com", "Planeación (Ochoa)", "PLANEACION", None),
-            ]
-            for email, nombre, rol, pid in usuarios:
-                s.add(Usuario(email=email, nombre=nombre, rol=rol, proveedor_id=pid,
-                              password_hash=hash_password("akt2026"), activo=True))
-            s.flush()
-            res["usuarios"] = len(usuarios)
+            if con_demo:
+                usuarios = [
+                    ("proveedor@akt.com", "Proveedor de Transformación", "PROVEEDOR",
+                     prov.id if prov else None),
+                    ("recibo@akt.com", "Equipo Recibo AKT", "RECIBO_AKT", None),
+                    ("inventarios@akt.com", "Equipo Inventarios", "INVENTARIOS", None),
+                    ("planeacion@akt.com", "Planeación", "PLANEACION", None),
+                ]
+                for email, nombre, rol, pid in usuarios:
+                    s.add(Usuario(email=email, nombre=nombre, rol=rol, proveedor_id=pid,
+                                  password_hash=hash_password("akt2026"), activo=True))
+                res["usuarios"] = len(usuarios)
 
-            # Ubicaciones del proveedor demo, para validar Desde/Hasta del BIN a BIN
-            if prov:
-                for u in s.query(Ubicacion).limit(12).all():
-                    u.proveedor_id = prov.id
-                s.flush()
+                # Solo en demo se asignan ubicaciones automáticamente.
+                if prov:
+                    for u in s.query(Ubicacion).limit(12).all():
+                        u.proveedor_id = prov.id
+            else:
+                email = str(_setting("BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
+                password = str(_setting("BOOTSTRAP_ADMIN_PASSWORD") or "")
+                nombre = str(_setting("BOOTSTRAP_ADMIN_NAME") or "Administrador inicial").strip()
+                if not email or not password or len(password) < 12:
+                    raise RuntimeError(
+                        "Base de producción sin usuarios. Configure BOOTSTRAP_ADMIN_EMAIL y "
+                        "BOOTSTRAP_ADMIN_PASSWORD (mínimo 12 caracteres) en Streamlit Secrets.")
+                s.add(Usuario(email=email, nombre=nombre, rol="INVENTARIOS",
+                              proveedor_id=None, password_hash=hash_password(password),
+                              activo=True))
+                res["usuarios"] = 1
+            s.flush()
 
         # ---------- órdenes de compra demo ----------
         if con_demo and s.query(func.count(OrdenCompra.id)).scalar() == 0:
