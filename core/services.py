@@ -327,8 +327,9 @@ class LineaRecibo:
 def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
                  referencia=None, usuario=None, es_reproceso=False,
                  ubicacion_destino="", archivo_id=None, fecha_documento=None,
-                 observaciones=None, proveedor_origen_id=None, extraccion=None,
-                 actor=None) -> Recibo:
+                 observaciones=None, proveedor_origen_id=None,
+                 proveedor_origen_nombre=None, proveedor_origen_nit=None,
+                 extraccion=None, actor=None) -> Recibo:
     """Crea el recibo. BIN/FACTURA no impactan inventario hasta completar match por línea."""
     if origen not in ("BIN_A_BIN", "FACTURA", "REGISTRO"):
         raise ReglaNegocio(f"Origen de recibo no válido: {origen}")
@@ -364,8 +365,10 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
     estado_inicial = "PENDIENTE_MATCH" if origen == "BIN_A_BIN" else "BORRADOR"
     r = Recibo(
         documento_id=doc.id, proveedor_id=proveedor_id,
-        proveedor_origen_id=proveedor_origen_id, origen=origen,
-        estado=estado_inicial, es_reproceso=bool(es_reproceso),
+        proveedor_origen_id=proveedor_origen_id,
+        proveedor_origen_nombre=(proveedor_origen_nombre or None),
+        proveedor_origen_nit=(proveedor_origen_nit or None),
+        origen=origen, estado=estado_inicial, es_reproceso=bool(es_reproceso),
         ubicacion_destino=(ubicacion_destino or "").upper(), creado_por=usuario)
     s.add(r)
     s.flush()
@@ -430,7 +433,7 @@ def sellar_recibo(s, recibo_id: int, usuario: str, actor=None) -> Recibo:
     r.sellado_por = usuario
     r.sellado_en = dt.datetime.utcnow()
     s.flush()
-    auditar(s, usuario, None, "SELLAR_RECIBO", "recibos", r.id, "")
+    auditar(s, usuario, _actor_rol(actor), "SELLAR_RECIBO", "recibos", r.id, "")
     return r
 
 
@@ -494,7 +497,7 @@ def adjuntar_bin_y_match(s, *, recibo_id, usuario, lineas_oc=None,
         oc = s.get(OrdenCompra, int(oc_id))
         if not oc:
             raise ReglaNegocio(f"OC inexistente para la línea {ln.articulo}.")
-        if oc.estado != "ABIERTA":
+        if oc.estado != "ABIERTA" and oc.id not in ocs_usadas:
             raise ReglaNegocio(f"La orden de compra {oc.numero} no está ABIERTA.")
         if oc.proveedor_id != r.proveedor_id:
             raise ReglaNegocio(f"La OC {oc.numero} pertenece a otro proveedor.")
@@ -503,7 +506,7 @@ def adjuntar_bin_y_match(s, *, recibo_id, usuario, lineas_oc=None,
                 f"La OC {oc.numero} corresponde a {oc.articulo}, no a {ln.articulo}.")
 
         esperado = max(0.0, float(oc.pendiente or 0))
-        if esperado <= TOL:
+        if esperado <= TOL and oc.id not in ocs_usadas:
             raise ReglaNegocio(f"La OC {oc.numero} ya no tiene saldo pendiente.")
         recibido = max(0.0, float(ln.cantidad_fisica or 0))
         aplicado = min(recibido, esperado)
@@ -609,6 +612,7 @@ def confirmar_recibo_simple(s, recibo_id: int, usuario=None, actor=None) -> Reci
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
+    _exigir_rol(actor, "PROVEEDOR", "RECIBO_AKT", "INVENTARIOS")
     _exigir_proveedor(actor, r.proveedor_id)
     if r.origen != "REGISTRO":
         raise ReglaNegocio("BIN a BIN y FACTURA deben pasar por el match contra OC.")
@@ -642,6 +646,8 @@ def registrar_novedad(s, *, recibo_id=None, proveedor_id=None, articulo, tipo,
     if not proveedor_id:
         raise ReglaNegocio("Falta el proveedor de la novedad.")
     _exigir_proveedor(actor, proveedor_id)
+    if actor is not None:
+        _exigir_rol(actor, "PROVEEDOR", "RECIBO_AKT", "INVENTARIOS")
 
     if tipo == "AVERIA" and not evidencia_id:
         raise ReglaNegocio(
