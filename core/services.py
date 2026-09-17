@@ -612,6 +612,7 @@ def registrar_novedad(s, *, recibo_id=None, proveedor_id=None, articulo, tipo,
     """Registra una diferencia distinguiendo recepción vs hallazgo físico."""
     if tipo not in ("FALTANTE", "SOBRANTE", "AVERIA"):
         raise ReglaNegocio(f"Tipo de novedad no válido: {tipo}")
+    _exigir_rol(actor, "PLANEACION")
     cantidad = float(cantidad or 0)
     if cantidad <= 0:
         raise ReglaNegocio("La cantidad de la novedad debe ser mayor que cero.")
@@ -754,7 +755,8 @@ def cola_inventarios(s, proveedor_id=None):
 # =========================================================================
 
 def programar_conteo(s, *, proveedor_id, articulo, ubicacion="", fecha_programada=None,
-                     prioridad=3, usuario=None) -> ConteoProgramado:
+                     prioridad=3, usuario=None, actor=None) -> ConteoProgramado:
+    _exigir_rol(actor, "INVENTARIOS")
     doc = crear_documento(s, "CONTEO", proveedor_id=proveedor_id,
                           referencia=f"PROG:{articulo}", creado_por=usuario)
     c = ConteoProgramado(documento_id=doc.id, proveedor_id=proveedor_id,
@@ -769,11 +771,14 @@ def programar_conteo(s, *, proveedor_id, articulo, ubicacion="", fecha_programad
 
 def ejecutar_conteo(s, *, proveedor_id, articulo, cantidad_fisica, ubicacion="",
                     programado_id=None, usuario=None, observaciones=None,
-                    estado_inv="CRUDO") -> ConteoEjecutado:
+                    estado_inv="CRUDO", actor=None) -> ConteoEjecutado:
     """
     Registra el conteo. Si hay discrepancia genera cola de trabajo para que
     el equipo de Inventarios haga el análisis mayor.
     """
+    _exigir_proveedor(actor, proveedor_id)
+    if actor is not None:
+        _exigir_rol(actor, "PROVEEDOR", "INVENTARIOS")
     sistema = (obtener_saldo(s, proveedor_id, articulo, ubicacion, estado_inv, "DISPONIBLE")
                if ubicacion else saldo_articulo(s, proveedor_id, articulo, estado_inv, "DISPONIBLE"))
     fisica = float(cantidad_fisica or 0)
@@ -798,7 +803,9 @@ def ejecutar_conteo(s, *, proveedor_id, articulo, cantidad_fisica, ubicacion="",
     return ce
 
 
-def ajustar_conteo(s, *, conteo_id, documento_ajuste, numero_ajuste, usuario) -> ConteoEjecutado:
+def ajustar_conteo(s, *, conteo_id, documento_ajuste, numero_ajuste, usuario,
+                   actor=None) -> ConteoEjecutado:
+    _exigir_rol(actor, "INVENTARIOS")
     ce = s.get(ConteoEjecutado, conteo_id)
     if not ce:
         raise ReglaNegocio("Conteo inexistente.")
@@ -873,8 +880,11 @@ MOTIVOS_AVERIA = ("ORIGEN", "MANIPULACION", "PUESTA_A_PUNTO", "AKT")
 def registrar_averia(s, *, proveedor_id, articulo, cantidad, motivo,
                      momento="PRODUCCION", evidencia_id=None, usuario=None,
                      estado_inventario="CRUDO", observaciones=None,
-                     descontar=True) -> Averia:
+                     descontar=True, actor=None) -> Averia:
     """Requiere evidencia fotográfica de la destrucción."""
+    _exigir_proveedor(actor, proveedor_id)
+    if actor is not None:
+        _exigir_rol(actor, "PROVEEDOR", "INVENTARIOS")
     if motivo not in MOTIVOS_AVERIA:
         raise ReglaNegocio(f"Motivo de avería no válido. Use: {', '.join(MOTIVOS_AVERIA)}")
     cantidad = float(cantidad or 0)
@@ -944,18 +954,29 @@ def tolerancia_averias(s, proveedor_id=None, desde=None, hasta=None):
 # PRODUCCIÓN (MPS) Y SUBCONTRATACIÓN
 # =========================================================================
 
-def explosion_bom(s, articulo_transformado: str) -> list[Bom]:
-    return s.query(Bom).filter(
+def explosion_bom(s, articulo_transformado: str, proveedor_id=None) -> list[Bom]:
+    """BOM específico del proveedor; usa BOM global solo si no existe uno específico."""
+    base = s.query(Bom).filter(
         Bom.articulo_transformado == str(articulo_transformado).strip(),
-        Bom.activo.is_(True)).order_by(Bom.secuencia).all()
-
+        Bom.activo.is_(True))
+    if not proveedor_id:
+        return base.order_by(Bom.secuencia).all()
+    p = s.get(Proveedor, proveedor_id)
+    if not p:
+        return []
+    especifico = base.filter(Bom.proveedor_codigo == p.codigo).order_by(Bom.secuencia).all()
+    if especifico:
+        return especifico
+    return base.filter(
+        (Bom.proveedor_codigo.is_(None)) | (Bom.proveedor_codigo == "")
+    ).order_by(Bom.secuencia).all()
 
 def maximo_producible(s, proveedor_id, articulo_transformado) -> tuple[float, list[dict]]:
     """
     Cuánto se puede transformar con el inventario CRUDO DISPONIBLE actual,
     descontando lo ya comprometido en MPS abiertos.
     """
-    lineas = explosion_bom(s, articulo_transformado)
+    lineas = explosion_bom(s, articulo_transformado, proveedor_id)
     if not lineas:
         return 0.0, []
     comprometido = _componentes_comprometidos(s, proveedor_id, excluir_mps=None)
@@ -986,14 +1007,14 @@ def _componentes_comprometidos(s, proveedor_id, excluir_mps=None) -> dict:
         pend = float(m.pendiente or 0)
         if pend <= 0:
             continue
-        for b in explosion_bom(s, m.articulo):
+        for b in explosion_bom(s, m.articulo, proveedor_id):
             comp[b.componente] = comp.get(b.componente, 0.0) + pend * float(b.cantidad or 1)
     return comp
 
 
 def programar_mps(s, *, proveedor_id, articulo, cantidad, fecha_programada=None,
                   usuario=None, ubicacion_destino="", observaciones=None,
-                  validar_existencias=True) -> ProgramaProduccion:
+                  validar_existencias=True, actor=None) -> ProgramaProduccion:
     """
     Planeación sugiere qué transformar. Se valida existencia de componentes y
     se controla que no se programe de más.
@@ -1001,7 +1022,7 @@ def programar_mps(s, *, proveedor_id, articulo, cantidad, fecha_programada=None,
     cantidad = float(cantidad or 0)
     if cantidad <= 0:
         raise ReglaNegocio("La cantidad a programar debe ser mayor que cero.")
-    if not explosion_bom(s, articulo):
+    if not explosion_bom(s, articulo, proveedor_id):
         raise ReglaNegocio(
             f"El artículo {articulo} no tiene BOM cargado: no se puede programar su transformación.")
 
@@ -1032,7 +1053,8 @@ def programar_mps(s, *, proveedor_id, articulo, cantidad, fecha_programada=None,
 
 
 def ejecutar_produccion(s, *, mps_id, cantidad, usuario=None,
-                        ubicacion_origen="", ubicacion_destino=None) -> OrdenProduccion:
+                        ubicacion_origen="", ubicacion_destino=None,
+                        actor=None) -> OrdenProduccion:
     """
     Ejecuta la transformación: consume los componentes (CRUDO) según el BOM y
     produce el artículo transformado (PROCESADO). Actualiza el inventario.
@@ -1040,6 +1062,8 @@ def ejecutar_produccion(s, *, mps_id, cantidad, usuario=None,
     m = s.get(ProgramaProduccion, mps_id)
     if not m:
         raise ReglaNegocio("Programa de producción inexistente.")
+    _exigir_rol(actor, "PROVEEDOR")
+    _exigir_proveedor(actor, m.proveedor_id)
     if m.estado in ("EJECUTADO", "CERRADO", "CANCELADO"):
         raise ReglaNegocio(f"El programa ya está {m.estado}.")
     cantidad = float(cantidad or 0)
@@ -1051,7 +1075,7 @@ def ejecutar_produccion(s, *, mps_id, cantidad, usuario=None,
             f"{m.pendiente:,.0f} (programado {m.cantidad_programada:,.0f}, "
             f"ejecutado {m.cantidad_ejecutada:,.0f}).")
 
-    lineas = explosion_bom(s, m.articulo)
+    lineas = explosion_bom(s, m.articulo, m.proveedor_id)
     if not lineas:
         raise ReglaNegocio(f"El artículo {m.articulo} no tiene BOM activo.")
 
@@ -1137,7 +1161,9 @@ def cumplimiento_mps(s, proveedor_id=None, desde=None, hasta=None):
 
 def crear_despacho(s, *, proveedor_id, lineas, lote=None, plan_ensamble=None,
                    usuario=None, ubicacion_origen="", archivo_id=None,
-                   observaciones=None) -> Despacho:
+                   observaciones=None, actor=None) -> Despacho:
+    _exigir_rol(actor, "PROVEEDOR")
+    _exigir_proveedor(actor, proveedor_id)
     if not lineas:
         raise ReglaNegocio("El despacho debe tener al menos una línea.")
     doc = crear_documento(s, "DESPACHO", proveedor_id=proveedor_id,
@@ -1163,11 +1189,13 @@ def crear_despacho(s, *, proveedor_id, lineas, lote=None, plan_ensamble=None,
 
 
 def confirmar_despacho(s, *, despacho_id, usuario=None,
-                       estado_inventario="PROCESADO") -> Despacho:
+                       estado_inventario="PROCESADO", actor=None) -> Despacho:
     """Descarga el artículo del inventario y marca el lote como despachado."""
     d = s.get(Despacho, despacho_id)
     if not d:
         raise ReglaNegocio("Despacho inexistente.")
+    _exigir_rol(actor, "PROVEEDOR")
+    _exigir_proveedor(actor, d.proveedor_id)
     if d.estado == "DESPACHADO":
         raise ReglaNegocio("El despacho ya fue confirmado.")
 
