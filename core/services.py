@@ -117,6 +117,13 @@ def leer_archivo(archivo: Archivo) -> bytes:
     return b""
 
 def auditar(s, usuario, rol, accion, entidad, entidad_id, detalle=""):
+    if not rol and usuario:
+        try:
+            from core.models import Usuario
+            u = s.query(Usuario).filter(Usuario.email == usuario).first()
+            rol = u.rol if u else None
+        except Exception:
+            rol = None
     s.add(Auditoria(usuario=usuario, rol=rol, accion=accion, entidad=entidad,
                     entidad_id=str(entidad_id), detalle=detalle))
 
