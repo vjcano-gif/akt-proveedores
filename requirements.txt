@@ -12,3 +12,5 @@ requests>=2.32.0
 pymupdf>=1.28.2
 rapidocr>=3.9.2
 onnxruntime>=1.30.0
+pytesseract>=0.3.13
+Pillow>=11.0.0
