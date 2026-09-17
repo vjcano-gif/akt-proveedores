@@ -97,3 +97,37 @@ def alcance_proveedor(user: dict | None) -> int | None:
     if user and user.get("rol") == "PROVEEDOR":
         return user.get("proveedor_id")
     return None
+
+
+
+def _setting(name: str, default=None):
+    try:
+        import streamlit as st
+        value = st.secrets.get(name)
+        if value not in (None, ""):
+            return value
+    except Exception:
+        pass
+    return os.environ.get(name, default)
+
+
+def ensure_bootstrap_user() -> bool:
+    """Crea el primer usuario INVENTARIOS solo desde secretos de despliegue.
+
+    Nunca usa credenciales predeterminadas en PostgreSQL/Supabase.
+    """
+    email = str(_setting("BOOTSTRAP_ADMIN_EMAIL", "") or "").strip().lower()
+    password = str(_setting("BOOTSTRAP_ADMIN_PASSWORD", "") or "")
+    nombre = str(_setting("BOOTSTRAP_ADMIN_NAME", "Administrador Inventarios") or
+                 "Administrador Inventarios").strip()
+    if not email or not password:
+        return False
+    if len(password) < 12:
+        raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD debe tener al menos 12 caracteres.")
+    with session_scope() as s:
+        if s.query(Usuario.id).first() is not None:
+            return False
+        s.add(Usuario(
+            email=email, nombre=nombre, rol="INVENTARIOS", proveedor_id=None,
+            password_hash=hash_password(password), activo=True))
+    return True
