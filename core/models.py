@@ -135,7 +135,9 @@ class Archivo(Base):
     nombre = Column(String(260), nullable=False)
     mime = Column(String(120))
     tamano = Column(Integer)
-    contenido = Column(LargeBinary)
+    contenido = Column(LargeBinary)  # fallback local; en producción se prefiere Storage
+    storage_path = Column(String(500))
+    sha256 = Column(String(64), index=True)
     subido_por = Column(String(160))
     subido_en = Column(DateTime, default=now)
 
@@ -143,6 +145,14 @@ class Archivo(Base):
 # =========================================================================
 # TRAZABILIDAD DOCUMENTAL
 # =========================================================================
+
+class Consecutivo(Base):
+    """Contador transaccional por tipo/año para generar TRZ sin colisiones."""
+    __tablename__ = "consecutivos"
+    clave = Column(String(40), primary_key=True)
+    valor = Column(Integer, nullable=False, default=0)
+    actualizado_en = Column(DateTime, default=now, onupdate=now)
+
 
 class Documento(Base):
     """
@@ -180,6 +190,8 @@ class Recibo(Base):
     id = Column(Integer, primary_key=True)
     documento_id = Column(Integer, ForeignKey("documentos.id"), nullable=False)
     proveedor_id = Column(Integer, ForeignKey("proveedores.id"), nullable=False, index=True)
+    proveedor_origen_id = Column(Integer, ForeignKey("proveedores.id"), index=True)
+    factura_origen = Column(String(120))
     # BIN_A_BIN (materia prima cruda desde MOTOS) | FACTURA (proveedor origen) | REGISTRO
     origen = Column(String(20), nullable=False)
     # BORRADOR | SELLADO | PENDIENTE_MATCH | NOVEDAD | CERRADA
@@ -194,7 +206,8 @@ class Recibo(Base):
     cerrado_en = Column(DateTime)
 
     documento = relationship("Documento")
-    proveedor = relationship("Proveedor")
+    proveedor = relationship("Proveedor", foreign_keys=[proveedor_id])
+    proveedor_origen = relationship("Proveedor", foreign_keys=[proveedor_origen_id])
     orden_compra = relationship("OrdenCompra")
     lineas = relationship("ReciboLinea", back_populates="recibo",
                           cascade="all, delete-orphan")
@@ -212,11 +225,15 @@ class ReciboLinea(Base):
     serial = Column(String(60))
     ubicacion_desde = Column(String(80))
     ubicacion_hasta = Column(String(80))
+    orden_compra_id = Column(Integer, ForeignKey("ordenes_compra.id"), index=True)
+    cantidad_match = Column(Float, default=0.0)
+    estado_match = Column(String(20))  # EXACTO | FALTANTE | SOBRANTE | PENDIENTE
     # DISPONIBLE | RESTRINGIDO
     condicion = Column(String(20), default="DISPONIBLE")
     procesada = Column(Boolean, default=False)
 
     recibo = relationship("Recibo", back_populates="lineas")
+    orden_compra = relationship("OrdenCompra")
 
     @property
     def diferencia(self):
