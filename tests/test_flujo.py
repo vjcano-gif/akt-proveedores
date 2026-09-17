@@ -1,5 +1,6 @@
 """Pruebas end-to-end de integridad del flujo operativo."""
 import datetime as dt
+import io
 import os
 import sys
 import tempfile
@@ -8,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test.db"))
 
 from core.db import init_db, session_scope  # noqa: E402
-from core.document_ai import estructurar  # noqa: E402
+from core.document_ai import analizar_documento, estructurar  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -302,6 +303,40 @@ ext = estructurar(sample, 0.99)
 check("Extractor identifica referencia", ext["referencia"]["valor"] is not None)
 check("Extractor identifica OC", ext["orden_compra"]["valor"] == "OC-2026-0001")
 check("Extractor propone líneas", len(ext["lineas"]) >= 2)
+
+print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
+try:
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (1500, 620), "white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 52)
+    except Exception:
+        font = ImageFont.load_default()
+
+    y = 35
+    for linea in (
+        "FACTURA FV-3-8619",
+        "NIT 900123456-7",
+        "ORDEN DE COMPRA OC-2026-0001",
+        "FECHA 17/09/2026",
+        "CP-A Carenaje Crudo 100",
+        "CP-B Calca 55",
+    ):
+        draw.text((50, y), linea, fill="black", font=font)
+        y += 88
+
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    ocr = analizar_documento("factura_prueba.png", bio.getvalue(), "image/png")
+    texto_ocr = (ocr.get("texto") or "").upper()
+    check("OCR real devuelve texto", bool(ocr.get("ocr_ok")), ocr.get("diagnostico", ""))
+    check("OCR real reconoce FACTURA", "FACTURA" in texto_ocr, texto_ocr[:120])
+    check("OCR real reconoce artículo CP-A",
+          ("CP-A" in texto_ocr) or ("CP A" in texto_ocr), texto_ocr[:200])
+except Exception as e:
+    check("OCR real ejecuta sin excepción", False, f"{type(e).__name__}: {e}")
 
 print("\n=== 11. KARDEX ===")
 with session_scope() as s:
