@@ -174,7 +174,6 @@ def _clave(proveedor_id, articulo, ubicacion, estado, condicion):
 def obtener_saldo(s, proveedor_id, articulo, ubicacion="", estado="CRUDO",
                   condicion="DISPONIBLE") -> float:
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
-    _validar_ubicacion_movimiento(s, p, u, c, cantidad)
     row = s.query(Inventario).filter_by(
         proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c).first()
     return float(row.cantidad) if row else 0.0
@@ -205,6 +204,7 @@ def mover_inventario(s, *, proveedor_id, articulo, cantidad, tipo,
         return obtener_saldo(s, proveedor_id, articulo, ubicacion, estado, condicion)
 
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
+    _validar_ubicacion_movimiento(s, p, u, c, cantidad)
     row = s.query(Inventario).filter_by(
         proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c).first()
     if row is None:
