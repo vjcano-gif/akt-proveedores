@@ -179,11 +179,26 @@ class Documento(Base):
 
     proveedor = relationship("Proveedor")
     archivo = relationship("Archivo")
+    adjuntos = relationship("DocumentoArchivo", back_populates="documento",
+                            cascade="all, delete-orphan")
 
     @property
     def antiguedad_dias(self):
         base = self.creado_en or now()
         return (now() - base).days
+
+
+class DocumentoArchivo(Base):
+    """Permite conservar factura, BIN y otros soportes sin sobrescribir archivos."""
+    __tablename__ = "documento_archivos"
+    id = Column(Integer, primary_key=True)
+    documento_id = Column(Integer, ForeignKey("documentos.id"), nullable=False, index=True)
+    archivo_id = Column(Integer, ForeignKey("archivos.id"), nullable=False)
+    tipo = Column(String(30), default="SOPORTE")
+    creado_en = Column(DateTime, default=now)
+
+    documento = relationship("Documento", back_populates="adjuntos")
+    archivo = relationship("Archivo")
 
 
 # =========================================================================
