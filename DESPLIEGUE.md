@@ -125,3 +125,19 @@ Cada Pull Request y cada push a `main` o `fix/**` ejecuta:
 2. compilación de `core/`, `app_pages/` y `streamlit_app.py`;
 3. prueba end-to-end de recibo, multi-OC, faltantes, sobrantes, conteos,
    averías, producción, despacho, trazabilidad y kardex.
+
+
+## Arranque seguro en producción
+
+En producción configure estos Secrets antes del primer arranque:
+
+```toml
+DEMO_MODE = false
+BOOTSTRAP_ADMIN_EMAIL = "admin@suempresa.com"
+BOOTSTRAP_ADMIN_PASSWORD = "una-clave-de-al-menos-12-caracteres"
+BOOTSTRAP_ADMIN_NAME = "Administrador inicial"
+```
+
+Con `DEMO_MODE = false` la aplicación **no crea ni muestra** las cuentas
+`@akt.com / akt2026`. Las cuentas demo solo se habilitan de forma explícita
+o cuando se ejecuta localmente sin `DATABASE_URL`.
