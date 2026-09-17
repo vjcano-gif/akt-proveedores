@@ -66,7 +66,7 @@ def _panel(user):
         if st.button("Confirmar y descargar del inventario", type="primary"):
             try:
                 with session_scope() as s:
-                    confirmar_despacho(s, despacho_id=did, usuario=user["email"])
+                    confirmar_despacho(s, despacho_id=did, usuario=user["email"], actor=user)
                 ui.ok("Lote despachado y descontado del inventario procesado.")
                 st.rerun()
             except ReglaNegocio as e:
@@ -151,7 +151,7 @@ def _registrar(user):
                 d = crear_despacho(s, proveedor_id=pid, lineas=lineas,
                                    lote=lote or None, plan_ensamble=plan or None,
                                    usuario=user["email"], ubicacion_origen=origen,
-                                   archivo_id=aid)
+                                   archivo_id=aid, actor=user)
                 trz, did = d.documento.trz, d.id
             ui.ok(f"Despacho **{trz}** creado en borrador. Confírmelo en la pestaña "
                   f"«Despachos» para descargar el inventario.")
