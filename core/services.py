@@ -21,6 +21,7 @@ from core.models import (
     ConteoProgramado, Despacho, DespachoLinea, Documento, FotoInventarioERP,
     Inventario, MovimientoInventario, Novedad, OrdenCompra, OrdenProduccion,
     ProgramaProduccion, Proveedor, Recibo, ReciboLinea, Auditoria, Ubicacion,
+    DocumentoArchivo,
 )
 
 TOL = 1e-6
@@ -111,6 +112,9 @@ def crear_documento(s, tipo, proveedor_id=None, referencia=None, archivo_id=None
     )
     s.add(doc)
     s.flush()
+    if archivo_id:
+        s.add(DocumentoArchivo(documento_id=doc.id, archivo_id=archivo_id, tipo="SOPORTE"))
+        s.flush()
     return doc
 
 
@@ -446,7 +450,10 @@ def adjuntar_bin_y_match(s, *, recibo_id, usuario, lineas_oc=None,
         raise ReglaNegocio("Este tipo de recibo no requiere match contra OC.")
 
     if archivo_id:
-        r.documento.archivo_id = archivo_id
+        s.add(DocumentoArchivo(documento_id=r.documento_id, archivo_id=archivo_id,
+                               tipo="BIN_A_BIN"))
+        if not r.documento.archivo_id:
+            r.documento.archivo_id = archivo_id
     if referencia_bin:
         r.documento.referencia = referencia_bin
 
