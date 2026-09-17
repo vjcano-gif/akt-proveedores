@@ -12,7 +12,7 @@ from core.services import (LineaRecibo, adjuntar_bin_y_match, confirmar_despacho
                            crear_despacho, crear_recibo, ejecutar_conteo,
                            ejecutar_produccion, guardar_archivo, programar_conteo,
                            programar_mps, registrar_averia, sellar_recibo,
-                           confirmar_recibo_simple, maximo_producible)
+                           maximo_producible, explosion_bom)
 
 FOTO = b"\x89PNG\r\n\x1a\n" + b"EVIDENCIA DEMO" * 10
 
@@ -29,7 +29,10 @@ def generar(proveedor_id=None, semilla=7) -> dict:
         prov = s.get(Proveedor, proveedor_id)
 
         ubis = [u.codigo for u in s.query(Ubicacion).filter(
-            Ubicacion.proveedor_id == proveedor_id).limit(4).all()]
+            Ubicacion.proveedor_id == proveedor_id,
+            Ubicacion.activo.is_(True), Ubicacion.cerrada.is_(False),
+            Ubicacion.restringida.is_(False), Ubicacion.inspeccion.is_(False)
+        ).limit(4).all()]
         if not ubis:
             ubis = [u.codigo for u in s.query(Ubicacion).limit(4).all()] or [""]
         ub_crudo, ub_proc = ubis[0], ubis[-1]
@@ -42,8 +45,7 @@ def generar(proveedor_id=None, semilla=7) -> dict:
                      .distinct().limit(6).all()]
         componentes = {}
         for t in trans:
-            componentes[t] = s.query(Bom).filter(
-                Bom.articulo_transformado == t).order_by(Bom.secuencia).all()
+            componentes[t] = explosion_bom(s, t, proveedor_id)
 
         # 1) RECIBO de componentes (BIN a BIN)
         lineas, vistos = [], set()
@@ -57,9 +59,19 @@ def generar(proveedor_id=None, semilla=7) -> dict:
                                           ubicacion_desde="MOTOS-ORIGEN",
                                           ubicacion_hasta=ub_crudo))
         r = crear_recibo(s, proveedor_id=proveedor_id, origen="BIN_A_BIN",
-                         referencia="BIN2686958", usuario="demo",
+                         referencia=f"BIN-DEMO-{dt.datetime.utcnow():%H%M%S%f}", usuario="demo",
                          ubicacion_destino=ub_crudo, lineas=lineas[:25])
-        confirmar_recibo_simple(s, r.id, "demo")
+        mapping = {}
+        for i, ln in enumerate(r.lineas, 1):
+            oc_bin = OrdenCompra(
+                numero=f"OC-DEMO-BIN-{r.id}-{i:02d}", proveedor_id=proveedor_id,
+                articulo=ln.articulo, cantidad=ln.cantidad_fisica,
+                estado="ABIERTA", fecha=dt.date.today())
+            s.add(oc_bin); s.flush()
+            mapping[ln.id] = oc_bin.id
+        adjuntar_bin_y_match(
+            s, recibo_id=r.id, lineas_oc=mapping, usuario="demo",
+            referencia_bin=r.documento.referencia)
         res["recibo_bin"] = r.documento.trz
 
         # 2) RECIBO por FACTURA con discrepancia -> NOVEDAD
