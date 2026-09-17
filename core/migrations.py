@@ -28,6 +28,7 @@ def run_migrations(engine):
 
         # recibos
         _add_column(conn, "recibos", "proveedor_origen_id", "INTEGER")
+        _add_column(conn, "recibos", "referencia_bin", "VARCHAR(120)")
 
         # líneas de recibo
         _add_column(conn, "recibo_lineas", "orden_compra_id", "INTEGER")
