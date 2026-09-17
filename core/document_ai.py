@@ -100,8 +100,16 @@ def _ocr_tesseract(img) -> tuple[str, float]:
         kwargs["lang"] = lang
     datos = pytesseract.image_to_data(rgb, **kwargs)
 
-    textos, confs = [], []
-    for txt, cf in zip(datos.get("text", []), datos.get("conf", [])):
+    lineas = {}
+    confs = []
+    textos = datos.get("text", [])
+    confidencias = datos.get("conf", [])
+    bloques = datos.get("block_num", [0] * len(textos))
+    parrafos = datos.get("par_num", [0] * len(textos))
+    numeros_linea = datos.get("line_num", list(range(len(textos))))
+
+    for txt, cf, bloque, parrafo, numero_linea in zip(
+            textos, confidencias, bloques, parrafos, numeros_linea):
         txt = str(txt or "").strip()
         if not txt:
             continue
@@ -111,10 +119,11 @@ def _ocr_tesseract(img) -> tuple[str, float]:
             score = -1
         if score < 0:
             continue
-        textos.append(txt)
+        clave = (bloque, parrafo, numero_linea)
+        lineas.setdefault(clave, []).append(txt)
         confs.append(score / 100.0)
 
-    texto = " ".join(textos).strip()
+    texto = "\n".join(" ".join(tokens) for tokens in lineas.values()).strip()
     confianza = sum(confs) / len(confs) if confs else 0.0
     return texto, confianza
 
