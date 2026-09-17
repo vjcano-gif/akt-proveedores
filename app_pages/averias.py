@@ -8,8 +8,8 @@ from core import ui
 from core.auth import alcance_proveedor, puede
 from core.db import session_scope
 from core.models import Averia, Proveedor
-from core.services import (MOTIVOS_AVERIA, ReglaNegocio, crear_documento,
-                           descontar_distribuido, guardar_archivo, registrar_averia,
+from core.services import (MOTIVOS_AVERIA, ReglaNegocio, ajustar_averia,
+                           guardar_archivo, leer_archivo, registrar_averia,
                            tolerancia_averias)
 
 MOMENTOS = ["RECIBO", "ALMACENAMIENTO", "PRODUCCION"]
@@ -88,7 +88,7 @@ def _panel(user):
                 a = s.get(Averia, aid)
                 if a.evidencia:
                     st.download_button(f"Ver evidencia: {a.evidencia.nombre}",
-                                       a.evidencia.contenido or b"",
+                                       leer_archivo(a.evidencia),
                                        file_name=a.evidencia.nombre, key=f"eva_{aid}")
             c1, c2 = st.columns(2)
             doc = c1.selectbox("Documento de ajuste", ["TD90", "TD96"], key="av_doc")
@@ -97,18 +97,9 @@ def _panel(user):
                          type="primary"):
                 try:
                     with session_scope() as s:
-                        a = s.get(Averia, aid)
-                        d = crear_documento(s, "AJUSTE", proveedor_id=a.proveedor_id,
-                                            referencia=f"{doc} {num or 'S/N'}",
-                                            creado_por=user["email"])
-                        descontar_distribuido(
-                            s, proveedor_id=a.proveedor_id, articulo=a.articulo,
-                            cantidad=a.cantidad, tipo="AJUSTE",
-                            estado=a.estado_inventario, condicion="RESTRINGIDO",
-                            documento_id=d.id, referencia=d.referencia,
-                            usuario=user["email"], permitir_negativo=True)
-                        a.estado = "AJUSTADA"
-                        a.documento_ajuste = doc
+                        ajustar_averia(
+                            s, averia_id=aid, documento_ajuste=doc,
+                            numero_ajuste=num, usuario=user["email"], actor=user)
                     ui.ok("Avería ajustada: el producto averiado salió del inventario.")
                     st.rerun()
                 except ReglaNegocio as e:
@@ -147,7 +138,7 @@ def _reportar(user):
                 a = registrar_averia(s, proveedor_id=pid, articulo=art, cantidad=cant,
                                      motivo=motivo, momento=momento, evidencia_id=eid,
                                      usuario=user["email"], estado_inventario=estado_inv,
-                                     observaciones=obs or None)
+                                     observaciones=obs or None, actor=user)
                 trz = a.documento.trz
             ui.ok(f"Avería **{trz}** registrada. El producto pasó a RESTRINGIDO y "
                   f"entró a la cola de Inventarios.")
