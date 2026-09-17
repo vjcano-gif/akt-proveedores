@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS bom (
 	proveedor_nombre VARCHAR(200), 
 	activo BOOLEAN, 
 	PRIMARY KEY (id), 
-	CONSTRAINT uq_bom_linea UNIQUE (articulo_transformado, componente, secuencia)
+	CONSTRAINT uq_bom_linea_proveedor UNIQUE (articulo_transformado, componente, secuencia, proveedor_codigo)
 );
 
 CREATE TABLE IF NOT EXISTS proveedores (
