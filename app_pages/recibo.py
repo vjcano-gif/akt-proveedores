@@ -64,7 +64,9 @@ def _consulta(user):
                 "Origen": r.origen,
                 "Referencia": r.documento.referencia if r.documento else "",
                 "Proveedor transformación": r.proveedor.nombre if r.proveedor else "",
-                "Proveedor origen": r.proveedor_origen.nombre if r.proveedor_origen else "",
+                "Proveedor origen": (
+                    r.proveedor_origen.nombre if r.proveedor_origen
+                    else (r.proveedor_origen_nombre or "")),
                 "Estado": r.estado,
                 "Líneas": len(r.lineas),
                 "Cantidad física": cant,
@@ -106,7 +108,10 @@ def _consulta(user):
             + ui.pill(r.estado), unsafe_allow_html=True)
         cols = st.columns(6)
         cols[0].metric("Transformador", r.proveedor.codigo if r.proveedor else "—")
-        cols[1].metric("Origen", r.proveedor_origen.codigo if r.proveedor_origen else "—")
+        cols[1].metric(
+            "Origen",
+            r.proveedor_origen.codigo if r.proveedor_origen
+            else (r.proveedor_origen_nombre or "—"))
         cols[2].metric("Referencia", r.documento.referencia or "—")
         cols[3].metric("BIN", r.referencia_bin or "—")
         cols[4].metric("Fecha documento", str(r.documento.fecha_documento))
@@ -224,19 +229,25 @@ def _registrar(user):
         "Ubicación destino", ubicaciones, key="rec_ubic_dest")
 
     proveedor_origen_id = None
+    proveedor_origen_nombre = None
+    proveedor_origen_nit = None
     if origen == "FACTURA":
+        detectado = (ext or {}).get("proveedor_origen") or {}
+        nom_ai = str(detectado.get("nombre") or "")
+        nit_ai = str(detectado.get("nit") or "")
         with session_scope() as s:
             provs = s.query(Proveedor).filter(
                 Proveedor.activo.is_(True), Proveedor.id != pid).order_by(Proveedor.nombre).all()
-            opciones_prov = {"— no identificado —": None}
+            opciones_prov = {"— proveedor externo/no homologado —": None}
             opciones_prov.update({f"{p.nombre} ({p.codigo})": p.id for p in provs})
-        psel = st.selectbox("Proveedor ORIGEN", list(opciones_prov), key="rec_prov_origen")
+        psel = st.selectbox("Proveedor ORIGEN homologado (si aplica)",
+                            list(opciones_prov), key="rec_prov_origen")
         proveedor_origen_id = opciones_prov[psel]
-
-        nit_ai = ((ext or {}).get("proveedor_origen") or {}).get("nit")
-        nom_ai = ((ext or {}).get("proveedor_origen") or {}).get("nombre")
-        if nit_ai or nom_ai:
-            st.caption(f"Detectado en documento: {nom_ai or '—'} · NIT {nit_ai or '—'}")
+        cpo1, cpo2 = st.columns(2)
+        proveedor_origen_nombre = cpo1.text_input(
+            "Nombre proveedor origen", value=nom_ai, key="rec_prov_origen_nombre")
+        proveedor_origen_nit = cpo2.text_input(
+            "NIT proveedor origen", value=nit_ai, key="rec_prov_origen_nit")
 
     c1, c2 = st.columns([1, 2])
     reproceso = c1.checkbox(
@@ -338,7 +349,8 @@ def _registrar(user):
                         s, soporte.name, soporte.getvalue(), soporte.type, user["email"]).id
                 r = crear_recibo(
                     s, proveedor_id=pid, proveedor_origen_id=proveedor_origen_id,
-                    origen=origen, lineas=lineas, referencia=referencia or None,
+                    proveedor_origen_nombre=proveedor_origen_nombre,
+                    proveedor_origen_nit=proveedor_origen_nit, origen=origen, lineas=lineas, referencia=referencia or None,
                     usuario=user["email"], es_reproceso=reproceso,
                     ubicacion_destino=ubic_dest, archivo_id=arch_id,
                     fecha_documento=fecha_doc, extraccion=ext, actor=user)
