@@ -109,7 +109,8 @@ def _programar(user):
                         programar_mps(s, proveedor_id=pid, articulo=art,
                                       cantidad=float(r.get("cantidad") or 0),
                                       fecha_programada=f, usuario=user["email"],
-                                      ubicacion_destino=str(r.get("ubicacion_destino") or ""))
+                                      ubicacion_destino=str(r.get("ubicacion_destino") or ""),
+                                      actor=user)
                         okc += 1
                     except ReglaNegocio as e:
                         errores.append(f"{art}: {e}")
@@ -152,7 +153,7 @@ def _programar(user):
                 m = programar_mps(s, proveedor_id=pid, articulo=art.strip(),
                                   cantidad=cant, fecha_programada=fecha,
                                   usuario=user["email"], ubicacion_destino=dest,
-                                  observaciones=obs or None)
+                                  observaciones=obs or None, actor=user)
                 trz = m.documento.trz
             ui.ok(f"Programa **{trz}** creado.")
         except ReglaNegocio as e:
@@ -185,7 +186,7 @@ def _ejecutar(user):
     art, pend, dest_def = info[mid]
 
     with session_scope() as s:
-        lineas = explosion_bom(s, art)
+        lineas = explosion_bom(s, art, pid)
         det = [{"Componente": b.componente, "Descripción": b.desc_componente,
                 "Req. x unidad": b.cantidad,
                 "Disponible": saldo_articulo(s, pid, b.componente, "CRUDO", "DISPONIBLE")}
@@ -214,7 +215,7 @@ def _ejecutar(user):
                 o = ejecutar_produccion(s, mps_id=mid, cantidad=cant,
                                         usuario=user["email"],
                                         ubicacion_origen=origen,
-                                        ubicacion_destino=destino)
+                                        ubicacion_destino=destino, actor=user)
                 trz, n = o.documento.trz, len(o.consumos)
             ui.ok(f"Orden **{trz}** ejecutada: se consumieron {n} componentes del "
                   f"inventario crudo y se produjeron {cant:,.0f} unidades de {art} "
@@ -247,7 +248,7 @@ def _bom(user):
         return
 
     with session_scope() as s:
-        lineas = explosion_bom(s, art.strip())
+        lineas = explosion_bom(s, art.strip(), pid)
         if not lineas:
             st.warning("Ese artículo no tiene BOM cargado.")
             return
