@@ -95,7 +95,7 @@ def _cumplimiento(user):
             try:
                 with session_scope() as s:
                     ajustar_conteo(s, conteo_id=cid, documento_ajuste=doc,
-                                   numero_ajuste=num or "S/N", usuario=user["email"])
+                                   numero_ajuste=num or "S/N", usuario=user["email"], actor=user)
                 ui.ok("Conteo ajustado e inventario actualizado.")
                 st.rerun()
             except ReglaNegocio as e:
@@ -132,7 +132,7 @@ def _programar(user):
                                      ubicacion=str(r.get("ubicacion") or ""),
                                      fecha_programada=f,
                                      prioridad=int(float(r.get("prioridad") or 3)),
-                                     usuario=user["email"])
+                                     usuario=user["email"], actor=user)
                     n += 1
             ui.ok(f"{n} conteos programados.")
         return
@@ -149,7 +149,7 @@ def _programar(user):
         with session_scope() as s:
             c = programar_conteo(s, proveedor_id=pid, articulo=art.strip(),
                                  ubicacion=ubic, fecha_programada=fecha,
-                                 prioridad=prio, usuario=user["email"])
+                                 prioridad=prio, usuario=user["email"], actor=user)
             trz = c.documento.trz
         ui.ok(f"Conteo programado. Trazabilidad: **{trz}**")
 
