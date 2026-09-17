@@ -28,7 +28,7 @@ def _b(v):
     return str(v).strip().lower() in ("true", "1", "y", "si", "sí", "yes")
 
 
-def sembrar(force=False, con_demo=True) -> dict:
+def sembrar(force=False, con_demo=True, crear_usuarios_demo=True) -> dict:
     """Idempotente: solo carga lo que falta."""
     init_db()
     res = {}
@@ -119,8 +119,8 @@ def sembrar(force=False, con_demo=True) -> dict:
                 s.bulk_save_objects(objs); s.flush()
             res["bom"] = n
 
-        # ---------- usuarios demo ----------
-        if s.query(func.count(Usuario.id)).scalar() == 0:
+        # ---------- usuarios demo (solo desarrollo local) ----------
+        if crear_usuarios_demo and s.query(func.count(Usuario.id)).scalar() == 0:
             prov = (s.query(Proveedor).filter(Proveedor.nombre.ilike("%DL Plus%")).first()
                     or s.query(Proveedor).order_by(Proveedor.id).first())
             usuarios = [
