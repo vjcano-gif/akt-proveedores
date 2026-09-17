@@ -6,7 +6,7 @@ from core import ui
 from core.auth import alcance_proveedor, puede
 from core.db import session_scope
 from core.models import Novedad, Recibo
-from core.services import ReglaNegocio, ajustar_novedad, guardar_archivo, registrar_novedad
+from core.services import (ReglaNegocio, ajustar_novedad, guardar_archivo,\n                           leer_archivo, registrar_novedad)
 
 
 def render(user):
@@ -136,10 +136,10 @@ def _cola(user):
         st.caption(f"{n.tipo} · {n.articulo} · {n.cantidad:,.0f} · motivo {n.motivo}")
         if n.evidencia_id and n.evidencia:
             st.download_button(f"Ver evidencia: {n.evidencia.nombre}",
-                               n.evidencia.contenido or b"",
+                               leer_archivo(n.evidencia),
                                file_name=n.evidencia.nombre, key=f"ev_{nid}")
         efecto = {"AVERIA": "descuenta el producto restringido (destrucción)",
-                  "FALTANTE": "descuenta el faltante del inventario disponible",
+                  "FALTANTE": "cierra la diferencia documental sin volver a descontar inventario",
                   "SOBRANTE": "libera el sobrante de RESTRINGIDO a DISPONIBLE"}[n.tipo]
         st.info(f"Al ajustar, el sistema {efecto}.")
 
@@ -156,7 +156,7 @@ def _cola(user):
             with session_scope() as s:
                 ajustar_novedad(s, novedad_id=nid, documento_ajuste=doc,
                                 numero_ajuste=num.strip(), usuario=user["email"])
-            ui.ok(f"Novedad cerrada con {doc} {num}. Inventario actualizado.")
+            ui.ok(f"Novedad cerrada con {doc} {num}. Efecto de inventario aplicado según el tipo.")
             st.rerun()
         except ReglaNegocio as e:
             ui.err(str(e))
