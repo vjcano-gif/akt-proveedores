@@ -190,7 +190,7 @@ def _traza(user):
             d = s.query(Documento).filter(Documento.trz == sel).first()
             if d and d.archivo:
                 st.download_button(f"Descargar {d.archivo.nombre}",
-                                   d.archivo.contenido or b"",
+                                   leer_archivo(d.archivo),
                                    file_name=d.archivo.nombre, key="dl_trz")
             else:
                 st.caption("Ese documento no tiene soporte adjunto.")
