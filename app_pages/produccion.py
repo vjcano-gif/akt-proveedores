@@ -185,7 +185,7 @@ def _ejecutar(user):
     art, pend, dest_def = info[mid]
 
     with session_scope() as s:
-        lineas = explosion_bom(s, art)
+        lineas = explosion_bom(s, art, pid)
         det = [{"Componente": b.componente, "Descripción": b.desc_componente,
                 "Req. x unidad": b.cantidad,
                 "Disponible": saldo_articulo(s, pid, b.componente, "CRUDO", "DISPONIBLE")}
@@ -247,7 +247,7 @@ def _bom(user):
         return
 
     with session_scope() as s:
-        lineas = explosion_bom(s, art.strip())
+        lineas = explosion_bom(s, art.strip(), pid)
         if not lineas:
             st.warning("Ese artículo no tiene BOM cargado.")
             return

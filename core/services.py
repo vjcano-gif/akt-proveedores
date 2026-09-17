@@ -8,16 +8,18 @@ Condición:             DISPONIBLE | RESTRINGIDO
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import math
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from core.models import (
     Archivo, Articulo, Averia, Bom, ConsumoProduccion, ConteoEjecutado,
     ConteoProgramado, Despacho, DespachoLinea, Documento, FotoInventarioERP,
     Inventario, MovimientoInventario, Novedad, OrdenCompra, OrdenProduccion,
-    ProgramaProduccion, Proveedor, Recibo, ReciboLinea, Auditoria,
+    ProgramaProduccion, Proveedor, Recibo, ReciboLinea, Auditoria, Consecutivo,
+    Ubicacion,
 )
 
 TOL = 1e-6
@@ -39,16 +41,47 @@ PREFIJOS = {
 
 
 def nuevo_trz(s, tipo: str) -> str:
+    """Genera TRZ atómicamente; evita colisiones incluso al crear el primer contador."""
     anio = dt.date.today().year
     pre = PREFIJOS.get(tipo, "DOC")
+    clave = f"{pre}:{anio}"
     patron = f"TRZ-{pre}-{anio}-%"
-    n = s.query(func.count(Documento.id)).filter(Documento.trz.like(patron)).scalar() or 0
-    while True:
-        n += 1
-        cand = f"TRZ-{pre}-{anio}-{n:06d}"
-        if not s.query(Documento.id).filter(Documento.trz == cand).first():
-            return cand
 
+    # Permite migrar una base que ya tenía TRZ antes de existir la tabla consecutivos.
+    docs = s.query(Documento.trz).filter(Documento.trz.like(patron)).all()
+    maximo = 0
+    for (trz,) in docs:
+        try:
+            maximo = max(maximo, int(str(trz).rsplit("-", 1)[-1]))
+        except (TypeError, ValueError):
+            pass
+
+    dialecto = s.get_bind().dialect.name
+    if dialecto in ("postgresql", "sqlite"):
+        stmt = text("""
+            INSERT INTO consecutivos (clave, valor, actualizado_en)
+            VALUES (:clave, :inicial, :ahora)
+            ON CONFLICT (clave) DO UPDATE
+              SET valor = consecutivos.valor + 1,
+                  actualizado_en = :ahora
+            RETURNING valor
+        """)
+        valor = s.execute(stmt, {
+            "clave": clave, "inicial": maximo + 1,
+            "ahora": dt.datetime.utcnow(),
+        }).scalar_one()
+        return f"TRZ-{pre}-{anio}-{int(valor):06d}"
+
+    # Fallback para otros motores.
+    q = s.query(Consecutivo).filter(Consecutivo.clave == clave).with_for_update()
+    contador = q.first()
+    if contador is None:
+        contador = Consecutivo(clave=clave, valor=maximo)
+        s.add(contador)
+        s.flush()
+    contador.valor = max(int(contador.valor or 0), maximo) + 1
+    s.flush()
+    return f"TRZ-{pre}-{anio}-{contador.valor:06d}"
 
 def crear_documento(s, tipo, proveedor_id=None, referencia=None, archivo_id=None,
                     creado_por=None, fecha_documento=None, observaciones=None) -> Documento:
@@ -64,14 +97,48 @@ def crear_documento(s, tipo, proveedor_id=None, referencia=None, archivo_id=None
 
 
 def guardar_archivo(s, nombre, contenido: bytes, mime=None, usuario=None) -> Archivo:
-    a = Archivo(nombre=nombre, contenido=contenido, mime=mime,
-                tamano=len(contenido or b""), subido_por=usuario)
+    """Guarda evidencia; usa Supabase Storage si está configurado y DB como fallback."""
+    contenido = contenido or b""
+    digest = hashlib.sha256(contenido).hexdigest()
+    storage_path = None
+    db_content = contenido
+    try:
+        from core.storage import upload_bytes
+        storage_path = upload_bytes(nombre, contenido, mime=mime)
+        if storage_path:
+            db_content = None
+    except Exception:
+        # La evidencia nunca se pierde por una falla del storage externo.
+        storage_path = None
+        db_content = contenido
+    a = Archivo(nombre=nombre, contenido=db_content, storage_path=storage_path,
+                sha256=digest, mime=mime, tamano=len(contenido), subido_por=usuario)
     s.add(a)
     s.flush()
     return a
 
 
+def leer_archivo(archivo: Archivo) -> bytes:
+    if archivo is None:
+        return b""
+    if archivo.contenido is not None:
+        return bytes(archivo.contenido)
+    if archivo.storage_path:
+        try:
+            from core.storage import download_bytes
+            return download_bytes(archivo.storage_path)
+        except Exception:
+            return b""
+    return b""
+
 def auditar(s, usuario, rol, accion, entidad, entidad_id, detalle=""):
+    if not rol and usuario:
+        try:
+            from core.models import Usuario
+            u = s.query(Usuario).filter(Usuario.email == usuario).first()
+            rol = u.rol if u else None
+        except Exception:
+            rol = None
     s.add(Auditoria(usuario=usuario, rol=rol, accion=accion, entidad=entidad,
                     entidad_id=str(entidad_id), detalle=detalle))
 
@@ -105,6 +172,22 @@ def saldo_articulo(s, proveedor_id, articulo, estado="CRUDO", condicion="DISPONI
     return float(q.scalar() or 0.0)
 
 
+def _validar_ubicacion_movimiento(s, proveedor_id, ubicacion, cantidad, condicion):
+    codigo = (ubicacion or "").strip().upper()
+    if not codigo:
+        return
+    u = s.query(Ubicacion).filter(Ubicacion.codigo == codigo).first()
+    if not u or not u.activo:
+        raise ReglaNegocio(f"La ubicación {codigo} no existe o está inactiva.")
+    if u.cerrada:
+        raise ReglaNegocio(f"La ubicación {codigo} está cerrada y no admite movimientos.")
+    if u.proveedor_id and proveedor_id and u.proveedor_id != proveedor_id:
+        raise ReglaNegocio(f"La ubicación {codigo} pertenece a otro proveedor.")
+    if float(cantidad or 0) > 0 and u.restringida and condicion == "DISPONIBLE":
+        raise ReglaNegocio(
+            f"La ubicación {codigo} es restringida; el ingreso debe quedar RESTRINGIDO.")
+
+
 def mover_inventario(s, *, proveedor_id, articulo, cantidad, tipo,
                      ubicacion="", estado="CRUDO", condicion="DISPONIBLE",
                      documento_id=None, referencia=None, usuario=None,
@@ -118,8 +201,21 @@ def mover_inventario(s, *, proveedor_id, articulo, cantidad, tipo,
         return obtener_saldo(s, proveedor_id, articulo, ubicacion, estado, condicion)
 
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
-    row = s.query(Inventario).filter_by(
-        proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c).first()
+    _validar_ubicacion_movimiento(s, p, u, cantidad, c)
+
+    # En PostgreSQL bloquea una clave lógica incluso cuando el saldo aún no existe,
+    # evitando dos INSERT simultáneos sobre uq_saldo.
+    if s.get_bind().dialect.name == "postgresql":
+        lock_key = f"{p}|{a}|{u}|{e}|{c}"
+        s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
+
+    qsaldo = s.query(Inventario).filter_by(
+        proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c)
+    try:
+        qsaldo = qsaldo.with_for_update()
+    except Exception:
+        pass
+    row = qsaldo.first()
     if row is None:
         row = Inventario(proveedor_id=p, articulo=a, ubicacion=u, estado=e,
                          condicion=c, cantidad=0.0)
@@ -240,13 +336,9 @@ class LineaRecibo:
 def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
                  referencia=None, usuario=None, es_reproceso=False,
                  ubicacion_destino="", archivo_id=None, fecha_documento=None,
-                 observaciones=None) -> Recibo:
-    """
-    origen:
-      BIN_A_BIN  -> materia prima cruda desde AKT MOTOS hacia el proveedor
-      FACTURA    -> producto que llega desde otro proveedor ORIGEN
-      REGISTRO   -> registro manual (PDF o foto) con artículo, descripción y cantidad
-    """
+                 observaciones=None, proveedor_origen_id=None,
+                 factura_origen=None) -> Recibo:
+    """Crea un recibo. BIN/FACTURA quedan pendientes de match; REGISTRO es manual."""
     if origen not in ("BIN_A_BIN", "FACTURA", "REGISTRO"):
         raise ReglaNegocio(f"Origen de recibo no válido: {origen}")
     if not lineas:
@@ -255,17 +347,25 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
     prov = s.get(Proveedor, proveedor_id)
     if not prov or not prov.activo:
         raise ReglaNegocio("Proveedor inexistente o inactivo.")
+    if proveedor_origen_id:
+        po = s.get(Proveedor, proveedor_origen_id)
+        if not po or not po.activo:
+            raise ReglaNegocio("El proveedor origen no existe o está inactivo.")
 
     doc = crear_documento(s, origen, proveedor_id=proveedor_id, referencia=referencia,
                           archivo_id=archivo_id, creado_por=usuario,
                           fecha_documento=fecha_documento, observaciones=observaciones)
-    r = Recibo(documento_id=doc.id, proveedor_id=proveedor_id, origen=origen,
-               estado="BORRADOR", es_reproceso=bool(es_reproceso),
+    estado_inicial = "PENDIENTE_MATCH" if origen == "BIN_A_BIN" else "BORRADOR"
+    r = Recibo(documento_id=doc.id, proveedor_id=proveedor_id,
+               proveedor_origen_id=proveedor_origen_id,
+               factura_origen=factura_origen or (referencia if origen == "FACTURA" else None),
+               origen=origen, estado=estado_inicial, es_reproceso=bool(es_reproceso),
                ubicacion_destino=(ubicacion_destino or "").upper(),
                creado_por=usuario)
     s.add(r)
     s.flush()
 
+    creadas = 0
     for ln in lineas:
         cod = str(ln.articulo).strip()
         if not cod:
@@ -277,46 +377,50 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
             cantidad_documento=qdoc, cantidad_fisica=qfis,
             lote=ln.lote or "", serial=ln.serial or "",
             ubicacion_desde=(ln.ubicacion_desde or "").upper(),
-            ubicacion_hasta=(ln.ubicacion_hasta or ubicacion_destino or "").upper()))
+            ubicacion_hasta=(ln.ubicacion_hasta or ubicacion_destino or "").upper(),
+            estado_match="PENDIENTE" if origen in ("BIN_A_BIN", "FACTURA") else None))
+        creadas += 1
+    if not creadas:
+        raise ReglaNegocio("Ninguna línea contiene un artículo válido.")
     s.flush()
     auditar(s, usuario, None, "CREAR_RECIBO", "recibos", r.id, f"{origen} {doc.trz}")
     return r
 
 
 def validar_bin_a_bin(s, recibo: Recibo, proveedor_id_logueado: int) -> list[str]:
-    """
-    Hoja "Bin a Bin": las columnas Desde/Hasta deben corresponder al proveedor
-    logueado. Se valida contra las ubicaciones asignadas al proveedor.
-    """
-    from core.models import Ubicacion
+    """Valida ubicaciones del BIN y reporta alertas sin alterar inventario."""
     alertas = []
     ubic_prov = {u.codigo for u in s.query(Ubicacion).filter(
-        Ubicacion.proveedor_id == proveedor_id_logueado).all()}
+        Ubicacion.proveedor_id == proveedor_id_logueado,
+        Ubicacion.activo.is_(True)).all()}
     if not ubic_prov:
-        return ["El proveedor no tiene ubicaciones asignadas: no se pudo validar Desde/Hasta."]
+        return ["El proveedor no tiene ubicaciones activas asignadas."]
     for ln in recibo.lineas:
-        if ln.ubicacion_desde and ln.ubicacion_desde not in ubic_prov and \
-           ln.ubicacion_hasta and ln.ubicacion_hasta not in ubic_prov:
+        for etiqueta, codigo in (("Desde", ln.ubicacion_desde), ("Hasta", ln.ubicacion_hasta)):
+            if not codigo:
+                continue
+            u = s.query(Ubicacion).filter(Ubicacion.codigo == codigo).first()
+            if not u or not u.activo:
+                alertas.append(f"Línea {ln.articulo}: {etiqueta} {codigo} no existe/está inactiva.")
+            elif u.cerrada:
+                alertas.append(f"Línea {ln.articulo}: {etiqueta} {codigo} está cerrada.")
+        if ln.ubicacion_desde and ln.ubicacion_hasta and            ln.ubicacion_desde not in ubic_prov and ln.ubicacion_hasta not in ubic_prov:
             alertas.append(
-                f"Línea {ln.articulo}: ni 'Desde' ({ln.ubicacion_desde}) ni "
-                f"'Hasta' ({ln.ubicacion_hasta}) corresponden al proveedor logueado.")
+                f"Línea {ln.articulo}: ni Desde ({ln.ubicacion_desde}) ni "
+                f"Hasta ({ln.ubicacion_hasta}) corresponden al proveedor.")
     return alertas
 
 
 def sellar_recibo(s, recibo_id: int, usuario: str) -> Recibo:
-    """
-    El proveedor de transformación 'sella' / certifica que recibió el producto
-    que llegó desde otro proveedor ORIGEN. Queda a la espera de la factura y
-    del BIN a BIN que adjunta el equipo de Recibo de AKT.
-    """
+    """Proveedor certifica la factura; el documento pasa a PENDIENTE_MATCH."""
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
     if r.origen != "FACTURA":
-        raise ReglaNegocio("Solo se sellan los recibos con origen FACTURA (proveedor origen).")
-    if r.estado not in ("BORRADOR",):
+        raise ReglaNegocio("Solo se sellan recibos con origen FACTURA.")
+    if r.estado != "BORRADOR":
         raise ReglaNegocio(f"El recibo ya está en estado {r.estado}.")
-    r.estado = "SELLADO"
+    r.estado = "PENDIENTE_MATCH"
     r.sellado_por = usuario
     r.sellado_en = dt.datetime.utcnow()
     s.flush()
@@ -329,73 +433,174 @@ def ordenes_compra_abiertas(s, proveedor_id, articulo=None):
                                     OrdenCompra.estado == "ABIERTA")
     if articulo:
         q = q.filter(OrdenCompra.articulo == str(articulo).strip())
-    return q.order_by(OrdenCompra.fecha).all()
+    return q.order_by(OrdenCompra.fecha, OrdenCompra.id).all()
 
 
-def adjuntar_bin_y_match(s, *, recibo_id, orden_compra_id, usuario,
-                         archivo_id=None, referencia_bin=None) -> dict:
-    """
-    El equipo de Recibo de AKT adjunta el BIN a BIN y lo cruza con una OC ABIERTA.
-    El sistema valida la cantidad:
-      - coincide  -> recibo CERRADA  -> ingresa inventario CRUDO
-      - discrepa  -> recibo NOVEDAD  -> ingresa lo recibido y abre novedad
-    """
+def sugerir_oc_por_linea(s, recibo_id: int) -> list[dict]:
+    r = s.get(Recibo, recibo_id)
+    if not r:
+        return []
+    out = []
+    for ln in r.lineas:
+        ocs = ordenes_compra_abiertas(s, r.proveedor_id, ln.articulo)
+        sugerida = ocs[0] if ocs else None
+        out.append({
+            "linea_id": ln.id, "articulo": ln.articulo,
+            "cantidad_fisica": float(ln.cantidad_fisica or 0),
+            "oc_sugerida_id": sugerida.id if sugerida else None,
+            "oc_sugerida": sugerida.numero if sugerida else None,
+            "alternativas": [(o.id, o.numero, float(o.pendiente)) for o in ocs],
+        })
+    return out
+
+
+def _ingresar_linea_match(s, r, ln, esperado, usuario):
+    recibido = float(ln.cantidad_fisica or 0)
+    aceptado = min(recibido, max(0.0, esperado))
+    sobrante = max(0.0, recibido - aceptado)
+    ubic = ln.ubicacion_hasta or r.ubicacion_destino or ""
+
+    if aceptado > TOL:
+        mover_inventario(
+            s, proveedor_id=r.proveedor_id, articulo=ln.articulo,
+            cantidad=aceptado, tipo="ENTRADA", ubicacion=ubic,
+            estado="CRUDO", condicion="DISPONIBLE",
+            documento_id=r.documento_id, referencia=r.documento.trz,
+            usuario=usuario)
+    if sobrante > TOL:
+        # El sobrante queda segregado hasta que Inventarios defina su aceptación.
+        mover_inventario(
+            s, proveedor_id=r.proveedor_id, articulo=ln.articulo,
+            cantidad=sobrante, tipo="ENTRADA", ubicacion=ubic,
+            estado="CRUDO", condicion="RESTRINGIDO",
+            documento_id=r.documento_id, referencia=r.documento.trz,
+            usuario=usuario)
+    ln.cantidad_match = aceptado
+    ln.procesada = True
+    return aceptado, sobrante
+
+
+def match_recibo_lineas(s, *, recibo_id, asignaciones: dict[int, int], usuario,
+                        archivo_id=None, referencia_bin=None) -> dict:
+    """Hace match por línea; un mismo recibo puede referenciar varias OC."""
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
-    if r.estado in ("CERRADA",):
-        raise ReglaNegocio("El recibo ya está CERRADA.")
-    oc = s.get(OrdenCompra, orden_compra_id)
-    if not oc:
-        raise ReglaNegocio("Orden de compra inexistente.")
-    if oc.estado != "ABIERTA":
-        raise ReglaNegocio(f"La orden de compra {oc.numero} no está ABIERTA.")
-    if oc.proveedor_id != r.proveedor_id:
-        raise ReglaNegocio("La orden de compra pertenece a otro proveedor.")
-
-    recibido = sum(float(l.cantidad_fisica or 0) for l in r.lineas
-                   if l.articulo == oc.articulo)
-    if recibido <= 0:
-        raise ReglaNegocio(
-            f"El recibo no tiene cantidad del artículo {oc.articulo} de la OC {oc.numero}.")
+    if r.estado == "CERRADA":
+        raise ReglaNegocio("El recibo ya está cerrado.")
+    if r.origen == "FACTURA" and r.estado == "BORRADOR":
+        raise ReglaNegocio("La factura debe ser sellada por el proveedor antes del match.")
+    if not asignaciones:
+        raise ReglaNegocio("Debe asignar una OC a cada línea del recibo.")
 
     if archivo_id:
         r.documento.archivo_id = archivo_id
     if referencia_bin:
         r.documento.referencia = referencia_bin
-    r.orden_compra_id = oc.id
 
-    esperado = float(oc.pendiente)
-    dif = round(recibido - esperado, 6)
-    oc.cantidad_recibida = float(oc.cantidad_recibida or 0) + recibido
-    if oc.cantidad_recibida + TOL >= oc.cantidad:
-        oc.estado = "CERRADA"
+    resultados, novedades = [], []
+    for ln in r.lineas:
+        if ln.procesada:
+            continue
+        oc_id = asignaciones.get(int(ln.id))
+        if not oc_id:
+            raise ReglaNegocio(f"Falta asignar OC para el artículo {ln.articulo}.")
+        ocq = s.query(OrdenCompra).filter(OrdenCompra.id == int(oc_id))
+        try:
+            ocq = ocq.with_for_update()
+        except Exception:
+            pass
+        oc = ocq.first()
+        if not oc:
+            raise ReglaNegocio(f"OC inexistente para {ln.articulo}.")
+        if oc.estado != "ABIERTA":
+            raise ReglaNegocio(f"La OC {oc.numero} ya no está ABIERTA.")
+        if oc.proveedor_id != r.proveedor_id:
+            raise ReglaNegocio(f"La OC {oc.numero} pertenece a otro proveedor.")
+        if oc.articulo != ln.articulo:
+            raise ReglaNegocio(
+                f"La OC {oc.numero} corresponde a {oc.articulo}, no a {ln.articulo}.")
 
-    ingresar_inventario_recibo(s, r, usuario=usuario)
+        esperado = max(0.0, float(oc.pendiente))
+        recibido = float(ln.cantidad_fisica or 0)
+        aceptado, sobrante = _ingresar_linea_match(s, r, ln, esperado, usuario)
+        faltante = max(0.0, esperado - recibido)
 
-    resultado = {"esperado": esperado, "recibido": recibido, "diferencia": dif}
-    if abs(dif) > TOL:
+        oc.cantidad_recibida = float(oc.cantidad_recibida or 0) + aceptado
+        if oc.cantidad_recibida + TOL >= float(oc.cantidad or 0):
+            oc.estado = "CERRADA"
+
+        ln.orden_compra_id = oc.id
+        if faltante > TOL:
+            ln.estado_match = "FALTANTE"
+            nov = registrar_novedad(
+                s, recibo_id=r.id, recibo_linea_id=ln.id, articulo=ln.articulo,
+                tipo="FALTANTE", cantidad=faltante, motivo="ORIGEN", usuario=usuario,
+                observaciones=(f"OC {oc.numero}: esperado {esperado:,.2f}, "
+                               f"recibido {recibido:,.2f}."))
+            novedades.append(nov.id)
+        elif sobrante > TOL:
+            ln.estado_match = "SOBRANTE"
+            nov = registrar_novedad(
+                s, recibo_id=r.id, recibo_linea_id=ln.id, articulo=ln.articulo,
+                tipo="SOBRANTE", cantidad=sobrante, motivo="ORIGEN", usuario=usuario,
+                observaciones=(f"OC {oc.numero}: esperado {esperado:,.2f}, "
+                               f"recibido {recibido:,.2f}; excedente segregado."))
+            novedades.append(nov.id)
+        else:
+            ln.estado_match = "EXACTO"
+
+        resultados.append({
+            "linea_id": ln.id, "articulo": ln.articulo, "oc_id": oc.id,
+            "oc": oc.numero, "esperado": esperado, "recibido": recibido,
+            "aceptado": aceptado, "faltante": faltante, "sobrante": sobrante,
+            "estado": ln.estado_match,
+        })
+
+    if any(not ln.procesada for ln in r.lineas):
+        r.estado = "PENDIENTE_MATCH"
+    elif novedades:
         r.estado = "NOVEDAD"
-        tipo = "SOBRANTE" if dif > 0 else "FALTANTE"
-        nov = registrar_novedad(
-            s, recibo_id=r.id, articulo=oc.articulo, tipo=tipo,
-            cantidad=abs(dif), motivo="ORIGEN", usuario=usuario,
-            observaciones=(f"Discrepancia automática en match BIN a BIN vs OC {oc.numero}: "
-                           f"esperado {esperado:,.2f}, recibido {recibido:,.2f}."))
-        resultado["novedad_id"] = nov.id
-        resultado["estado"] = "NOVEDAD"
     else:
         r.estado = "CERRADA"
         r.cerrado_en = dt.datetime.utcnow()
-        resultado["estado"] = "CERRADA"
+    if resultados:
+        r.orden_compra_id = resultados[0]["oc_id"]  # compatibilidad histórica
     s.flush()
-    auditar(s, usuario, None, "MATCH_OC", "recibos", r.id,
-            f"OC {oc.numero} -> {resultado['estado']}")
-    return resultado
+    auditar(s, usuario, None, "MATCH_OC_LINEAS", "recibos", r.id,
+            f"{len(resultados)} líneas / {len(novedades)} novedades")
+    return {"estado": r.estado, "lineas": resultados, "novedades": novedades}
+
+
+def adjuntar_bin_y_match(s, *, recibo_id, orden_compra_id, usuario,
+                         archivo_id=None, referencia_bin=None) -> dict:
+    """Compatibilidad: aplica una sola OC a las líneas del mismo artículo."""
+    r = s.get(Recibo, recibo_id)
+    oc = s.get(OrdenCompra, orden_compra_id)
+    if not r or not oc:
+        raise ReglaNegocio("Recibo u orden de compra inexistente.")
+    compatibles = [ln for ln in r.lineas if not ln.procesada and ln.articulo == oc.articulo]
+    otras = [ln for ln in r.lineas if not ln.procesada and ln.articulo != oc.articulo]
+    if otras:
+        raise ReglaNegocio(
+            "El recibo contiene varios artículos. Use el match por línea para asignar cada OC.")
+    res = match_recibo_lineas(
+        s, recibo_id=recibo_id,
+        asignaciones={ln.id: orden_compra_id for ln in compatibles},
+        usuario=usuario, archivo_id=archivo_id, referencia_bin=referencia_bin)
+    if len(res["lineas"]) == 1:
+        x = res["lineas"][0]
+        return {"estado": res["estado"], "esperado": x["esperado"],
+                "recibido": x["recibido"],
+                "diferencia": x["sobrante"] - x["faltante"],
+                "novedad_id": res["novedades"][0] if res["novedades"] else None}
+    return res
 
 
 def ingresar_inventario_recibo(s, recibo: Recibo, usuario=None) -> int:
-    """Ingresa al inventario CRUDO las líneas del recibo aún no procesadas."""
+    """Ingreso directo reservado a REGISTRO manual; BIN/FACTURA requieren match."""
+    if recibo.origen in ("BIN_A_BIN", "FACTURA"):
+        raise ReglaNegocio("BIN a BIN y FACTURA deben pasar por match contra OC.")
     n = 0
     for ln in recibo.lineas:
         if ln.procesada:
@@ -419,19 +624,17 @@ def ingresar_inventario_recibo(s, recibo: Recibo, usuario=None) -> int:
 
 
 def confirmar_recibo_simple(s, recibo_id: int, usuario=None) -> Recibo:
-    """Cierra un recibo BIN_A_BIN o REGISTRO que no requiere match con OC."""
+    """Confirma únicamente recibos REGISTRO que no requieren OC."""
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
+    if r.origen != "REGISTRO":
+        raise ReglaNegocio("Solo los recibos REGISTRO pueden confirmarse sin match de OC.")
     if r.estado == "CERRADA":
         raise ReglaNegocio("El recibo ya está cerrado.")
     ingresar_inventario_recibo(s, r, usuario=usuario)
-    tiene_novedad = s.query(Novedad.id).filter(
-        Novedad.recibo_id == r.id,
-        Novedad.estado.in_(("ABIERTA", "EN_COLA_INVENTARIOS"))).first()
-    r.estado = "NOVEDAD" if tiene_novedad else "CERRADA"
-    if r.estado == "CERRADA":
-        r.cerrado_en = dt.datetime.utcnow()
+    r.estado = "CERRADA"
+    r.cerrado_en = dt.datetime.utcnow()
     s.flush()
     return r
 
@@ -513,11 +716,9 @@ def ajustar_novedad(s, *, novedad_id, documento_ajuste, numero_ajuste,
                 condicion="RESTRINGIDO", documento_id=doc.id,
                 referencia=doc.referencia, usuario=usuario, permitir_negativo=True)
         elif nov.tipo == "FALTANTE":
-            descontar_distribuido(
-                s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
-                cantidad=nov.cantidad, tipo="AJUSTE", estado="CRUDO",
-                condicion="DISPONIBLE", documento_id=doc.id,
-                referencia=doc.referencia, usuario=usuario, permitir_negativo=True)
+            # El faltante nunca ingresó físicamente; el ajuste cierra la novedad
+            # documental y NO vuelve a descontar inventario.
+            pass
         elif nov.tipo == "SOBRANTE":
             # El sobrante estaba restringido: se libera a disponible
             reclasificar(s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
@@ -756,18 +957,28 @@ def tolerancia_averias(s, proveedor_id=None, desde=None, hasta=None):
 # PRODUCCIÓN (MPS) Y SUBCONTRATACIÓN
 # =========================================================================
 
-def explosion_bom(s, articulo_transformado: str) -> list[Bom]:
-    return s.query(Bom).filter(
+def explosion_bom(s, articulo_transformado: str, proveedor_id=None) -> list[Bom]:
+    """Devuelve el BOM específico del proveedor; usa BOM genérico solo como fallback."""
+    base = s.query(Bom).filter(
         Bom.articulo_transformado == str(articulo_transformado).strip(),
-        Bom.activo.is_(True)).order_by(Bom.secuencia).all()
-
+        Bom.activo.is_(True))
+    if proveedor_id:
+        p = s.get(Proveedor, proveedor_id)
+        if p:
+            exacto = base.filter(Bom.proveedor_codigo == p.codigo).order_by(Bom.secuencia).all()
+            if exacto:
+                return exacto
+            return base.filter(
+                (Bom.proveedor_codigo.is_(None)) | (Bom.proveedor_codigo == "")
+            ).order_by(Bom.secuencia).all()
+    return base.order_by(Bom.secuencia).all()
 
 def maximo_producible(s, proveedor_id, articulo_transformado) -> tuple[float, list[dict]]:
     """
     Cuánto se puede transformar con el inventario CRUDO DISPONIBLE actual,
     descontando lo ya comprometido en MPS abiertos.
     """
-    lineas = explosion_bom(s, articulo_transformado)
+    lineas = explosion_bom(s, articulo_transformado, proveedor_id)
     if not lineas:
         return 0.0, []
     comprometido = _componentes_comprometidos(s, proveedor_id, excluir_mps=None)
@@ -798,7 +1009,7 @@ def _componentes_comprometidos(s, proveedor_id, excluir_mps=None) -> dict:
         pend = float(m.pendiente or 0)
         if pend <= 0:
             continue
-        for b in explosion_bom(s, m.articulo):
+        for b in explosion_bom(s, m.articulo, proveedor_id):
             comp[b.componente] = comp.get(b.componente, 0.0) + pend * float(b.cantidad or 1)
     return comp
 
@@ -813,7 +1024,7 @@ def programar_mps(s, *, proveedor_id, articulo, cantidad, fecha_programada=None,
     cantidad = float(cantidad or 0)
     if cantidad <= 0:
         raise ReglaNegocio("La cantidad a programar debe ser mayor que cero.")
-    if not explosion_bom(s, articulo):
+    if not explosion_bom(s, articulo, proveedor_id):
         raise ReglaNegocio(
             f"El artículo {articulo} no tiene BOM cargado: no se puede programar su transformación.")
 
@@ -863,7 +1074,7 @@ def ejecutar_produccion(s, *, mps_id, cantidad, usuario=None,
             f"{m.pendiente:,.0f} (programado {m.cantidad_programada:,.0f}, "
             f"ejecutado {m.cantidad_ejecutada:,.0f}).")
 
-    lineas = explosion_bom(s, m.articulo)
+    lineas = explosion_bom(s, m.articulo, m.proveedor_id)
     if not lineas:
         raise ReglaNegocio(f"El artículo {m.articulo} no tiene BOM activo.")
 

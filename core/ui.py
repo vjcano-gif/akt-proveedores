@@ -174,10 +174,14 @@ def catalogo_articulos(limite=5000) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def catalogo_ubicaciones(proveedor_id=None) -> list[str]:
+def catalogo_ubicaciones(proveedor_id=None, incluir_restringidas=False) -> list[str]:
     from core.models import Ubicacion
     with session_scope() as s:
-        q = s.query(Ubicacion.codigo).filter(Ubicacion.activo.is_(True))
+        q = s.query(Ubicacion.codigo).filter(
+            Ubicacion.activo.is_(True),
+            Ubicacion.cerrada.is_(False))
+        if not incluir_restringidas:
+            q = q.filter(Ubicacion.restringida.is_(False))
         if proveedor_id:
             q = q.filter((Ubicacion.proveedor_id == proveedor_id)
                          | (Ubicacion.proveedor_id.is_(None)))

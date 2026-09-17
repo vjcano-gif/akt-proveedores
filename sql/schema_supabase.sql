@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS archivos (
 	mime VARCHAR(120), 
 	tamano INTEGER, 
 	contenido BYTEA, 
+	storage_path VARCHAR(500),
+	sha256 VARCHAR(64),
 	subido_por VARCHAR(160), 
 	subido_en TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (id)
@@ -55,7 +57,7 @@ CREATE TABLE IF NOT EXISTS bom (
 	proveedor_nombre VARCHAR(200), 
 	activo BOOLEAN, 
 	PRIMARY KEY (id), 
-	CONSTRAINT uq_bom_linea UNIQUE (articulo_transformado, componente, secuencia)
+	CONSTRAINT uq_bom_linea_proveedor UNIQUE (articulo_transformado, componente, secuencia, proveedor_codigo)
 );
 
 CREATE TABLE IF NOT EXISTS proveedores (
@@ -86,6 +88,13 @@ CREATE TABLE IF NOT EXISTS ddmrp_parametros (
 	PRIMARY KEY (id), 
 	CONSTRAINT uq_ddmrp UNIQUE (proveedor_id, articulo), 
 	FOREIGN KEY(proveedor_id) REFERENCES proveedores (id)
+);
+
+CREATE TABLE IF NOT EXISTS consecutivos (
+	clave VARCHAR(40) NOT NULL,
+	valor INTEGER NOT NULL DEFAULT 0,
+	actualizado_en TIMESTAMP WITHOUT TIME ZONE,
+	PRIMARY KEY (clave)
 );
 
 CREATE TABLE IF NOT EXISTS documentos (
@@ -265,7 +274,9 @@ CREATE TABLE IF NOT EXISTS mps (
 CREATE TABLE IF NOT EXISTS recibos (
 	id SERIAL NOT NULL, 
 	documento_id INTEGER NOT NULL, 
-	proveedor_id INTEGER NOT NULL, 
+	proveedor_id INTEGER NOT NULL,
+	proveedor_origen_id INTEGER,
+	factura_origen VARCHAR(120),
 	origen VARCHAR(20) NOT NULL, 
 	estado VARCHAR(20), 
 	orden_compra_id INTEGER, 
@@ -278,7 +289,8 @@ CREATE TABLE IF NOT EXISTS recibos (
 	cerrado_en TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(documento_id) REFERENCES documentos (id), 
-	FOREIGN KEY(proveedor_id) REFERENCES proveedores (id), 
+	FOREIGN KEY(proveedor_id) REFERENCES proveedores (id),
+	FOREIGN KEY(proveedor_origen_id) REFERENCES proveedores (id),
 	FOREIGN KEY(orden_compra_id) REFERENCES ordenes_compra (id)
 );
 
@@ -342,11 +354,15 @@ CREATE TABLE IF NOT EXISTS recibo_lineas (
 	lote VARCHAR(60), 
 	serial VARCHAR(60), 
 	ubicacion_desde VARCHAR(80), 
-	ubicacion_hasta VARCHAR(80), 
+	ubicacion_hasta VARCHAR(80),
+	orden_compra_id INTEGER,
+	cantidad_match FLOAT DEFAULT 0,
+	estado_match VARCHAR(20),
 	condicion VARCHAR(20), 
 	procesada BOOLEAN, 
-	PRIMARY KEY (id), 
-	FOREIGN KEY(recibo_id) REFERENCES recibos (id)
+	PRIMARY KEY (id),
+	FOREIGN KEY(recibo_id) REFERENCES recibos (id),
+	FOREIGN KEY(orden_compra_id) REFERENCES ordenes_compra (id)
 );
 
 CREATE TABLE IF NOT EXISTS consumos_produccion (
@@ -452,3 +468,6 @@ CREATE INDEX IF NOT EXISTS ix_novedades_proveedor_id ON novedades (proveedor_id)
 CREATE INDEX IF NOT EXISTS ix_novedades_estado ON novedades (estado);
 CREATE INDEX IF NOT EXISTS ix_novedades_articulo ON novedades (articulo);
 CREATE INDEX IF NOT EXISTS ix_novedades_creado_en ON novedades (creado_en);
+CREATE INDEX IF NOT EXISTS ix_archivos_sha256 ON archivos (sha256);
+CREATE INDEX IF NOT EXISTS ix_recibos_proveedor_origen_id ON recibos (proveedor_origen_id);
+CREATE INDEX IF NOT EXISTS ix_recibo_lineas_oc ON recibo_lineas (orden_compra_id);

@@ -155,3 +155,74 @@ Si más adelante necesita la app privada o más base de datos: Streamlit Cloud n
 ofrece apps privadas en el plan gratuito y Supabase Pro cuesta USD 25/mes.
 Alternativa privada económica: desplegar en un contenedor propio (Render, Fly.io)
 por unos USD 5-7/mes.
+
+
+---
+
+## Flujo corregido de recibo y documentos
+
+Los documentos de entrada ya no modifican inventario al cargarse:
+
+```
+PDF / foto
+   ↓
+extracción local (PDF nativo u OCR)
+   ↓
+revisión y confirmación humana
+   ↓
+recibo PENDIENTE_MATCH
+   ↓
+match por línea contra OC abierta
+   ↓
+EXACTO / FALTANTE / SOBRANTE
+   ↓
+inventario
+```
+
+Reglas de integridad:
+
+- **FALTANTE**: solo ingresa la cantidad físicamente recibida. Al cerrar la
+  novedad no se vuelve a descontar inventario.
+- **SOBRANTE**: la cantidad que excede la OC entra **RESTRINGIDA**. Al aprobar
+  el ajuste se reclasifica a DISPONIBLE.
+- Un recibo puede tener varias líneas y cada línea puede apuntar a una OC
+  diferente.
+- Las facturas conservan por separado el **proveedor origen** y el proveedor de
+  transformación.
+- Los BIN y las facturas requieren match contra OC antes de afectar saldo.
+- Los registros manuales son el único tipo que puede ingresar sin OC.
+
+### Lectura automática de PDF e imágenes
+
+La app usa **PyMuPDF** para PDF con texto y **RapidOCR + ONNX Runtime** para
+documentos escaneados o fotografías. La lectura nunca se aplica directamente:
+se presenta al usuario como propuesta editable con una confianza estimada.
+
+### Evidencias en Supabase Storage
+
+Si se configuran `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` y
+`SUPABASE_STORAGE_BUCKET`, los PDF/fotos se guardan en Storage y PostgreSQL
+conserva metadatos y SHA-256. Si Storage no está configurado, se mantiene un
+fallback local en la tabla `archivos`.
+
+### Seguridad del repositorio
+
+Este repositorio contiene catálogos operativos (proveedores, artículos, BOM y
+ubicaciones). Para operación real se recomienda mantenerlo **privado** y no
+subir `.streamlit/secrets.toml` ni credenciales.
+
+
+## Arranque seguro en producción
+
+En producción configure estos Secrets antes del primer arranque:
+
+```toml
+DEMO_MODE = false
+BOOTSTRAP_ADMIN_EMAIL = "admin@suempresa.com"
+BOOTSTRAP_ADMIN_PASSWORD = "una-clave-de-al-menos-12-caracteres"
+BOOTSTRAP_ADMIN_NAME = "Administrador inicial"
+```
+
+Con `DEMO_MODE = false` la aplicación **no crea ni muestra** las cuentas
+`@akt.com / akt2026`. Las cuentas demo solo se habilitan de forma explícita
+o cuando se ejecuta localmente sin `DATABASE_URL`.

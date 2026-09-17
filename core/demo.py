@@ -10,9 +10,9 @@ from core.db import session_scope
 from core.models import (Bom, Inventario, OrdenCompra, Proveedor, Ubicacion, Usuario)
 from core.services import (LineaRecibo, adjuntar_bin_y_match, confirmar_despacho,
                            crear_despacho, crear_recibo, ejecutar_conteo,
-                           ejecutar_produccion, guardar_archivo, programar_conteo,
-                           programar_mps, registrar_averia, sellar_recibo,
-                           confirmar_recibo_simple, maximo_producible)
+                           ejecutar_produccion, guardar_archivo, match_recibo_lineas,
+                           programar_conteo, programar_mps, registrar_averia,
+                           sellar_recibo, maximo_producible)
 
 FOTO = b"\x89PNG\r\n\x1a\n" + b"EVIDENCIA DEMO" * 10
 
@@ -59,7 +59,18 @@ def generar(proveedor_id=None, semilla=7) -> dict:
         r = crear_recibo(s, proveedor_id=proveedor_id, origen="BIN_A_BIN",
                          referencia="BIN2686958", usuario="demo",
                          ubicacion_destino=ub_crudo, lineas=lineas[:25])
-        confirmar_recibo_simple(s, r.id, "demo")
+        asignaciones = {}
+        for i, ln in enumerate(r.lineas, 1):
+            oc_bin = OrdenCompra(numero=f"OC-DEMO-BIN-{i:03d}",
+                                 proveedor_id=proveedor_id,
+                                 articulo=ln.articulo,
+                                 cantidad=ln.cantidad_fisica,
+                                 estado="ABIERTA", fecha=dt.date.today())
+            s.add(oc_bin)
+            s.flush()
+            asignaciones[ln.id] = oc_bin.id
+        match_recibo_lineas(s, recibo_id=r.id, asignaciones=asignaciones,
+                            usuario="demo", referencia_bin="BIN2686958")
         res["recibo_bin"] = r.documento.trz
 
         # 2) RECIBO por FACTURA con discrepancia -> NOVEDAD
