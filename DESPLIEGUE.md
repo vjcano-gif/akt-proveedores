@@ -97,3 +97,31 @@ Streamlit Cloud lo lee con su permiso de GitHub).
 | `password authentication failed` | No reemplazó `[YOUR-PASSWORD]` | Ponga la contraseña real del proyecto |
 | La app arranca vacía | No encontró los CSV | Verifique que la carpeta `data/` esté en el repo |
 | Tarda en el primer arranque | Está sembrando el BOM | Normal, ~45 segundos, solo la primera vez |
+
+
+---
+
+## Configuración recomendada de evidencias
+
+Además de `DATABASE_URL`, agregue en Streamlit Secrets:
+
+```toml
+SUPABASE_URL = "https://SU_PROYECTO.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "SU_SERVICE_ROLE_KEY"
+SUPABASE_STORAGE_BUCKET = "akt-documentos"
+```
+
+La app crea el bucket privado si no existe. Nunca publique la service-role key.
+
+## Migraciones
+
+El arranque ejecuta migraciones idempotentes después de `create_all()`. Esto
+agrega las columnas nuevas a una base ya existente sin borrar movimientos.
+
+## QA antes de producción
+
+Cada Pull Request y cada push a `main` o `fix/**` ejecuta:
+1. instalación de dependencias en Python 3.14;
+2. compilación de `core/`, `app_pages/` y `streamlit_app.py`;
+3. prueba end-to-end de recibo, multi-OC, faltantes, sobrantes, conteos,
+   averías, producción, despacho, trazabilidad y kardex.
