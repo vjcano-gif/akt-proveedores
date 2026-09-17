@@ -212,6 +212,8 @@ class Recibo(Base):
     proveedor_id = Column(Integer, ForeignKey("proveedores.id"), nullable=False, index=True)
     # Proveedor que despacha originalmente el material (distinto al transformador).
     proveedor_origen_id = Column(Integer, ForeignKey("proveedores.id"), index=True)
+    proveedor_origen_nombre = Column(String(200))
+    proveedor_origen_nit = Column(String(40))
     # BIN_A_BIN (materia prima cruda desde MOTOS) | FACTURA (proveedor origen) | REGISTRO
     origen = Column(String(20), nullable=False)
     # BORRADOR | SELLADO | PENDIENTE_MATCH | NOVEDAD | CERRADA
