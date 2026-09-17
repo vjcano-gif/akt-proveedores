@@ -1,13 +1,17 @@
-"""Extracción documental local: PDF nativo + OCR de imágenes/PDF escaneado.
+"""Extracción documental: PDF nativo + OCR local con doble motor.
 
-No envía documentos a servicios externos. RapidOCR/ONNX se usa localmente.
-La extracción estructurada es heurística y siempre debe ser confirmada por usuario.
+Orden de lectura:
+1) PDF con capa de texto -> PyMuPDF.
+2) Imagen/PDF escaneado -> RapidOCR.
+3) Si RapidOCR falla o no detecta texto -> Tesseract (fallback).
+
+La extracción nunca afecta inventario directamente: siempre requiere confirmación humana.
 """
 from __future__ import annotations
 
-import io
 import re
 from dataclasses import dataclass, asdict
+from functools import lru_cache
 
 
 @dataclass
@@ -17,24 +21,155 @@ class Campo:
     fuente: str = ""
 
 
-def _ocr_image(data: bytes) -> tuple[str, float]:
+def _decode_image(data: bytes):
+    """Convierte bytes de PNG/JPG a ndarray BGR validado."""
+    import cv2
+    import numpy as np
+
+    if not data:
+        raise ValueError("El archivo de imagen está vacío.")
+    arr = np.frombuffer(data, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None or getattr(img, "size", 0) == 0:
+        raise ValueError("No se pudo decodificar la imagen. Verifique que sea PNG o JPG válido.")
+    return img
+
+
+def _preprocesar_para_ocr(img):
+    """Genera variantes útiles para documentos fotografiados o escaneados."""
+    import cv2
+
+    variantes = [("ORIGINAL", img)]
     try:
-        from rapidocr import RapidOCR
-        engine = RapidOCR()
-        res = engine(data)
-        txts = list(res.txts or [])
-        scores = [float(x) for x in (res.scores or [])]
-        return "\n".join(txts), (sum(scores) / len(scores) if scores else 0.0)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Aumenta contraste local sin destruir texto tenue.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        contrast = clahe.apply(gray)
+        contrast_bgr = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
+        variantes.append(("CONTRASTE", contrast_bgr))
+
+        # Binarización adaptativa, útil para fotos con iluminación desigual.
+        bw = cv2.adaptiveThreshold(
+            contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 15)
+        variantes.append(("BINARIO", cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)))
     except Exception:
-        return "", 0.0
+        pass
+    return variantes
 
 
-def extraer_texto(nombre: str, data: bytes, mime: str | None = None) -> tuple[str, float, str]:
+@lru_cache(maxsize=1)
+def _rapid_engine():
+    from rapidocr import RapidOCR
+    return RapidOCR()
+
+
+def _ocr_rapid(img) -> tuple[str, float]:
+    """OCR principal. Lanza la excepción para permitir diagnóstico y fallback."""
+    engine = _rapid_engine()
+    res = engine(img)
+    txts = list(getattr(res, "txts", None) or [])
+    scores = [float(x) for x in (getattr(res, "scores", None) or [])]
+    texto = "\n".join(str(t).strip() for t in txts if str(t).strip()).strip()
+    confianza = sum(scores) / len(scores) if scores else 0.0
+    return texto, confianza
+
+
+def _ocr_tesseract(img) -> tuple[str, float]:
+    """Fallback gratuito mediante el binario Tesseract del servidor."""
+    import cv2
+    import pytesseract
+    from pytesseract import Output
+
+    disponibles = set(pytesseract.get_languages(config=""))
+    if "spa" in disponibles and "eng" in disponibles:
+        lang = "spa+eng"
+    elif "spa" in disponibles:
+        lang = "spa"
+    elif "eng" in disponibles:
+        lang = "eng"
+    else:
+        lang = None
+
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    kwargs = {
+        "config": "--oem 3 --psm 6",
+        "output_type": Output.DICT,
+    }
+    if lang:
+        kwargs["lang"] = lang
+    datos = pytesseract.image_to_data(rgb, **kwargs)
+
+    textos, confs = [], []
+    for txt, cf in zip(datos.get("text", []), datos.get("conf", [])):
+        txt = str(txt or "").strip()
+        if not txt:
+            continue
+        try:
+            score = float(cf)
+        except (TypeError, ValueError):
+            score = -1
+        if score < 0:
+            continue
+        textos.append(txt)
+        confs.append(score / 100.0)
+
+    texto = " ".join(textos).strip()
+    confianza = sum(confs) / len(confs) if confs else 0.0
+    return texto, confianza
+
+
+def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
+    """Devuelve texto, confianza, motor usado y diagnóstico."""
+    diagnosticos = []
+    try:
+        img = _decode_image(data)
+    except Exception as e:
+        return "", 0.0, "OCR", f"Decodificación: {type(e).__name__}: {e}"
+
+    # RapidOCR: prueba original y variantes, conservando el mejor resultado.
+    mejor_texto, mejor_conf, mejor_var = "", 0.0, ""
+    try:
+        for nombre_var, variante in _preprocesar_para_ocr(img):
+            texto, conf = _ocr_rapid(variante)
+            if texto and (len(texto) > len(mejor_texto) or conf > mejor_conf + 0.08):
+                mejor_texto, mejor_conf, mejor_var = texto, conf, nombre_var
+            # Si ya hay una lectura razonable no triplica el tiempo de OCR.
+            if len(mejor_texto) >= 30 and mejor_conf >= 0.55:
+                break
+        if mejor_texto:
+            return mejor_texto, mejor_conf, f"RAPIDOCR/{mejor_var}", ""
+        diagnosticos.append("RapidOCR no detectó texto.")
+    except Exception as e:
+        diagnosticos.append(f"RapidOCR: {type(e).__name__}: {e}")
+
+    # Tesseract: fallback independiente de ONNX.
+    try:
+        # Usa primero la variante de contraste, que suele rendir mejor en documentos.
+        variantes = _preprocesar_para_ocr(img)
+        preferida = variantes[1][1] if len(variantes) > 1 else img
+        texto, conf = _ocr_tesseract(preferida)
+        if texto:
+            return texto, conf, "TESSERACT", " | ".join(diagnosticos)
+        diagnosticos.append("Tesseract no detectó texto.")
+    except Exception as e:
+        diagnosticos.append(f"Tesseract: {type(e).__name__}: {e}")
+
+    return "", 0.0, "OCR_FALLIDO", " | ".join(diagnosticos)
+
+
+def extraer_texto(nombre: str, data: bytes, mime: str | None = None) -> tuple[str, float, str, str]:
     name = (nombre or "").lower()
     mime = mime or ""
+
     if name.endswith(".pdf") or mime == "application/pdf":
         import fitz
-        doc = fitz.open(stream=data, filetype="pdf")
+
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+        except Exception as e:
+            return "", 0.0, "PDF_ERROR", f"PyMuPDF: {type(e).__name__}: {e}"
+
         partes = []
         for p in doc:
             t = (p.get_text("text") or "").strip()
@@ -42,20 +177,31 @@ def extraer_texto(nombre: str, data: bytes, mime: str | None = None) -> tuple[st
                 partes.append(t)
         texto = "\n".join(partes).strip()
         if len(texto) >= 40:
-            return texto, 0.98, "PDF_TEXT"
-        # PDF escaneado: renderizar cada página y OCR.
-        ocr_partes, confs = [], []
+            return texto, 0.98, "PDF_TEXT", ""
+
+        # PDF escaneado: renderizar página por página y aplicar doble OCR.
+        ocr_partes, confs, motores, diags = [], [], [], []
         for p in doc:
-            pix = p.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            t, cf = _ocr_image(pix.tobytes("png"))
+            pix = p.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
+            t, cf, motor, diag = _ocr_image(pix.tobytes("png"))
             if t:
                 ocr_partes.append(t)
                 confs.append(cf)
-        return "\n".join(ocr_partes), (sum(confs) / len(confs) if confs else 0.0), "OCR"
+                motores.append(motor)
+            if diag:
+                diags.append(diag)
+        metodo = "+".join(sorted(set(motores))) if motores else "OCR_FALLIDO"
+        return (
+            "\n".join(ocr_partes),
+            (sum(confs) / len(confs) if confs else 0.0),
+            metodo,
+            " | ".join(diags),
+        )
+
     if mime.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
-        t, cf = _ocr_image(data)
-        return t, cf, "OCR"
-    return "", 0.0, "NO_SOPORTADO"
+        return _ocr_image(data)
+
+    return "", 0.0, "NO_SOPORTADO", "Tipo de archivo no soportado para lectura automática."
 
 
 def _primero(patrones, texto, flags=re.I):
@@ -97,22 +243,27 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
     ], t)
 
     lineas = []
-    # Heurística: código de artículo + descripción opcional + cantidad al final.
+    # Acepta líneas OCR con espacios variables. La cantidad debe quedar al final.
     for linea in t.splitlines():
         limpio = " ".join(linea.split())
-        m = re.match(r"^([A-Z0-9][A-Z0-9._/-]{2,})\s+(.{0,100}?)\s+([0-9][0-9.,]*)$", limpio, re.I)
+        m = re.match(
+            r"^([A-Z0-9][A-Z0-9._/-]{2,})\s+(.{0,100}?)\s+([0-9][0-9.,]*)$",
+            limpio, re.I)
         if not m:
             continue
         cod, desc, cant = m.groups()
         n = _num(cant)
         if n is None:
             continue
-        # Evita capturar NIT/fechas/documentos obvios como artículos.
-        if cod.upper() in {"NIT", "TOTAL", "SUBTOTAL", "IVA", "FECHA"}:
+        if cod.upper() in {"NIT", "TOTAL", "SUBTOTAL", "IVA", "FECHA", "FACTURA", "OC"}:
             continue
-        lineas.append({"articulo": cod.strip(), "descripcion": desc.strip(),
-                       "cantidad_documento": n, "cantidad_fisica": n,
-                       "confianza": round(min(confianza_texto, 0.9), 3)})
+        lineas.append({
+            "articulo": cod.strip(),
+            "descripcion": desc.strip(),
+            "cantidad_documento": n,
+            "cantidad_fisica": n,
+            "confianza": round(min(confianza_texto, 0.9), 3),
+        })
 
     return {
         "referencia": asdict(Campo(ref, confianza_texto if ref else 0.0, "texto")),
@@ -125,9 +276,11 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
 
 
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
-    texto, cf, metodo = extraer_texto(nombre, data, mime)
+    texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
     out = estructurar(texto, cf)
     out["metodo"] = metodo
     out["confianza_texto"] = round(cf, 3)
+    out["diagnostico"] = diagnostico
+    out["ocr_ok"] = bool(texto.strip())
     out["requiere_revision"] = cf < 0.85 or not out["lineas"]
     return out
