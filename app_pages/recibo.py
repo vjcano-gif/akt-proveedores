@@ -104,12 +104,13 @@ def _consulta(user):
         st.markdown(
             f"**{r.documento.trz}** · {ORIGENES.get(r.origen, r.origen)} · "
             + ui.pill(r.estado), unsafe_allow_html=True)
-        cols = st.columns(5)
+        cols = st.columns(6)
         cols[0].metric("Transformador", r.proveedor.codigo if r.proveedor else "—")
         cols[1].metric("Origen", r.proveedor_origen.codigo if r.proveedor_origen else "—")
         cols[2].metric("Referencia", r.documento.referencia or "—")
-        cols[3].metric("Fecha documento", str(r.documento.fecha_documento))
-        cols[4].metric("Antigüedad", f"{r.documento.antiguedad_dias} días")
+        cols[3].metric("BIN", r.referencia_bin or "—")
+        cols[4].metric("Fecha documento", str(r.documento.fecha_documento))
+        cols[5].metric("Antigüedad", f"{r.documento.antiguedad_dias} días")
 
         st.dataframe(pd.DataFrame([{
             "Artículo": l.articulo,
