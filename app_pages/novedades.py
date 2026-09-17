@@ -6,7 +6,8 @@ from core import ui
 from core.auth import alcance_proveedor, puede
 from core.db import session_scope
 from core.models import Novedad, Recibo
-from core.services import (ReglaNegocio, ajustar_novedad, guardar_archivo,\n                           leer_archivo, registrar_novedad)
+from core.services import (ReglaNegocio, ajustar_novedad, guardar_archivo,
+                           leer_archivo, registrar_novedad)
 
 
 def render(user):
