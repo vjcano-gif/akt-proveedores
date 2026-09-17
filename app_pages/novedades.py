@@ -6,12 +6,15 @@ from core import ui
 from core.auth import alcance_proveedor, puede
 from core.db import session_scope
 from core.models import Novedad, Recibo
-from core.services import ReglaNegocio, ajustar_novedad, guardar_archivo, registrar_novedad
+from core.services import (
+    ReglaNegocio, ajustar_novedad, guardar_archivo, leer_archivo, registrar_novedad,
+)
 
 
 def render(user):
-    ui.encabezado("Novedades",
-                  "Faltantes, sobrantes y averías · derivan producto DISPONIBLE o RESTRINGIDO")
+    ui.encabezado(
+        "Novedades",
+        "Diferencias de recepción y hallazgos físicos con impacto de inventario controlado")
     t1, t2, t3 = st.tabs(["📋 Panel", "➕ Registrar novedad", "🧾 Cola de Inventarios"])
     with t1:
         _panel(user)
@@ -31,13 +34,19 @@ def _consultar(pid, estados=None):
         novs = q.order_by(Novedad.creado_en.desc()).limit(500).all()
         return [{
             "Trazabilidad": n.documento.trz if n.documento else "",
-            "Tipo": n.tipo, "Artículo": n.articulo, "Cantidad": n.cantidad,
-            "Motivo": n.motivo or "", "Condición": n.condicion_resultante,
-            "Estado": n.estado, "Ajuste": n.documento_ajuste or "",
+            "Tipo": n.tipo,
+            "Origen novedad": n.origen_novedad or "MANUAL",
+            "Artículo": n.articulo,
+            "Cantidad": n.cantidad,
+            "Motivo": n.motivo or "",
+            "Condición": n.condicion_resultante,
+            "Estado": n.estado,
+            "Ajuste": n.documento_ajuste or "",
             "No. ajuste": n.numero_ajuste or "",
             "Proveedor": n.proveedor.nombre if n.proveedor else "",
             "Evidencia": "Sí" if n.evidencia_id else "",
-            "Fecha": n.creado_en, "_id": n.id,
+            "Fecha": n.creado_en,
+            "_id": n.id,
         } for n in novs]
 
 
@@ -57,12 +66,14 @@ def _panel(user):
     fe = st.multiselect("Filtrar estado", sorted(df.Estado.unique()))
     if fe:
         df = df[df.Estado.isin(fe)]
-    st.dataframe(df.drop(columns=["_id"]), use_container_width=True, hide_index=True,
-                 column_config={"Fecha": st.column_config.DatetimeColumn(
-                     "Fecha", format="DD/MM/YYYY HH:mm")})
-    st.download_button("Exportar a Excel",
-                       ui.exportar_excel({"novedades": df.drop(columns=["_id"])}),
-                       "novedades.xlsx", key="exp_nov")
+    st.dataframe(
+        df.drop(columns=["_id"]), use_container_width=True, hide_index=True,
+        column_config={"Fecha": st.column_config.DatetimeColumn(
+            "Fecha", format="DD/MM/YYYY HH:mm")})
+    st.download_button(
+        "Exportar a Excel",
+        ui.exportar_excel({"novedades": df.drop(columns=["_id"])}),
+        "novedades.xlsx", key="exp_nov")
 
 
 def _registrar(user):
@@ -88,40 +99,54 @@ def _registrar(user):
     motivo = c1.selectbox("Motivo", ["ORIGEN", "MANIPULACION", "PUESTA_A_PUNTO", "AKT"])
     rec = c2.selectbox("Recibo relacionado", list(op_rec))
 
+    if tipo == "FALTANTE":
+        st.info(
+            "Un faltante registrado manualmente representa una diferencia física de inventario; "
+            "el descuento se hará únicamente cuando Inventarios aplique el ajuste.")
+    elif tipo == "SOBRANTE":
+        st.info(
+            "El sobrante manual se incorpora inmediatamente como RESTRINGIDO. Inventarios "
+            "decidirá después si lo libera a DISPONIBLE o lo devuelve.")
+
     obs = st.text_area("Observaciones", height=70)
     evid = None
     if tipo == "AVERIA":
-        st.warning("Una avería exige evidencia fotográfica de la destrucción y genera "
-                   "cola de trabajo para Inventarios (ajuste TD90 / TD96).", icon="📷")
-        evid = st.file_uploader("Evidencia fotográfica de la destrucción",
-                                type=["png", "jpg", "jpeg", "pdf"], key="ev_nov")
+        st.warning(
+            "Una avería exige evidencia y el producto se reclasifica a RESTRINGIDO "
+            "hasta que Inventarios aplique el ajuste.", icon="📷")
+        evid = st.file_uploader(
+            "Evidencia fotográfica de la destrucción",
+            type=["png", "jpg", "jpeg", "pdf"], key="ev_nov")
 
     if st.button("Registrar novedad", type="primary", use_container_width=True):
         try:
             with session_scope() as s:
                 eid = None
                 if evid is not None:
-                    eid = guardar_archivo(s, evid.name, evid.getvalue(), evid.type,
-                                          user["email"]).id
-                n = registrar_novedad(s, recibo_id=op_rec[rec], proveedor_id=pid,
-                                      articulo=articulo, tipo=tipo, cantidad=cantidad,
-                                      motivo=motivo, usuario=user["email"],
-                                      evidencia_id=eid, observaciones=obs or None)
+                    eid = guardar_archivo(
+                        s, evid.name, evid.getvalue(), evid.type, user["email"]).id
+                n = registrar_novedad(
+                    s, recibo_id=op_rec[rec], proveedor_id=pid,
+                    articulo=articulo, tipo=tipo, cantidad=cantidad,
+                    motivo=motivo, usuario=user["email"], evidencia_id=eid,
+                    observaciones=obs or None, origen_novedad="MANUAL", actor=user)
                 trz, cond, est = n.documento.trz, n.condicion_resultante, n.estado
-            ui.ok(f"Novedad **{trz}** registrada. Producto resultante: **{cond}**. "
-                  f"Estado: {est}.")
-        except ReglaNegocio as e:
-            ui.err(str(e))
+            ui.ok(
+                f"Novedad **{trz}** registrada. Condición: **{cond}**. Estado: {est}.")
+        except ReglaNegocio as exc:
+            ui.err(str(exc))
 
 
 def _cola(user):
     pid = alcance_proveedor(user)
-    filas = [f for f in _consultar(pid, ["ABIERTA", "EN_COLA_INVENTARIOS"])]
+    filas = _consultar(pid, ["ABIERTA", "EN_COLA_INVENTARIOS"])
     if not filas:
         st.success("No hay novedades pendientes de ajuste.", icon="✅")
         return
-    st.dataframe(pd.DataFrame(filas).drop(columns=["_id"]),
-                 use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        pd.DataFrame(filas).drop(columns=["_id"]),
+        use_container_width=True, hide_index=True)
 
     if not puede(user, "novedades_ajustar"):
         st.info("Solo el equipo de Inventarios monta el documento de ajuste.")
@@ -131,32 +156,52 @@ def _cola(user):
     sel = st.selectbox("Novedad", [f["Trazabilidad"] for f in filas])
     nid = next(f["_id"] for f in filas if f["Trazabilidad"] == sel)
 
+    accion_sobrante = "LIBERAR"
     with session_scope() as s:
         n = s.get(Novedad, nid)
-        st.caption(f"{n.tipo} · {n.articulo} · {n.cantidad:,.0f} · motivo {n.motivo}")
+        st.caption(
+            f"{n.tipo} · {n.articulo} · {n.cantidad:,.0f} · motivo {n.motivo} · "
+            f"origen {n.origen_novedad or 'MANUAL'}")
         if n.evidencia_id and n.evidencia:
-            st.download_button(f"Ver evidencia: {n.evidencia.nombre}",
-                               n.evidencia.contenido or b"",
-                               file_name=n.evidencia.nombre, key=f"ev_{nid}")
-        efecto = {"AVERIA": "descuenta el producto restringido (destrucción)",
-                  "FALTANTE": "descuenta el faltante del inventario disponible",
-                  "SOBRANTE": "libera el sobrante de RESTRINGIDO a DISPONIBLE"}[n.tipo]
-        st.info(f"Al ajustar, el sistema {efecto}.")
+            try:
+                st.download_button(
+                    f"Ver evidencia: {n.evidencia.nombre}",
+                    leer_archivo(n.evidencia),
+                    file_name=n.evidencia.nombre, key=f"ev_{nid}")
+            except Exception as exc:
+                st.warning(f"No fue posible descargar la evidencia: {exc}")
+
+        if n.tipo == "FALTANTE" and (n.origen_novedad or "MANUAL") == "RECEPCION":
+            st.info(
+                "Este faltante nunca ingresó físicamente. Cerrar la novedad NO volverá "
+                "a descontar inventario.")
+        elif n.tipo == "FALTANTE":
+            st.info("Al ajustar, se descontará una sola vez del inventario disponible.")
+        elif n.tipo == "SOBRANTE":
+            accion_sobrante = st.radio(
+                "Decisión sobre el sobrante",
+                ["LIBERAR", "DEVOLVER"], horizontal=True,
+                format_func=lambda x: (
+                    "Aceptar y liberar a DISPONIBLE" if x == "LIBERAR"
+                    else "Devolver / retirar del inventario restringido"))
+        else:
+            st.info("Al ajustar, el producto averiado saldrá del inventario restringido.")
 
     c1, c2 = st.columns(2)
     doc = c1.selectbox("Documento de ajuste", ["TD90", "TD96"])
     num = c2.text_input("No. del ajuste", placeholder="AJ-0001")
 
-    if st.button("Aplicar ajuste y cerrar novedad", type="primary",
-                 use_container_width=True):
+    if st.button("Aplicar ajuste y cerrar novedad", type="primary", use_container_width=True):
         if not num.strip():
             ui.err("Indique el número del ajuste.")
             return
         try:
             with session_scope() as s:
-                ajustar_novedad(s, novedad_id=nid, documento_ajuste=doc,
-                                numero_ajuste=num.strip(), usuario=user["email"])
-            ui.ok(f"Novedad cerrada con {doc} {num}. Inventario actualizado.")
+                ajustar_novedad(
+                    s, novedad_id=nid, documento_ajuste=doc,
+                    numero_ajuste=num.strip(), usuario=user["email"],
+                    accion_sobrante=accion_sobrante, actor=user)
+            ui.ok(f"Novedad cerrada con {doc} {num}.")
             st.rerun()
-        except ReglaNegocio as e:
-            ui.err(str(e))
+        except ReglaNegocio as exc:
+            ui.err(str(exc))
