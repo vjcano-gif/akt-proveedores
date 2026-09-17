@@ -1,5 +1,6 @@
 """Recibo de mercancía: documento -> revisión -> match por línea con OC -> inventario."""
 import datetime as dt
+import hashlib
 
 import pandas as pd
 import streamlit as st
@@ -141,11 +142,24 @@ def _consulta(user):
 def _extraer_documento(soporte):
     if soporte is None:
         return None
-    clave = f"extract_{soporte.name}_{soporte.size}"
+    contenido = soporte.getvalue()
+    digest = hashlib.sha256(contenido).hexdigest()[:16]
+    clave = f"extract_{soporte.name}_{digest}"
     if st.button("Leer documento automáticamente", key=f"btn_{clave}"):
         with st.spinner("Leyendo documento y buscando artículos/cantidades..."):
-            st.session_state[clave] = analizar_documento(
-                soporte.name, soporte.getvalue(), soporte.type)
+            try:
+                st.session_state[clave] = analizar_documento(
+                    soporte.name, contenido, soporte.type)
+            except Exception as e:
+                st.session_state[clave] = {
+                    "ocr_ok": False,
+                    "texto": "",
+                    "lineas": [],
+                    "metodo": "ERROR",
+                    "confianza_texto": 0.0,
+                    "requiere_revision": True,
+                    "diagnostico": f"{type(e).__name__}: {e}",
+                }
     return st.session_state.get(clave)
 
 
@@ -170,14 +184,30 @@ def _registrar(user):
     if extr:
         cf = int(100 * float(extr.get("confianza_texto") or 0))
         metodo = extr.get("metodo", "")
-        if extr.get("requiere_revision"):
+        diagnostico = str(extr.get("diagnostico") or "").strip()
+
+        if not extr.get("ocr_ok"):
+            st.error(
+                "No fue posible extraer texto del documento. "
+                "La imagen no se procesará automáticamente hasta corregir el OCR.")
+            if diagnostico:
+                with st.expander("Diagnóstico OCR"):
+                    st.code(diagnostico)
+        elif extr.get("requiere_revision"):
             st.warning(
-                f"Lectura {metodo} con confianza aproximada {cf}%. "
-                "Revise los datos antes de crear el recibo.")
+                f"Documento leído por {metodo} con confianza aproximada {cf}%. "
+                "Revise y confirme los datos antes de crear el recibo.")
+            if diagnostico:
+                st.caption(f"Motor alterno utilizado / diagnóstico: {diagnostico}")
         else:
-            st.success(f"Documento leído por {metodo}. Confianza de texto: {cf}%.")
-        with st.expander("Texto detectado"):
-            st.text(extr.get("texto", "")[:12000])
+            st.success(
+                f"Documento leído por {metodo}. Confianza de texto aproximada: {cf}%.")
+            if diagnostico:
+                st.caption(f"Diagnóstico: {diagnostico}")
+
+        with st.expander("Texto detectado", expanded=bool(extr.get("ocr_ok"))):
+            texto_ocr = extr.get("texto", "")
+            st.text(texto_ocr[:12000] if texto_ocr else "Sin texto detectado.")
 
     prov_origen_id = None
     if origen == "FACTURA":
