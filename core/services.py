@@ -140,14 +140,8 @@ def _clave(proveedor_id, articulo, ubicacion, estado, condicion):
 def obtener_saldo(s, proveedor_id, articulo, ubicacion="", estado="CRUDO",
                   condicion="DISPONIBLE") -> float:
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
-    _validar_ubicacion_movimiento(s, p, u, cantidad, c)
-    qsaldo = s.query(Inventario).filter_by(
-        proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c)
-    try:
-        qsaldo = qsaldo.with_for_update()
-    except Exception:
-        pass
-    row = qsaldo.first()
+    row = s.query(Inventario).filter_by(
+        proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c).first()
     return float(row.cantidad) if row else 0.0
 
 
@@ -192,8 +186,14 @@ def mover_inventario(s, *, proveedor_id, articulo, cantidad, tipo,
         return obtener_saldo(s, proveedor_id, articulo, ubicacion, estado, condicion)
 
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
-    row = s.query(Inventario).filter_by(
-        proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c).first()
+    _validar_ubicacion_movimiento(s, p, u, cantidad, c)
+    qsaldo = s.query(Inventario).filter_by(
+        proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c)
+    try:
+        qsaldo = qsaldo.with_for_update()
+    except Exception:
+        pass
+    row = qsaldo.first()
     if row is None:
         row = Inventario(proveedor_id=p, articulo=a, ubicacion=u, estado=e,
                          condicion=c, cantidad=0.0)
