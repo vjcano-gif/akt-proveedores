@@ -44,13 +44,15 @@ def pantalla_login():
                     st.rerun()
                 else:
                     st.error("Credenciales inválidas o usuario inactivo.")
-        with st.expander("Usuarios de demostración"):
-            st.markdown(
-                "| Correo | Rol | Contraseña |\n|---|---|---|\n"
-                "| proveedor@akt.com | Proveedor | akt2026 |\n"
-                "| recibo@akt.com | Recibo AKT | akt2026 |\n"
-                "| inventarios@akt.com | Inventarios | akt2026 |\n"
-                "| planeacion@akt.com | Planeación | akt2026 |")
+        from core.seed import demo_mode
+        if demo_mode():
+            with st.expander("Usuarios de demostración"):
+                st.markdown(
+                    "| Correo | Rol | Contraseña |\n|---|---|---|\n"
+                    "| proveedor@akt.com | Proveedor | akt2026 |\n"
+                    "| recibo@akt.com | Recibo AKT | akt2026 |\n"
+                    "| inventarios@akt.com | Inventarios | akt2026 |\n"
+                    "| planeacion@akt.com | Planeación | akt2026 |")
         okdb, dialecto = healthcheck()
         st.caption(("🟢 " if okdb else "🔴 ") + db_label())
 
