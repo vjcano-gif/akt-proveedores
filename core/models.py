@@ -135,7 +135,11 @@ class Archivo(Base):
     nombre = Column(String(260), nullable=False)
     mime = Column(String(120))
     tamano = Column(Integer)
+    # Fallback local/SQLite. En producción se prefiere Supabase Storage.
     contenido = Column(LargeBinary)
+    storage_path = Column(String(500))
+    external_url = Column(String(1000))
+    sha256 = Column(String(64), index=True)
     subido_por = Column(String(160))
     subido_en = Column(DateTime, default=now)
 
@@ -143,6 +147,13 @@ class Archivo(Base):
 # =========================================================================
 # TRAZABILIDAD DOCUMENTAL
 # =========================================================================
+
+class ConsecutivoDocumento(Base):
+    """Contador atómico por tipo/año para evitar TRZ duplicados en concurrencia."""
+    __tablename__ = "consecutivos_documento"
+    clave = Column(String(40), primary_key=True)
+    valor = Column(Integer, nullable=False, default=0)
+
 
 class Documento(Base):
     """
@@ -158,6 +169,10 @@ class Documento(Base):
     referencia = Column(String(120))                  # No. bin, factura, OC...
     fecha_documento = Column(Date, default=dt.date.today)
     archivo_id = Column(Integer, ForeignKey("archivos.id"))
+    # Resultado del reconocimiento documental (PDF/imagen).
+    extraccion_json = Column(Text)
+    confianza_extraccion = Column(Float)
+    estado_extraccion = Column(String(30))  # EXTRAIDO | REVISION | MANUAL | ERROR
     creado_por = Column(String(160))
     creado_en = Column(DateTime, default=now, index=True)
     observaciones = Column(Text)
@@ -180,6 +195,8 @@ class Recibo(Base):
     id = Column(Integer, primary_key=True)
     documento_id = Column(Integer, ForeignKey("documentos.id"), nullable=False)
     proveedor_id = Column(Integer, ForeignKey("proveedores.id"), nullable=False, index=True)
+    # Proveedor que despacha originalmente el material (distinto al transformador).
+    proveedor_origen_id = Column(Integer, ForeignKey("proveedores.id"), index=True)
     # BIN_A_BIN (materia prima cruda desde MOTOS) | FACTURA (proveedor origen) | REGISTRO
     origen = Column(String(20), nullable=False)
     # BORRADOR | SELLADO | PENDIENTE_MATCH | NOVEDAD | CERRADA
@@ -194,7 +211,8 @@ class Recibo(Base):
     cerrado_en = Column(DateTime)
 
     documento = relationship("Documento")
-    proveedor = relationship("Proveedor")
+    proveedor = relationship("Proveedor", foreign_keys=[proveedor_id])
+    proveedor_origen = relationship("Proveedor", foreign_keys=[proveedor_origen_id])
     orden_compra = relationship("OrdenCompra")
     lineas = relationship("ReciboLinea", back_populates="recibo",
                           cascade="all, delete-orphan")
@@ -212,11 +230,17 @@ class ReciboLinea(Base):
     serial = Column(String(60))
     ubicacion_desde = Column(String(80))
     ubicacion_hasta = Column(String(80))
+    # Match por línea: un recibo puede contener varias OC.
+    orden_compra_id = Column(Integer, ForeignKey("ordenes_compra.id"), index=True)
+    cantidad_match = Column(Float, default=0.0)
+    cantidad_restringida = Column(Float, default=0.0)
+    estado_match = Column(String(20), default="PENDIENTE")  # PENDIENTE|COINCIDE|FALTANTE|SOBRANTE
     # DISPONIBLE | RESTRINGIDO
     condicion = Column(String(20), default="DISPONIBLE")
     procesada = Column(Boolean, default=False)
 
     recibo = relationship("Recibo", back_populates="lineas")
+    orden_compra = relationship("OrdenCompra")
 
     @property
     def diferencia(self):
@@ -239,6 +263,8 @@ class Novedad(Base):
     cantidad = Column(Float, default=0.0)
     # ORIGEN | MANIPULACION | PUESTA_A_PUNTO | AKT
     motivo = Column(String(30))
+    # RECEPCION = diferencia contra OC; MANUAL = hallazgo físico/operativo.
+    origen_novedad = Column(String(20), default="MANUAL")
     condicion_resultante = Column(String(20), default="RESTRINGIDO")
     evidencia_id = Column(Integer, ForeignKey("archivos.id"))
     # ABIERTA | EN_COLA_INVENTARIOS | AJUSTADA | CERRADA
