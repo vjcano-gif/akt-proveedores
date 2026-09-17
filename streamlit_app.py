@@ -9,8 +9,8 @@ st.set_page_config(page_title="AKT · Proveedores de Transformación",
                    initial_sidebar_state="expanded")
 
 from core import ui                                  # noqa: E402
-from core.auth import ROLES, autenticar, puede       # noqa: E402
-from core.db import db_label, healthcheck, init_db   # noqa: E402
+from core.auth import ROLES, autenticar, puede, ensure_bootstrap_user  # noqa: E402
+from core.db import db_label, healthcheck, init_db, is_postgres         # noqa: E402
 
 
 @st.cache_resource(show_spinner="Preparando la base de datos...")
@@ -22,7 +22,10 @@ def _arranque():
         vacio = s.query(Usuario.id).first() is None
     if vacio:
         from core.seed import sembrar
-        sembrar()
+        prod = is_postgres()
+        sembrar(con_demo=not prod, crear_usuarios_demo=not prod)
+        if prod:
+            ensure_bootstrap_user()
     return True
 
 
@@ -44,13 +47,23 @@ def pantalla_login():
                     st.rerun()
                 else:
                     st.error("Credenciales inválidas o usuario inactivo.")
-        with st.expander("Usuarios de demostración"):
-            st.markdown(
-                "| Correo | Rol | Contraseña |\n|---|---|---|\n"
-                "| proveedor@akt.com | Proveedor | akt2026 |\n"
-                "| recibo@akt.com | Recibo AKT | akt2026 |\n"
-                "| inventarios@akt.com | Inventarios | akt2026 |\n"
-                "| planeacion@akt.com | Planeación | akt2026 |")
+        if not is_postgres():
+            with st.expander("Usuarios de demostración"):
+                st.markdown(
+                    "| Correo | Rol | Contraseña |\n|---|---|---|\n"
+                    "| proveedor@akt.com | Proveedor | akt2026 |\n"
+                    "| recibo@akt.com | Recibo AKT | akt2026 |\n"
+                    "| inventarios@akt.com | Inventarios | akt2026 |\n"
+                    "| planeacion@akt.com | Planeación | akt2026 |")
+        else:
+            from core.db import session_scope
+            from core.models import Usuario
+            with session_scope() as s:
+                sin_usuarios = s.query(Usuario.id).first() is None
+            if sin_usuarios:
+                st.warning(
+                    "No hay usuarios productivos. Configure BOOTSTRAP_ADMIN_EMAIL y "
+                    "BOOTSTRAP_ADMIN_PASSWORD en Secrets y reinicie la app.")
         okdb, dialecto = healthcheck()
         st.caption(("🟢 " if okdb else "🔴 ") + db_label())
 
