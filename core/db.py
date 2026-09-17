@@ -90,8 +90,11 @@ def session_scope():
 
 
 def init_db():
-    """Crea todas las tablas si no existen."""
-    Base.metadata.create_all(get_engine())
+    """Crea tablas nuevas y aplica migraciones aditivas a instalaciones existentes."""
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    from core.migrations import run_migrations
+    run_migrations(engine)
 
 
 def healthcheck() -> tuple[bool, str]:
