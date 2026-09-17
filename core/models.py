@@ -217,6 +217,7 @@ class Recibo(Base):
     # BORRADOR | SELLADO | PENDIENTE_MATCH | NOVEDAD | CERRADA
     estado = Column(String(20), default="BORRADOR", index=True)
     orden_compra_id = Column(Integer, ForeignKey("ordenes_compra.id"))
+    referencia_bin = Column(String(120))
     es_reproceso = Column(Boolean, default=False)     # garantías / calidad
     sellado_por = Column(String(160))                 # proveedor certifica recepción
     sellado_en = Column(DateTime)
