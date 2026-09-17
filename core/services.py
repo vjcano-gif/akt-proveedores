@@ -345,6 +345,18 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
         if not po or not po.activo:
             raise ReglaNegocio("Proveedor origen inexistente o inactivo.")
 
+    if referencia:
+        fecha_ref = fecha_documento or dt.date.today()
+        duplicado = s.query(Documento).filter(
+            Documento.proveedor_id == proveedor_id,
+            Documento.tipo == origen,
+            Documento.referencia == str(referencia).strip(),
+            Documento.fecha_documento == fecha_ref,
+        ).first()
+        if duplicado:
+            raise ReglaNegocio(
+                f"Documento duplicado: {origen} {referencia} ya existe como {duplicado.trz}.")
+
     doc = crear_documento(
         s, origen, proveedor_id=proveedor_id, referencia=referencia,
         archivo_id=archivo_id, creado_por=usuario, fecha_documento=fecha_documento,
@@ -455,7 +467,7 @@ def adjuntar_bin_y_match(s, *, recibo_id, usuario, lineas_oc=None,
         if not r.documento.archivo_id:
             r.documento.archivo_id = archivo_id
     if referencia_bin:
-        r.documento.referencia = referencia_bin
+        r.referencia_bin = referencia_bin
 
     pendientes = [ln for ln in r.lineas if not ln.procesada]
     if not pendientes:
