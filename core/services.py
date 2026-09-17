@@ -426,109 +426,180 @@ def ordenes_compra_abiertas(s, proveedor_id, articulo=None):
     return q.order_by(OrdenCompra.fecha).all()
 
 
-def adjuntar_bin_y_match(s, *, recibo_id, orden_compra_id, usuario,
-                         archivo_id=None, referencia_bin=None) -> dict:
+def adjuntar_bin_y_match(s, *, recibo_id, usuario, lineas_oc=None,
+                         orden_compra_id=None, archivo_id=None,
+                         referencia_bin=None, actor=None) -> dict:
+    """Cruza cada línea con su OC y luego impacta inventario.
+
+    lineas_oc: dict {recibo_linea_id: orden_compra_id}.
+    orden_compra_id se conserva solo para recibos legados de una línea.
     """
-    El equipo de Recibo de AKT adjunta el BIN a BIN y lo cruza con una OC ABIERTA.
-    El sistema valida la cantidad:
-      - coincide  -> recibo CERRADA  -> ingresa inventario CRUDO
-      - discrepa  -> recibo NOVEDAD  -> ingresa lo recibido y abre novedad
-    """
+    _exigir_rol(actor, "RECIBO_AKT", "INVENTARIOS")
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
-    if r.estado in ("CERRADA",):
-        raise ReglaNegocio("El recibo ya está CERRADA.")
-    oc = s.get(OrdenCompra, orden_compra_id)
-    if not oc:
-        raise ReglaNegocio("Orden de compra inexistente.")
-    if oc.estado != "ABIERTA":
-        raise ReglaNegocio(f"La orden de compra {oc.numero} no está ABIERTA.")
-    if oc.proveedor_id != r.proveedor_id:
-        raise ReglaNegocio("La orden de compra pertenece a otro proveedor.")
-
-    recibido = sum(float(l.cantidad_fisica or 0) for l in r.lineas
-                   if l.articulo == oc.articulo)
-    if recibido <= 0:
-        raise ReglaNegocio(
-            f"El recibo no tiene cantidad del artículo {oc.articulo} de la OC {oc.numero}.")
+    if r.estado == "CERRADA":
+        raise ReglaNegocio("El recibo ya está cerrado.")
+    if r.origen == "FACTURA" and r.estado != "SELLADO":
+        raise ReglaNegocio("La factura debe estar SELLADA por el proveedor antes del match.")
+    if r.origen not in ("FACTURA", "BIN_A_BIN"):
+        raise ReglaNegocio("Este tipo de recibo no requiere match contra OC.")
 
     if archivo_id:
         r.documento.archivo_id = archivo_id
     if referencia_bin:
         r.documento.referencia = referencia_bin
-    r.orden_compra_id = oc.id
 
-    esperado = float(oc.pendiente)
-    dif = round(recibido - esperado, 6)
-    oc.cantidad_recibida = float(oc.cantidad_recibida or 0) + recibido
-    if oc.cantidad_recibida + TOL >= oc.cantidad:
-        oc.estado = "CERRADA"
+    pendientes = [ln for ln in r.lineas if not ln.procesada]
+    if not pendientes:
+        raise ReglaNegocio("El recibo no tiene líneas pendientes por procesar.")
 
+    mapping = {}
+    for k, v in (lineas_oc or {}).items():
+        try:
+            mapping[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    if orden_compra_id is not None:
+        if len(pendientes) != 1 and not mapping:
+            raise ReglaNegocio(
+                "El recibo tiene varias líneas: debe seleccionar una OC para cada línea.")
+        if len(pendientes) == 1:
+            mapping[pendientes[0].id] = int(orden_compra_id)
+
+    resultados, novedad_ids, ocs_usadas = [], [], set()
+    for ln in pendientes:
+        oc_id = mapping.get(ln.id) or ln.orden_compra_id
+        if not oc_id:
+            raise ReglaNegocio(f"Falta asignar OC a la línea {ln.articulo}.")
+        oc = s.get(OrdenCompra, int(oc_id))
+        if not oc:
+            raise ReglaNegocio(f"OC inexistente para la línea {ln.articulo}.")
+        if oc.estado != "ABIERTA":
+            raise ReglaNegocio(f"La orden de compra {oc.numero} no está ABIERTA.")
+        if oc.proveedor_id != r.proveedor_id:
+            raise ReglaNegocio(f"La OC {oc.numero} pertenece a otro proveedor.")
+        if str(oc.articulo).strip() != str(ln.articulo).strip():
+            raise ReglaNegocio(
+                f"La OC {oc.numero} corresponde a {oc.articulo}, no a {ln.articulo}.")
+
+        esperado = max(0.0, float(oc.pendiente or 0))
+        if esperado <= TOL:
+            raise ReglaNegocio(f"La OC {oc.numero} ya no tiene saldo pendiente.")
+        recibido = max(0.0, float(ln.cantidad_fisica or 0))
+        aplicado = min(recibido, esperado)
+        diferencia = round(recibido - esperado, 6)
+
+        oc.cantidad_recibida = float(oc.cantidad_recibida or 0) + aplicado
+        if oc.pendiente <= TOL:
+            oc.estado = "CERRADA"
+
+        ln.orden_compra_id = oc.id
+        ln.cantidad_match = aplicado
+        ln.cantidad_restringida = max(0.0, diferencia)
+        if abs(diferencia) <= TOL:
+            ln.estado_match = "COINCIDE"
+        elif diferencia < 0:
+            ln.estado_match = "FALTANTE"
+            nov = registrar_novedad(
+                s, recibo_id=r.id, proveedor_id=r.proveedor_id,
+                recibo_linea_id=ln.id, articulo=ln.articulo, tipo="FALTANTE",
+                cantidad=abs(diferencia), motivo="ORIGEN", usuario=usuario,
+                origen_novedad="RECEPCION", actor=None,
+                observaciones=(
+                    f"Faltante contra OC {oc.numero}: esperado {esperado:,.2f}, "
+                    f"recibido {recibido:,.2f}."))
+            novedad_ids.append(nov.id)
+        else:
+            ln.estado_match = "SOBRANTE"
+            nov = registrar_novedad(
+                s, recibo_id=r.id, proveedor_id=r.proveedor_id,
+                recibo_linea_id=ln.id, articulo=ln.articulo, tipo="SOBRANTE",
+                cantidad=diferencia, motivo="ORIGEN", usuario=usuario,
+                origen_novedad="RECEPCION", actor=None,
+                observaciones=(
+                    f"Sobrante contra OC {oc.numero}: esperado {esperado:,.2f}, "
+                    f"recibido {recibido:,.2f}."))
+            novedad_ids.append(nov.id)
+
+        ocs_usadas.add(oc.id)
+        resultados.append({
+            "linea_id": ln.id, "articulo": ln.articulo, "oc_id": oc.id,
+            "oc": oc.numero, "esperado": esperado, "recibido": recibido,
+            "aplicado_oc": aplicado, "diferencia": diferencia,
+            "estado": ln.estado_match,
+        })
+
+    r.orden_compra_id = next(iter(ocs_usadas)) if len(ocs_usadas) == 1 else None
     ingresar_inventario_recibo(s, r, usuario=usuario)
-
-    resultado = {"esperado": esperado, "recibido": recibido, "diferencia": dif}
-    if abs(dif) > TOL:
+    if novedad_ids:
         r.estado = "NOVEDAD"
-        tipo = "SOBRANTE" if dif > 0 else "FALTANTE"
-        nov = registrar_novedad(
-            s, recibo_id=r.id, articulo=oc.articulo, tipo=tipo,
-            cantidad=abs(dif), motivo="ORIGEN", usuario=usuario,
-            observaciones=(f"Discrepancia automática en match BIN a BIN vs OC {oc.numero}: "
-                           f"esperado {esperado:,.2f}, recibido {recibido:,.2f}."))
-        resultado["novedad_id"] = nov.id
-        resultado["estado"] = "NOVEDAD"
     else:
         r.estado = "CERRADA"
         r.cerrado_en = dt.datetime.utcnow()
-        resultado["estado"] = "CERRADA"
     s.flush()
-    auditar(s, usuario, None, "MATCH_OC", "recibos", r.id,
-            f"OC {oc.numero} -> {resultado['estado']}")
-    return resultado
+    auditar(s, usuario, _actor_rol(actor), "MATCH_OC", "recibos", r.id,
+            f"{len(resultados)} linea(s) -> {r.estado}")
+
+    out = {"estado": r.estado, "lineas": resultados, "novedad_ids": novedad_ids}
+    if len(resultados) == 1:
+        out.update({k: resultados[0][k] for k in ("esperado", "recibido", "diferencia")})
+        if novedad_ids:
+            out["novedad_id"] = novedad_ids[0]
+    return out
 
 
 def ingresar_inventario_recibo(s, recibo: Recibo, usuario=None) -> int:
-    """Ingresa al inventario CRUDO las líneas del recibo aún no procesadas."""
+    """Ingresa cantidades físicas validadas. El sobrante queda RESTRINGIDO."""
     n = 0
     for ln in recibo.lineas:
         if ln.procesada:
             continue
-        cant = float(ln.cantidad_fisica or 0)
-        if cant <= 0:
-            ln.procesada = True
-            continue
-        mover_inventario(
-            s, proveedor_id=recibo.proveedor_id, articulo=ln.articulo,
-            cantidad=cant, tipo="ENTRADA",
-            ubicacion=ln.ubicacion_hasta or recibo.ubicacion_destino or "",
-            estado="CRUDO", condicion=ln.condicion or "DISPONIBLE",
-            documento_id=recibo.documento_id,
-            referencia=recibo.documento.trz if recibo.documento else None,
-            usuario=usuario)
+        if recibo.origen in ("BIN_A_BIN", "FACTURA") and ln.estado_match == "PENDIENTE":
+            raise ReglaNegocio(
+                f"La línea {ln.articulo} no puede ingresar a inventario sin match contra OC.")
+        fisico = max(0.0, float(ln.cantidad_fisica or 0))
+        restringido = (max(0.0, float(ln.cantidad_restringida or 0))
+                       if ln.estado_match == "SOBRANTE" else 0.0)
+        disponible = max(0.0, fisico - restringido)
+        ubic = ln.ubicacion_hasta or recibo.ubicacion_destino or ""
+        if disponible > TOL:
+            mover_inventario(
+                s, proveedor_id=recibo.proveedor_id, articulo=ln.articulo,
+                cantidad=disponible, tipo="ENTRADA", ubicacion=ubic,
+                estado="CRUDO", condicion="DISPONIBLE",
+                documento_id=recibo.documento_id,
+                referencia=recibo.documento.trz if recibo.documento else None,
+                usuario=usuario)
+        if restringido > TOL:
+            mover_inventario(
+                s, proveedor_id=recibo.proveedor_id, articulo=ln.articulo,
+                cantidad=restringido, tipo="ENTRADA_SOBRANTE", ubicacion=ubic,
+                estado="CRUDO", condicion="RESTRINGIDO",
+                documento_id=recibo.documento_id,
+                referencia=recibo.documento.trz if recibo.documento else None,
+                usuario=usuario)
         ln.procesada = True
         n += 1
     s.flush()
     return n
 
 
-def confirmar_recibo_simple(s, recibo_id: int, usuario=None) -> Recibo:
-    """Cierra un recibo BIN_A_BIN o REGISTRO que no requiere match con OC."""
+def confirmar_recibo_simple(s, recibo_id: int, usuario=None, actor=None) -> Recibo:
+    """Cierra únicamente REGISTRO manual. BIN/FACTURA siempre requieren match con OC."""
     r = s.get(Recibo, recibo_id)
     if not r:
         raise ReglaNegocio("Recibo inexistente.")
+    _exigir_proveedor(actor, r.proveedor_id)
+    if r.origen != "REGISTRO":
+        raise ReglaNegocio("BIN a BIN y FACTURA deben pasar por el match contra OC.")
     if r.estado == "CERRADA":
         raise ReglaNegocio("El recibo ya está cerrado.")
     ingresar_inventario_recibo(s, r, usuario=usuario)
-    tiene_novedad = s.query(Novedad.id).filter(
-        Novedad.recibo_id == r.id,
-        Novedad.estado.in_(("ABIERTA", "EN_COLA_INVENTARIOS"))).first()
-    r.estado = "NOVEDAD" if tiene_novedad else "CERRADA"
-    if r.estado == "CERRADA":
-        r.cerrado_en = dt.datetime.utcnow()
+    r.estado = "CERRADA"
+    r.cerrado_en = dt.datetime.utcnow()
     s.flush()
     return r
-
 
 # =========================================================================
 # NOVEDADES
@@ -536,13 +607,9 @@ def confirmar_recibo_simple(s, recibo_id: int, usuario=None) -> Recibo:
 
 def registrar_novedad(s, *, recibo_id=None, proveedor_id=None, articulo, tipo,
                       cantidad, motivo="ORIGEN", usuario=None, evidencia_id=None,
-                      observaciones=None, recibo_linea_id=None) -> Novedad:
-    """
-    Novedades por FALTANTE, SOBRANTE o AVERIA.
-    - Deriva producto DISPONIBLE o RESTRINGIDO.
-    - AVERIA exige evidencia fotográfica de la destrucción y genera cola de
-      trabajo para el usuario de Inventarios (ajuste TD90 / TD96).
-    """
+                      observaciones=None, recibo_linea_id=None,
+                      origen_novedad="MANUAL", actor=None) -> Novedad:
+    """Registra una diferencia distinguiendo recepción vs hallazgo físico."""
     if tipo not in ("FALTANTE", "SOBRANTE", "AVERIA"):
         raise ReglaNegocio(f"Tipo de novedad no válido: {tipo}")
     cantidad = float(cantidad or 0)
@@ -554,71 +621,100 @@ def registrar_novedad(s, *, recibo_id=None, proveedor_id=None, articulo, tipo,
         proveedor_id = r.proveedor_id
     if not proveedor_id:
         raise ReglaNegocio("Falta el proveedor de la novedad.")
+    _exigir_proveedor(actor, proveedor_id)
 
     if tipo == "AVERIA" and not evidencia_id:
         raise ReglaNegocio(
-            "Una novedad de AVERÍA exige adjuntar la evidencia fotográfica de la destrucción.")
+            "Una novedad de AVERÍA exige adjuntar evidencia fotográfica de la destrucción.")
 
+    origen_novedad = (origen_novedad or "MANUAL").upper()
     doc = crear_documento(s, "NOVEDAD", proveedor_id=proveedor_id,
                           referencia=f"{tipo}:{articulo}", creado_por=usuario,
                           observaciones=observaciones)
-
     condicion = "RESTRINGIDO" if tipo in ("AVERIA", "SOBRANTE") else "DISPONIBLE"
     estado = "EN_COLA_INVENTARIOS" if tipo == "AVERIA" else "ABIERTA"
 
-    nov = Novedad(documento_id=doc.id, recibo_id=recibo_id,
-                  recibo_linea_id=recibo_linea_id, proveedor_id=proveedor_id,
-                  articulo=str(articulo).strip(), tipo=tipo, cantidad=cantidad,
-                  motivo=motivo, condicion_resultante=condicion,
-                  evidencia_id=evidencia_id, estado=estado, creado_por=usuario,
-                  observaciones=observaciones)
+    nov = Novedad(
+        documento_id=doc.id, recibo_id=recibo_id, recibo_linea_id=recibo_linea_id,
+        proveedor_id=proveedor_id, articulo=str(articulo).strip(), tipo=tipo,
+        cantidad=cantidad, motivo=motivo, origen_novedad=origen_novedad,
+        condicion_resultante=condicion, evidencia_id=evidencia_id, estado=estado,
+        creado_por=usuario, observaciones=observaciones)
     s.add(nov)
     s.flush()
 
+    if origen_novedad == "MANUAL":
+        if tipo == "SOBRANTE":
+            mover_inventario(
+                s, proveedor_id=proveedor_id, articulo=articulo, cantidad=cantidad,
+                tipo="NOVEDAD_SOBRANTE", estado="CRUDO", condicion="RESTRINGIDO",
+                documento_id=doc.id, referencia=doc.trz, usuario=usuario)
+        elif tipo == "AVERIA":
+            reclasificar(
+                s, proveedor_id=proveedor_id, articulo=articulo, cantidad=cantidad,
+                estado="CRUDO", desde="DISPONIBLE", hacia="RESTRINGIDO",
+                documento_id=doc.id, referencia=doc.trz, usuario=usuario)
+
     if r and r.estado not in ("CERRADA",):
         r.estado = "NOVEDAD"
-    auditar(s, usuario, None, "NOVEDAD", "novedades", nov.id, f"{tipo} {articulo} {cantidad}")
+    auditar(s, usuario, _actor_rol(actor), "NOVEDAD", "novedades", nov.id,
+            f"{tipo} {articulo} {cantidad} [{origen_novedad}]")
     return nov
 
 
 def ajustar_novedad(s, *, novedad_id, documento_ajuste, numero_ajuste,
-                    usuario, aplicar_inventario=True) -> Novedad:
-    """
-    El usuario de Inventarios monta el documento de ajuste (TD90 / TD96)
-    y cierra la novedad.
-    """
+                    usuario, aplicar_inventario=True, accion_sobrante="LIBERAR",
+                    actor=None) -> Novedad:
+    """Aplica TD90/TD96 sin duplicar el efecto de diferencias de recepción."""
+    _exigir_rol(actor, "INVENTARIOS")
     if documento_ajuste not in ("TD90", "TD96"):
         raise ReglaNegocio("El documento de ajuste debe ser TD90 o TD96.")
+    if not str(numero_ajuste or "").strip():
+        raise ReglaNegocio("Debe indicar el número del documento de ajuste.")
     nov = s.get(Novedad, novedad_id)
     if not nov:
         raise ReglaNegocio("Novedad inexistente.")
     if nov.estado == "CERRADA":
         raise ReglaNegocio("La novedad ya está cerrada.")
 
-    doc = crear_documento(s, "AJUSTE", proveedor_id=nov.proveedor_id,
-                          referencia=f"{documento_ajuste} {numero_ajuste}",
-                          creado_por=usuario)
+    doc = crear_documento(
+        s, "AJUSTE", proveedor_id=nov.proveedor_id,
+        referencia=f"{documento_ajuste} {numero_ajuste}", creado_por=usuario)
+
     if aplicar_inventario:
         if nov.tipo == "AVERIA":
-            # La avería destruye producto: sale del inventario restringido
             descontar_distribuido(
                 s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
-                cantidad=nov.cantidad, tipo="AJUSTE", estado="CRUDO",
+                cantidad=nov.cantidad, tipo="AJUSTE_AVERIA", estado="CRUDO",
                 condicion="RESTRINGIDO", documento_id=doc.id,
-                referencia=doc.referencia, usuario=usuario, permitir_negativo=True)
+                referencia=doc.referencia, usuario=usuario)
+            nov.condicion_resultante = "DESTRUIDO"
         elif nov.tipo == "FALTANTE":
-            descontar_distribuido(
-                s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
-                cantidad=nov.cantidad, tipo="AJUSTE", estado="CRUDO",
-                condicion="DISPONIBLE", documento_id=doc.id,
-                referencia=doc.referencia, usuario=usuario, permitir_negativo=True)
+            if (nov.origen_novedad or "MANUAL").upper() != "RECEPCION":
+                descontar_distribuido(
+                    s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
+                    cantidad=nov.cantidad, tipo="AJUSTE_FALTANTE", estado="CRUDO",
+                    condicion="DISPONIBLE", documento_id=doc.id,
+                    referencia=doc.referencia, usuario=usuario)
+            nov.condicion_resultante = "SIN_INGRESO"
         elif nov.tipo == "SOBRANTE":
-            # El sobrante estaba restringido: se libera a disponible
-            reclasificar(s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
-                         cantidad=abs(nov.cantidad), estado="CRUDO",
-                         desde="RESTRINGIDO", hacia="DISPONIBLE",
-                         documento_id=doc.id, referencia=doc.referencia,
-                         usuario=usuario)
+            accion = (accion_sobrante or "LIBERAR").upper()
+            if accion == "LIBERAR":
+                reclasificar(
+                    s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
+                    cantidad=nov.cantidad, estado="CRUDO",
+                    desde="RESTRINGIDO", hacia="DISPONIBLE",
+                    documento_id=doc.id, referencia=doc.referencia, usuario=usuario)
+                nov.condicion_resultante = "DISPONIBLE"
+            elif accion == "DEVOLVER":
+                descontar_distribuido(
+                    s, proveedor_id=nov.proveedor_id, articulo=nov.articulo,
+                    cantidad=nov.cantidad, tipo="DEVOLUCION_SOBRANTE", estado="CRUDO",
+                    condicion="RESTRINGIDO", documento_id=doc.id,
+                    referencia=doc.referencia, usuario=usuario)
+                nov.condicion_resultante = "DEVUELTO"
+            else:
+                raise ReglaNegocio("Acción de sobrante no válida: use LIBERAR o DEVOLVER.")
 
     nov.documento_ajuste = documento_ajuste
     nov.numero_ajuste = numero_ajuste
@@ -629,18 +725,16 @@ def ajustar_novedad(s, *, novedad_id, documento_ajuste, numero_ajuste,
 
     if nov.recibo_id:
         pend = s.query(Novedad.id).filter(
-            Novedad.recibo_id == nov.recibo_id,
-            Novedad.estado != "CERRADA").first()
+            Novedad.recibo_id == nov.recibo_id, Novedad.estado != "CERRADA").first()
         if not pend:
             r = s.get(Recibo, nov.recibo_id)
             if r and r.estado == "NOVEDAD":
                 r.estado = "CERRADA"
                 r.cerrado_en = dt.datetime.utcnow()
     s.flush()
-    auditar(s, usuario, None, "AJUSTAR_NOVEDAD", "novedades", nov.id,
+    auditar(s, usuario, _actor_rol(actor), "AJUSTAR_NOVEDAD", "novedades", nov.id,
             f"{documento_ajuste} {numero_ajuste}")
     return nov
-
 
 def cola_inventarios(s, proveedor_id=None):
     """Cola de trabajo del equipo de Inventarios."""
