@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import os
 from pathlib import Path
 
 from sqlalchemy import func
@@ -119,7 +120,8 @@ def sembrar(force=False, con_demo=None) -> dict:
                     seq = int(float(r.get("secuencia") or 0))
                 except ValueError:
                     seq = 0
-                k = (at, cp, seq)
+                pc = (r.get("proveedor_codigo") or "").strip()
+                k = (at, cp, seq, pc)
                 if k in vistos:
                     continue
                 vistos.add(k)
@@ -131,7 +133,7 @@ def sembrar(force=False, con_demo=None) -> dict:
                     articulo_transformado=at, desc_transformado=(r.get("desc_transformado") or "")[:300],
                     componente=cp, desc_componente=(r.get("desc_componente") or "")[:300],
                     cantidad=cant, secuencia=seq, fase=(r.get("fase") or "")[:20],
-                    proveedor_codigo=(r.get("proveedor_codigo") or "")[:40],
+                    proveedor_codigo=pc[:40],
                     proveedor_nombre=(r.get("proveedor_nombre") or "")[:200], activo=True))
                 n += 1
                 if len(objs) >= 3000:
