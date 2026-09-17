@@ -12,7 +12,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from core.models import (
     Archivo, Articulo, Averia, Bom, ConsumoProduccion, ConteoEjecutado,
@@ -41,30 +41,45 @@ PREFIJOS = {
 
 
 def nuevo_trz(s, tipo: str) -> str:
-    """Genera TRZ secuencial usando un contador bloqueado por tipo/año."""
+    """Genera TRZ atómicamente; evita colisiones incluso al crear el primer contador."""
     anio = dt.date.today().year
     pre = PREFIJOS.get(tipo, "DOC")
     clave = f"{pre}:{anio}"
-    q = s.query(Consecutivo).filter(Consecutivo.clave == clave)
-    try:
-        q = q.with_for_update()
-    except Exception:
-        pass
+    patron = f"TRZ-{pre}-{anio}-%"
+
+    # Permite migrar una base que ya tenía TRZ antes de existir la tabla consecutivos.
+    docs = s.query(Documento.trz).filter(Documento.trz.like(patron)).all()
+    maximo = 0
+    for (trz,) in docs:
+        try:
+            maximo = max(maximo, int(str(trz).rsplit("-", 1)[-1]))
+        except (TypeError, ValueError):
+            pass
+
+    dialecto = s.get_bind().dialect.name
+    if dialecto in ("postgresql", "sqlite"):
+        stmt = text("""
+            INSERT INTO consecutivos (clave, valor, actualizado_en)
+            VALUES (:clave, :inicial, :ahora)
+            ON CONFLICT (clave) DO UPDATE
+              SET valor = consecutivos.valor + 1,
+                  actualizado_en = :ahora
+            RETURNING valor
+        """)
+        valor = s.execute(stmt, {
+            "clave": clave, "inicial": maximo + 1,
+            "ahora": dt.datetime.utcnow(),
+        }).scalar_one()
+        return f"TRZ-{pre}-{anio}-{int(valor):06d}"
+
+    # Fallback para otros motores.
+    q = s.query(Consecutivo).filter(Consecutivo.clave == clave).with_for_update()
     contador = q.first()
     if contador is None:
-        # Inicializa desde documentos existentes para bases migradas.
-        patron = f"TRZ-{pre}-{anio}-%"
-        docs = s.query(Documento.trz).filter(Documento.trz.like(patron)).all()
-        maximo = 0
-        for (trz,) in docs:
-            try:
-                maximo = max(maximo, int(str(trz).rsplit("-", 1)[-1]))
-            except (TypeError, ValueError):
-                pass
         contador = Consecutivo(clave=clave, valor=maximo)
         s.add(contador)
         s.flush()
-    contador.valor = int(contador.valor or 0) + 1
+    contador.valor = max(int(contador.valor or 0), maximo) + 1
     s.flush()
     return f"TRZ-{pre}-{anio}-{contador.valor:06d}"
 
@@ -187,6 +202,13 @@ def mover_inventario(s, *, proveedor_id, articulo, cantidad, tipo,
 
     p, a, u, e, c = _clave(proveedor_id, articulo, ubicacion, estado, condicion)
     _validar_ubicacion_movimiento(s, p, u, cantidad, c)
+
+    # En PostgreSQL bloquea una clave lógica incluso cuando el saldo aún no existe,
+    # evitando dos INSERT simultáneos sobre uq_saldo.
+    if s.get_bind().dialect.name == "postgresql":
+        lock_key = f"{p}|{a}|{u}|{e}|{c}"
+        s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
+
     qsaldo = s.query(Inventario).filter_by(
         proveedor_id=p, articulo=a, ubicacion=u, estado=e, condicion=c)
     try:
