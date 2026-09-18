@@ -45,7 +45,8 @@ akt_cols = {
     c["name"] for c in insp.get_columns(
         "proveedores", schema="akt_proveedores")
 }
-assert {"codigo", "nombre", "tolerancia_averia_pct", "ubicacion_destino"} <= akt_cols
+assert {"codigo", "nombre", "tolerancia_averia_pct",
+        "ubicacion_origen", "ubicacion_destino"} <= akt_cols
 
 public_cols = {
     c["name"] for c in insp.get_columns("proveedores", schema="public")
@@ -63,6 +64,7 @@ with session_scope() as s:
         codigo="TEST-SCHEMA",
         nombre="Proveedor aislado",
         tolerancia_averia_pct=1.0,
+        ubicacion_origen=None,
         ubicacion_destino=None,
         activo=True,
     ))
