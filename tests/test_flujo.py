@@ -57,6 +57,7 @@ init_db()
 with session_scope() as s:
     p = Proveedor(codigo="VDR0013714", nombre="Transformador Principal",
                   tolerancia_averia_pct=1.0,
+                  ubicacion_origen="UB-ORIGEN",
                   ubicacion_destino="UB-PROV-01", activo=True)
     origen = Proveedor(codigo="VDRORIGEN", nombre="Proveedor Origen", activo=True)
     alt = Proveedor(codigo="VDRALT", nombre="Transformador Alterno", activo=True)
@@ -101,16 +102,33 @@ with session_scope() as s:
     s.flush()
     OCS = {o.numero: o.id for o in s.query(OrdenCompra).all()}
 
-print("\n=== 0B. UBICACIÓN PRINCIPAL DEL PROVEEDOR ===")
+print("\n=== 0B. REGLAS DESDE / HASTA DEL BIN ===")
 with session_scope() as s:
     esperar_error(
-        "Recibo rechaza ubicación distinta a la principal",
+        "HASTA distinto al maestro bloquea el BIN",
         lambda: sv.crear_recibo(
-            s, proveedor_id=PID, origen="REGISTRO", usuario="test",
-            ubicacion_destino="UB-PROC-01",
-            lineas=[sv.LineaRecibo("CP-A", "Carenaje", 1, 1,
-                                   ubicacion_hasta="UB-PROC-01")]),
-        "Debe ser UB-PROV-01")
+            s, proveedor_id=PID, origen="BIN_A_BIN", usuario="test",
+            ubicacion_destino="UB-PROV-01",
+            lineas=[sv.LineaRecibo(
+                "CP-A", "Carenaje", 1, 1,
+                ubicacion_desde="UB-ORIGEN",
+                ubicacion_hasta="UB-PROC-01")]),
+        "HASTA")
+
+with session_scope() as s:
+    r_alerta = sv.crear_recibo(
+        s, proveedor_id=PID, origen="BIN_A_BIN",
+        referencia="BIN-DESDE-ALERTA", usuario="test",
+        ubicacion_destino="UB-PROV-01",
+        lineas=[sv.LineaRecibo(
+            "CP-A", "Carenaje", 1, 1,
+            ubicacion_desde="UB-PROC-01",
+            ubicacion_hasta="UB-PROV-01")])
+    alertas = sv.validar_bin_a_bin(s, r_alerta, PID)
+    check("DESDE distinto genera alerta pero no bloquea",
+          bool(alertas) and "DESDE" in alertas[0], str(alertas))
+    check("HASTA correcto permite crear el BIN",
+          r_alerta.estado == "PENDIENTE_MATCH")
 
 print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
 with session_scope() as s:
@@ -119,6 +137,7 @@ with session_scope() as s:
         usuario="test", ubicacion_destino="UB-PROV-01",
         lineas=[sv.LineaRecibo(
             "CP-C", "Soporte", cantidad_documento=10, cantidad_fisica=0,
+            ubicacion_desde="UB-ORIGEN",
             ubicacion_hasta="UB-PROV-01")])
     check("Cantidad física cero no se reemplaza por documento",
           float(r0.lineas[0].cantidad_fisica) == 0.0)
@@ -192,6 +211,7 @@ with session_scope() as s:
         s, proveedor_id=PID, origen="BIN_A_BIN", referencia="BIN-SOB",
         usuario="proveedor@akt.com", ubicacion_destino="UB-PROV-01",
         lineas=[sv.LineaRecibo("CP-B", "Calca", 10, 13,
+                               ubicacion_desde="UB-ORIGEN",
                                ubicacion_hasta="UB-PROV-01")])
     RB3, LIN3 = r.id, r.lineas[0].id
 
@@ -455,6 +475,32 @@ q_corregida = next(
     x["cantidad_documento"] for x in corregido["lineas"]
     if x["articulo"] == "7700149386173")
 check("Parser BIN corrige cantidad heurística 1 -> 179", q_corregida == 179.0)
+
+resultado_espacial = {
+    "texto": sample_bin_real,
+    "confianza_texto": 0.99,
+    "lineas": [],
+    "bin_filas_espaciales": [{
+        "articulo": "7700149386142",
+        "descripcion_ocr": "Carenaje Farola 200DS+ Mp",
+        "cantidad_documento": 179.0,
+        "cantidad_fisica": 0.0,
+        "serial": "NONE",
+        "lote": "NONE",
+        "ubicacion_desde": "WSERE PSER 1 1 1",
+        "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+        "fuente": "BIN_ESPACIAL",
+    }],
+}
+resultado_espacial = completar_con_catalogo(resultado_espacial, catalogo_bin)
+esp = next(x for x in resultado_espacial["lineas"]
+           if x["articulo"] == "7700149386142")
+check("BIN espacial conserva DESDE",
+      esp["ubicacion_desde"] == "WSERE PSER 1 1 1", str(esp))
+check("BIN espacial conserva HASTA",
+      esp["ubicacion_hasta"] == "WSERE WSER VIPI NTAR TE", str(esp))
+check("BIN espacial conserva cantidad",
+      esp["cantidad_documento"] == 179.0, str(esp))
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:
