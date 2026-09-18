@@ -19,7 +19,8 @@ from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
 import core.services as sv  # noqa: E402
-from core.auth import puede  # noqa: E402
+from core.auth import alcance_proveedor, puede  # noqa: E402
+from core.ui import catalogo_proveedores  # noqa: E402
 
 OK, FAIL = [], []
 
@@ -63,7 +64,8 @@ with session_scope() as s:
                   ubicacion_destino="UB-PROV-01", activo=True)
     origen = Proveedor(codigo="VDRORIGEN", nombre="Proveedor Origen", activo=True)
     alt = Proveedor(codigo="VDRALT", nombre="Transformador Alterno", activo=True)
-    s.add_all([p, origen, alt]); s.flush()
+    inactivo = Proveedor(codigo="VDRINACT", nombre="Proveedor Inactivo", activo=False)
+    s.add_all([p, origen, alt, inactivo]); s.flush()
     PID, ORIGEN_ID, ALT_ID = p.id, origen.id, alt.id
 
     for cod, pid, cerrada, restringida in (
@@ -103,6 +105,14 @@ with session_scope() as s:
                           cantidad=qty, estado="ABIERTA", fecha=dt.date.today()))
     s.flush()
     OCS = {o.numero: o.id for o in s.query(OrdenCompra).all()}
+
+print("\n=== 0AA. SELECTOR DE PROVEEDORES ===")
+df_prov = catalogo_proveedores()
+codigos_activos = set(df_prov["codigo"].tolist())
+check("Selector incluye proveedor activo", "VDR0013714" in codigos_activos)
+check("Selector excluye proveedor inactivo", "VDRINACT" not in codigos_activos)
+check("Rol PROVEEDOR queda acotado a su proveedor",
+      alcance_proveedor({"rol": "PROVEEDOR", "proveedor_id": PID}) == PID)
 
 print("\n=== 0B. REGLAS DESDE / HASTA DEL BIN ===")
 with session_scope() as s:
