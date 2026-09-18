@@ -773,11 +773,19 @@ try:
     # reproducir el alineado real del ERP. Cada fila se imprime dos veces con
     # un pequeño desplazamiento para simular las capas duplicadas del PDF real.
     xs_pdf = [20, 120, 260, 526, 635, 775, 925, 1120]
+    # Reproduce el fallo real: desde la segunda fila, Cantidad y ubicaciones
+    # tienen baselines distintos al Código/Descripción.
+    offsets_por_fila = [
+        [0, 0, 0, 0,   0, 0, 0,    0],
+        [0, 0, 0, 6.5, 0, 0, 4.2,  4.2],
+        [0, 0, 0, -6,  0, 0, -3.8, -3.8],
+    ]
     y_pdf = 175
-    for row in rows_pdf:
-        for txt_cell, x_cell in zip(row, xs_pdf):
-            page.insert_text((x_cell, y_pdf), txt_cell, fontsize=8)
-            page.insert_text((x_cell + 1.8, y_pdf + 0.9), txt_cell, fontsize=8)
+    for idx_row, row in enumerate(rows_pdf):
+        for idx_col, (txt_cell, x_cell) in enumerate(zip(row, xs_pdf)):
+            y_cell = y_pdf + offsets_por_fila[idx_row][idx_col]
+            page.insert_text((x_cell, y_cell), txt_cell, fontsize=8)
+            page.insert_text((x_cell + 1.8, y_cell + 0.9), txt_cell, fontsize=8)
         y_pdf += 28
 
     pdf_bytes = pdf_doc.tobytes()
