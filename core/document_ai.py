@@ -24,6 +24,211 @@ class Campo:
     fuente: str = ""
 
 
+def _openai_api_key() -> str:
+    """Obtiene OPENAI_API_KEY desde entorno o Streamlit secrets."""
+    key = str(os.getenv("OPENAI_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        import streamlit as st
+        key = str(st.secrets.get("OPENAI_API_KEY", "") or "").strip()
+    except Exception:
+        key = ""
+    return key
+
+
+def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> dict | None:
+    """Lee fotos de documentos con GPT-5 nano + Structured Outputs.
+
+    OpenAI se usa como motor principal para fotografías. Si no hay API key,
+    si el archivo es PDF, o si la API falla, el flujo continúa con los
+    motores de respaldo existentes.
+    """
+    key = _openai_api_key()
+    if not key or not data:
+        return None
+
+    import requests
+
+    name = (nombre or "").lower()
+    mime = (mime or "").strip().lower()
+    if not mime:
+        if name.endswith(".png"):
+            mime = "image/png"
+        elif name.endswith((".jpg", ".jpeg")):
+            mime = "image/jpeg"
+        elif name.endswith(".webp"):
+            mime = "image/webp"
+        elif name.endswith(".pdf"):
+            mime = "application/pdf"
+
+    # Por ahora OpenAI Vision se activa para imágenes; PDF conserva el lector
+    # nativo/Mistral como respaldo porque los BIN PDF ya tienen parser X/Y.
+    if not mime.startswith("image/"):
+        return None
+
+    encoded = base64.b64encode(data).decode("ascii")
+    data_url = f"data:{mime};base64,{encoded}"
+    model = str(
+        os.getenv("OPENAI_VISION_MODEL")
+        or "gpt-5-nano-2025-08-07"
+    ).strip()
+
+    prompt = (
+        "Lee este documento de recibo con máxima precisión visual. "
+        "NO inventes, NO completes y NO corrijas códigos ni cantidades. "
+        "Si un carácter o número no es legible devuelve null en ese campo. "
+        "Clasifica tipo_documento como BIN_A_BIN, FACTURA u OTRO. "
+        "Si es BIN_A_BIN, extrae exactamente una fila por cada renglón visible "
+        "de la tabla. El campo codigo debe contener exactamente el código impreso. "
+        "El campo cantidad debe tomarse EXCLUSIVAMENTE de la columna Cantidad; "
+        "nunca uses números de la descripción, serial, lote, DESDE o HASTA. "
+        "Conserva Serial, Lote, DESDE y HASTA tal como aparecen. "
+        "No omitas una fila legible y no agregues filas que no existan."
+    )
+
+    fila_schema = {
+        "type": "object",
+        "properties": {
+            "proveedor": {"type": ["string", "null"]},
+            "codigo": {"type": ["string", "null"]},
+            "descripcion": {"type": ["string", "null"]},
+            "cantidad": {"type": ["number", "null"]},
+            "serial": {"type": ["string", "null"]},
+            "lote": {"type": ["string", "null"]},
+            "desde": {"type": ["string", "null"]},
+            "hasta": {"type": ["string", "null"]},
+        },
+        "required": [
+            "proveedor", "codigo", "descripcion", "cantidad",
+            "serial", "lote", "desde", "hasta",
+        ],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "tipo_documento": {
+                "type": "string",
+                "enum": ["BIN_A_BIN", "FACTURA", "OTRO"],
+            },
+            "referencia": {"type": ["string", "null"]},
+            "fecha": {"type": ["string", "null"]},
+            "filas": {"type": "array", "items": fila_schema},
+        },
+        "required": ["tipo_documento", "referencia", "fecha", "filas"],
+        "additionalProperties": False,
+    }
+
+    payload = {
+        "model": model,
+        "store": False,
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "image_url": data_url,
+                    "detail": "high",
+                },
+            ],
+        }],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "documento_recibo",
+                "description": "Extracción exacta de BIN a BIN o factura.",
+                "schema": schema,
+                "strict": True,
+            }
+        },
+        "max_output_tokens": 5000,
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=75,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "texto": "",
+            "filas": [],
+            "fuente": "OPENAI_GPT5_NANO",
+            "modelo": model,
+        }
+
+    output_text = ""
+    for item in raw.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if part.get("type") == "output_text" and part.get("text"):
+                output_text += str(part["text"])
+
+    if not output_text.strip():
+        return {
+            "ok": False,
+            "error": "OpenAI no devolvió salida estructurada.",
+            "texto": "",
+            "filas": [],
+            "fuente": "OPENAI_GPT5_NANO",
+            "modelo": model,
+        }
+
+    try:
+        anot = json.loads(output_text)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"JSON inválido de OpenAI: {type(e).__name__}: {e}",
+            "texto": output_text,
+            "filas": [],
+            "fuente": "OPENAI_GPT5_NANO",
+            "modelo": model,
+        }
+
+    filas = []
+    for row in anot.get("filas") or []:
+        if not isinstance(row, dict):
+            continue
+        filas.append({
+            "proveedor": str(row.get("proveedor") or "").strip(),
+            "codigo": str(row.get("codigo") or "").strip(),
+            "descripcion": str(row.get("descripcion") or "").strip(),
+            "cantidad": _num(row.get("cantidad")),
+            "serial": str(row.get("serial") or "").strip(),
+            "lote": str(row.get("lote") or "").strip(),
+            "desde": str(row.get("desde") or "").strip(),
+            "hasta": str(row.get("hasta") or "").strip(),
+        })
+
+    usage = raw.get("usage") or {}
+    return {
+        "ok": True,
+        # El JSON estructurado es también el texto auditable de esta lectura.
+        "texto": output_text,
+        "tipo_documento": str(
+            anot.get("tipo_documento") or "").strip().upper(),
+        "referencia": str(anot.get("referencia") or "").strip(),
+        "fecha": str(anot.get("fecha") or "").strip(),
+        "filas": filas,
+        "modelo": str(raw.get("model") or model),
+        "usage_info": usage,
+        "fuente": "OPENAI_GPT5_NANO",
+    }
+
+
 def _mistral_api_key() -> str:
     """Obtiene la API key sin exponerla ni guardarla en el repositorio."""
     key = str(os.getenv("MISTRAL_API_KEY") or "").strip()
