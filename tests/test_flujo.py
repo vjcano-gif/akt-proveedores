@@ -13,7 +13,7 @@ from core.db import init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
                               lineas_bin_desde_texto, resumir_ubicaciones_bin,
-                              _texto_rapid_ordenado,
+                              extraer_bin_columnas_pdf, _texto_rapid_ordenado,
                               _extraer_bin_columnas_resultado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
@@ -684,6 +684,74 @@ check("BIN espacial conserva HASTA",
       esp["ubicacion_hasta"] == "WSERE WSER VIPI NTAR TE", str(esp))
 check("BIN espacial conserva cantidad",
       esp["cantidad_documento"] == 179.0, str(esp))
+
+print("\n=== 10A2. PDF BIN NATIVO CON COLUMNAS ===")
+try:
+    import fitz
+
+    pdf_doc = fitz.open()
+    page = pdf_doc.new_page(width=1400, height=600)
+
+    # Encabezado general.
+    page.insert_text((40, 45), "MOVIMIENTO BIN A BIN", fontsize=13)
+    page.insert_text((40, 75), "Id de Bin: BIN2654425", fontsize=10)
+    page.insert_text((740, 75), "Fecha: 18/09/2026", fontsize=10)
+
+    # Cabeceras en posiciones equivalentes al BIN real.
+    headers_pdf = [
+        ("Proveedor", 20), ("Código", 120), ("Descripción", 260),
+        ("Cantidad", 540), ("Serial", 635), ("Lote", 775),
+        ("Desde", 925), ("Hasta", 1120),
+    ]
+    for txt_h, x_h in headers_pdf:
+        page.insert_text((x_h, 140), txt_h, fontsize=9)
+
+    rows_pdf = [
+        ("CHONGQING-012", "7700149453691", "Base Silla 200DS+ Mp", "80",
+         "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+        ("SANYANG IN-001", "7700149422819", "Base Sillin RX Mp", "156",
+         "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+        ("SANYANG IN-001", "7700149616157", "Base silla tras 125SC-R PRO Mp", "288",
+         "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+    ]
+    xs_pdf = [20, 120, 260, 540, 635, 775, 925, 1120]
+    y_pdf = 175
+    for row in rows_pdf:
+        for txt_cell, x_cell in zip(row, xs_pdf):
+            page.insert_text((x_cell, y_pdf), txt_cell, fontsize=8)
+        y_pdf += 28
+
+    pdf_bytes = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    filas_pdf = extraer_bin_columnas_pdf(pdf_bytes)
+    check("PDF BIN obtiene las 3 filas", len(filas_pdf) == 3, str(filas_pdf))
+    qty_pdf = {x["articulo"]: x["cantidad_documento"] for x in filas_pdf}
+    check("PDF BIN conserva cantidades 80/156/288",
+          qty_pdf.get("7700149453691") == 80.0
+          and qty_pdf.get("7700149422819") == 156.0
+          and qty_pdf.get("7700149616157") == 288.0,
+          str(qty_pdf))
+    check("PDF BIN reconoce DESDE",
+          all(x["ubicacion_desde"] == "WSERE PUMO 1 1 1" for x in filas_pdf),
+          str(filas_pdf))
+    check("PDF BIN reconoce HASTA",
+          all(x["ubicacion_hasta"] == "WSERE WUMO 1 1 1" for x in filas_pdf),
+          str(filas_pdf))
+
+    analisis_pdf = analizar_documento(
+        "BIN2654425.pdf", pdf_bytes, "application/pdf")
+    check("Analizador PDF usa geometría BIN",
+          len(analisis_pdf.get("bin_filas_espaciales") or []) == 3,
+          str(analisis_pdf.get("bin_filas_espaciales")))
+    check("Analizador PDF resume DESDE documental",
+          analisis_pdf.get("bin_ubicacion_desde") == "WSERE PUMO 1 1 1",
+          str(analisis_pdf.get("bin_desde_valores")))
+    check("Analizador PDF resume HASTA documental",
+          analisis_pdf.get("bin_ubicacion_hasta") == "WSERE WUMO 1 1 1",
+          str(analisis_pdf.get("bin_hasta_valores")))
+except Exception as e:
+    check("PDF BIN nativo ejecuta sin excepción", False, f"{type(e).__name__}: {e}")
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:

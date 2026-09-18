@@ -320,6 +320,62 @@ def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
         return []
 
 
+def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
+    """Extrae la tabla BIN de un PDF nativo usando coordenadas de PyMuPDF.
+
+    Un PDF con capa de texto no debe pasar por OCR para conservar las columnas:
+    PyMuPDF entrega cada palabra con x0/y0/x1/y1 y esas coordenadas se adaptan
+    al mismo parser geométrico usado para imágenes.
+    """
+    import fitz
+    from types import SimpleNamespace
+
+    if not data:
+        return []
+
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:
+        return []
+
+    out = []
+    for pagina in doc:
+        try:
+            words = pagina.get_text("words") or []
+        except Exception:
+            continue
+        if not words:
+            continue
+
+        txts, boxes = [], []
+        for w in words:
+            # PyMuPDF: x0, y0, x1, y1, word, block_no, line_no, word_no
+            if len(w) < 5:
+                continue
+            x0, y0, x1, y1, txt = w[:5]
+            txt = str(txt or "").strip()
+            if not txt:
+                continue
+            txts.append(txt)
+            boxes.append([
+                [float(x0), float(y0)],
+                [float(x1), float(y0)],
+                [float(x1), float(y1)],
+                [float(x0), float(y1)],
+            ])
+
+        if not txts:
+            continue
+
+        pseudo = SimpleNamespace(txts=txts, boxes=boxes, scores=[1.0] * len(txts))
+        filas = _extraer_bin_columnas_resultado(pseudo, txts)
+        for fila in filas:
+            fila["fuente"] = "BIN_PDF_ESPACIAL"
+            out.append(fila)
+
+    return out
+
+
 def resumir_ubicaciones_bin(filas: list[dict]) -> dict:
     """Resume DESDE/HASTA a nivel de documento.
 
@@ -775,7 +831,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "ubicacion_desde": row.get("ubicacion_desde", ""),
             "ubicacion_hasta": row.get("ubicacion_hasta", ""),
             "confianza": round(min(cf, 0.99), 3),
-            "fuente": "BIN_ESPACIAL",
+            "fuente": row.get("fuente", "BIN_ESPACIAL"),
         })
 
     for ln in propuestas + propuestas_bin + propuestas_espaciales:
@@ -789,7 +845,8 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         fuente_nueva = str(ln.get("fuente") or "")
         fuente_actual = str(actual.get("fuente") or "")
         prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1,
-                     "BIN_TABLA": 2, "BIN_ESPACIAL": 3}
+                     "BIN_TABLA": 2, "BIN_ESPACIAL": 3,
+                     "BIN_PDF_ESPACIAL": 4}
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
@@ -821,8 +878,13 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
     out = estructurar(texto, cf)
     name = (nombre or "").lower()
-    if (mime or "").startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+    mime = mime or ""
+
+    if mime.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
         out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
+    elif mime == "application/pdf" or name.endswith(".pdf"):
+        # Para PDF nativo, conserva X/Y de cada palabra; no depende del texto plano.
+        out["bin_filas_espaciales"] = extraer_bin_columnas_pdf(data)
     else:
         out["bin_filas_espaciales"] = []
 
