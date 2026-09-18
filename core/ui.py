@@ -190,7 +190,6 @@ def catalogo_ubicaciones(proveedor_id=None, incluir_restringidas=False) -> list[
         return [c for (c,) in q.order_by(Ubicacion.codigo).all()]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def catalogo_proveedores() -> pd.DataFrame:
     from core.models import Proveedor
     with session_scope() as s:
@@ -202,20 +201,61 @@ def catalogo_proveedores() -> pd.DataFrame:
 def limpiar_cache():
     catalogo_articulos.clear()
     catalogo_ubicaciones.clear()
-    catalogo_proveedores.clear()
+    # Proveedores se consulta en vivo para respetar activación/desactivación inmediata.
 
 
 def selector_proveedor(user, label="Proveedor", key=None):
-    """Un PROVEEDOR queda fijo en el suyo; los demás roles eligen."""
-    if user["rol"] == "PROVEEDOR":
-        st.caption(f"{label}: **{user['proveedor_nombre']}** ({user['proveedor_codigo']})")
-        return user["proveedor_id"]
+    """Selector basado exclusivamente en proveedores ACTIVOS del maestro.
+
+    - PROVEEDOR: muestra su proveedor asignado, preseleccionado y bloqueado.
+    - Otros roles: permite elegir únicamente entre proveedores activos.
+    La consulta es en vivo para que una desactivación en Maestros tenga efecto
+    inmediato y no quede retenida por caché.
+    """
+    from core.models import Proveedor
+
+    if user.get("rol") == "PROVEEDOR":
+        pid = user.get("proveedor_id")
+        if not pid:
+            st.error("Este usuario PROVEEDOR no tiene un proveedor asignado.")
+            return None
+        with session_scope() as s:
+            p = s.get(Proveedor, int(pid))
+            if not p:
+                st.error("El proveedor asignado a este usuario ya no existe.")
+                return None
+            etiqueta = f"{p.nombre} ({p.codigo})"
+            activo = bool(p.activo)
+
+        st.selectbox(
+            label,
+            [etiqueta],
+            index=0,
+            disabled=True,
+            key=key,
+            help="Proveedor asignado al usuario. No puede cambiarse desde el recibo.")
+        if not activo:
+            st.error(
+                "El proveedor asignado está INACTIVO en Maestros. "
+                "Active el proveedor o cambie la asignación del usuario.")
+            return None
+        return int(pid)
+
     df = catalogo_proveedores()
     if df.empty:
-        st.warning("No hay proveedores activos.")
+        st.warning("No hay proveedores activos en Maestros.")
         return None
-    opciones = {f"{r.nombre} ({r.codigo})": int(r.id) for r in df.itertuples()}
-    sel = st.selectbox(label, list(opciones), key=key)
+
+    opciones = {
+        f"{r.nombre} ({r.codigo})": int(r.id)
+        for r in df.itertuples()
+    }
+    sel = st.selectbox(
+        label,
+        list(opciones),
+        index=0,
+        key=key,
+        help="Solo se muestran proveedores marcados como Activo en Maestros.")
     return opciones[sel]
 
 
