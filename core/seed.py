@@ -96,17 +96,34 @@ def sembrar(force=False, con_demo=None) -> dict:
         # ---------- ubicaciones ----------
         if force or s.query(func.count(Ubicacion.id)).scalar() == 0:
             n = 0
+            prov_map = {p.codigo: p.id for p in s.query(Proveedor).all()}
             for r in _leer("ubicaciones.csv"):
                 cod = (r.get("codigo") or "").strip().upper()
                 if not cod or s.query(Ubicacion).filter_by(codigo=cod).first():
                     continue
-                s.add(Ubicacion(codigo=cod, un=(r.get("un") or "MOTOS"),
-                                rol=r.get("rol"), cerrada=_b(r.get("cerrada")),
-                                inspeccion=_b(r.get("inspeccion")),
-                                restringida=_b(r.get("restringida")), activo=True))
+                pc = (r.get("proveedor_codigo") or "").strip()
+                s.add(Ubicacion(
+                    codigo=cod, un=(r.get("un") or "MOTOS"),
+                    rol=r.get("rol"), proveedor_id=prov_map.get(pc),
+                    cerrada=_b(r.get("cerrada")),
+                    inspeccion=_b(r.get("inspeccion")),
+                    restringida=_b(r.get("restringida")), activo=True))
                 n += 1
             s.flush()
             res["ubicaciones"] = n
+
+        # Ubicación destino contractual: toma la única ubicación DESTINO activa
+        # asignada al proveedor cuando la semilla permite determinarla.
+        for p in s.query(Proveedor).filter(
+                Proveedor.ubicacion_destino_id.is_(None)).all():
+            destinos = s.query(Ubicacion).filter(
+                Ubicacion.proveedor_id == p.id,
+                Ubicacion.activo.is_(True),
+                Ubicacion.cerrada.is_(False),
+                func.upper(func.coalesce(Ubicacion.rol, "")) == "DESTINO",
+            ).all()
+            if len(destinos) == 1:
+                p.ubicacion_destino_id = destinos[0].id
 
         # ---------- BOM ----------
         if force or s.query(func.count(Bom.id)).scalar() == 0:
@@ -161,8 +178,15 @@ def sembrar(force=False, con_demo=None) -> dict:
 
                 # Solo en demo se asignan ubicaciones automáticamente.
                 if prov:
-                    for u in s.query(Ubicacion).limit(12).all():
+                    demo_ubis = s.query(Ubicacion).limit(12).all()
+                    for u in demo_ubis:
                         u.proveedor_id = prov.id
+                    if not prov.ubicacion_destino_id and demo_ubis:
+                        destino = next(
+                            (u for u in demo_ubis if (u.rol or "").upper() == "DESTINO"),
+                            demo_ubis[0])
+                        destino.rol = "DESTINO"
+                        prov.ubicacion_destino_id = destino.id
             else:
                 email = str(_setting("BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
                 password = str(_setting("BOOTSTRAP_ADMIN_PASSWORD") or "")
