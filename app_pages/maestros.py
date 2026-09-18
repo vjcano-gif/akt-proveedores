@@ -469,19 +469,51 @@ def _proveedores(user):
 
     with session_scope() as s:
         provs = s.query(Proveedor).order_by(Proveedor.nombre).all()
-        filas = [{
-            "id": p.id,
-            "codigo": p.codigo,
-            "nombre": p.nombre,
-            "nit": p.nit or "",
-            "ubicacion_desde": p.ubicacion_origen or "",
-            "ubicacion_hasta": p.ubicacion_destino or "",
-            "tolerancia_averia_pct": p.tolerancia_averia_pct,
-            "activo": p.activo,
-        } for p in provs]
+
+    if not provs:
+        st.info("No hay proveedores.")
+        return
+
+    total = len(provs)
+    activos = sum(1 for p in provs if bool(p.activo))
+    inactivos = total - activos
+
+    estado_filtro = st.segmented_control(
+        "Estado del proveedor",
+        options=["Activos", "Inactivos", "Todos"],
+        default="Activos",
+        key="prov_filtro_estado",
+        help=(
+            f"Activos: {activos} · Inactivos: {inactivos} · Total: {total}. "
+            "El filtro solo cambia la vista; el estado se modifica en la columna Activo."
+        ),
+    )
+
+    if estado_filtro == "Activos":
+        provs_visibles = [p for p in provs if bool(p.activo)]
+    elif estado_filtro == "Inactivos":
+        provs_visibles = [p for p in provs if not bool(p.activo)]
+    else:
+        provs_visibles = provs
+
+    st.caption(
+        f"Mostrando **{len(provs_visibles)}** de **{total}** proveedores · "
+        f"{activos} activos · {inactivos} inactivos."
+    )
+
+    filas = [{
+        "id": p.id,
+        "codigo": p.codigo,
+        "nombre": p.nombre,
+        "nit": p.nit or "",
+        "ubicacion_desde": p.ubicacion_origen or "",
+        "ubicacion_hasta": p.ubicacion_destino or "",
+        "tolerancia_averia_pct": p.tolerancia_averia_pct,
+        "activo": p.activo,
+    } for p in provs_visibles]
 
     if not filas:
-        st.info("No hay proveedores.")
+        st.info(f"No hay proveedores en el segmento **{estado_filtro}**.")
         return
 
     ed = st.data_editor(
