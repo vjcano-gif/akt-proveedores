@@ -9,6 +9,9 @@ La extracción nunca afecta inventario directamente: siempre requiere confirmaci
 """
 from __future__ import annotations
 
+import base64
+import json
+import os
 import re
 from dataclasses import dataclass, asdict
 from functools import lru_cache
@@ -19,6 +22,146 @@ class Campo:
     valor: str | float | None
     confianza: float
     fuente: str = ""
+
+
+def _mistral_api_key() -> str:
+    """Obtiene la API key sin exponerla ni guardarla en el repositorio."""
+    key = str(os.getenv("MISTRAL_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        import streamlit as st
+        key = str(st.secrets.get("MISTRAL_API_KEY", "") or "").strip()
+    except Exception:
+        key = ""
+    return key
+
+
+def _mistral_document_ai(nombre: str, data: bytes, mime: str | None = None) -> dict | None:
+    """Extrae un documento con Mistral OCR/Document AI si hay API key.
+
+    Devuelve texto OCR y una anotación JSON estricta. La IA NO se usa para
+    inventar referencias: las referencias extraídas se validan posteriormente
+    contra el maestro local de artículos antes de mostrarse al usuario.
+    """
+    key = _mistral_api_key()
+    if not key or not data:
+        return None
+
+    import requests
+
+    name = (nombre or "").lower()
+    mime = (mime or "").strip().lower()
+    if not mime:
+        if name.endswith(".pdf"):
+            mime = "application/pdf"
+        elif name.endswith(".png"):
+            mime = "image/png"
+        else:
+            mime = "image/jpeg"
+
+    encoded = base64.b64encode(data).decode("ascii")
+    data_url = f"data:{mime};base64,{encoded}"
+
+    if mime == "application/pdf" or name.endswith(".pdf"):
+        document = {
+            "type": "document_url",
+            "document_url": data_url,
+        }
+    else:
+        document = {
+            "type": "image_url",
+            "image_url": data_url,
+        }
+
+    prompt = (
+        "Extrae SOLO lo que está visualmente escrito en el documento. "
+        "No completes, no corrijas y no inventes códigos, cantidades, "
+        "ubicaciones ni proveedores. Si un valor no es legible usa null. "
+        "Clasifica tipo_documento únicamente como BIN_A_BIN, FACTURA u OTRO. "
+        "Para BIN_A_BIN extrae una fila por cada renglón visible de la tabla "
+        "con proveedor, codigo, descripcion, cantidad, serial, lote, desde y hasta. "
+        "El codigo debe conservar exactamente todos sus dígitos. "
+        "La cantidad debe corresponder exclusivamente a la columna Cantidad, "
+        "nunca a números incluidos dentro de la descripción ni de Desde/Hasta. "
+        "Devuelve JSON con las claves: tipo_documento, referencia, fecha, filas. "
+        "filas debe ser una lista de objetos con proveedor, codigo, descripcion, "
+        "cantidad, serial, lote, desde, hasta."
+    )
+
+    payload = {
+        "model": "mistral-ocr-latest",
+        "document": document,
+        "table_format": "markdown",
+        "include_blocks": True,
+        "confidence_scores_granularity": "word",
+        "document_annotation_format": {"type": "json_object"},
+        "document_annotation_prompt": prompt,
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.mistral.ai/v1/ocr",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "texto": "",
+            "filas": [],
+        }
+
+    paginas = raw.get("pages") or []
+    texto = "\n".join(
+        str(p.get("markdown") or "").strip()
+        for p in paginas if str(p.get("markdown") or "").strip()
+    ).strip()
+
+    anot_raw = raw.get("document_annotation")
+    anot = {}
+    if isinstance(anot_raw, dict):
+        anot = anot_raw
+    elif isinstance(anot_raw, str) and anot_raw.strip():
+        try:
+            anot = json.loads(anot_raw)
+        except Exception:
+            anot = {}
+
+    filas = []
+    for row in anot.get("filas") or []:
+        if not isinstance(row, dict):
+            continue
+        codigo = str(row.get("codigo") or "").strip()
+        cantidad = _num(row.get("cantidad"))
+        filas.append({
+            "proveedor": str(row.get("proveedor") or "").strip(),
+            "codigo": codigo,
+            "descripcion": str(row.get("descripcion") or "").strip(),
+            "cantidad": cantidad,
+            "serial": str(row.get("serial") or "").strip(),
+            "lote": str(row.get("lote") or "").strip(),
+            "desde": str(row.get("desde") or "").strip(),
+            "hasta": str(row.get("hasta") or "").strip(),
+        })
+
+    return {
+        "ok": True,
+        "texto": texto,
+        "tipo_documento": str(anot.get("tipo_documento") or "").strip().upper(),
+        "referencia": str(anot.get("referencia") or "").strip(),
+        "fecha": str(anot.get("fecha") or "").strip(),
+        "filas": filas,
+        "modelo": str(raw.get("model") or "mistral-ocr-latest"),
+        "usage_info": raw.get("usage_info") or {},
+    }
 
 
 def _decode_image(data: bytes):
