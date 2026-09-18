@@ -54,6 +54,9 @@ with session_scope() as s:
     ):
         s.add(Ubicacion(codigo=cod, proveedor_id=pid, activo=True,
                         cerrada=cerrada, restringida=restringida))
+    s.flush()
+    p.ubicacion_destino_id = s.query(Ubicacion).filter_by(
+        codigo="UB-PROV-01").one().id
 
     for cod, desc, tipo in (
         ("TR-100", "Carenaje Pintado", "TRANSFORMADO"),
@@ -104,6 +107,19 @@ with session_scope() as s:
     check("Match exacto ingresa 100 disponible",
           sv.saldo_articulo(s, PID, "CP-A", "CRUDO", "DISPONIBLE") == 100)
 
+with session_scope() as s:
+    destino = sv.ubicacion_destino_proveedor(s, PID)
+    check("Proveedor tiene ubicación destino maestra",
+          destino.codigo == "UB-PROV-01")
+    esperar_error(
+        "Recibo rechaza ubicación distinta a la maestra",
+        lambda: sv.crear_recibo(
+            s, proveedor_id=PID, origen="REGISTRO", usuario="test",
+            ubicacion_destino="UB-ORIGEN",
+            lineas=[sv.LineaRecibo("CP-C", "Soporte", 1, 1,
+                                   ubicacion_hasta="UB-ORIGEN")]),
+        "ubicación destino")
+
 print("\n=== 2. FACTURA MULTILÍNEA / MÚLTIPLES OC ===")
 with session_scope() as s:
     r = sv.crear_recibo(
@@ -145,6 +161,26 @@ with session_scope() as s:
                        numero_ajuste="AJ-FALT-1", usuario="inventarios@akt.com")
     check("Cerrar faltante NO descuenta inventario otra vez",
           sv.saldo_articulo(s, PID, "CP-B") == 55)
+
+with session_scope() as s:
+    oc0 = OrdenCompra(numero="OC-ZERO-5", proveedor_id=PID, articulo="CP-C",
+                      cantidad=5, estado="ABIERTA", fecha=dt.date.today())
+    s.add(oc0); s.flush()
+    r0 = sv.crear_recibo(
+        s, proveedor_id=PID, origen="BIN_A_BIN", referencia="BIN-ZERO",
+        usuario="proveedor@akt.com", ubicacion_destino="UB-PROV-01",
+        lineas=[sv.LineaRecibo("CP-C", "Soporte", 5, 0,
+                               ubicacion_hasta="UB-PROV-01")])
+    check("Cantidad física cero se conserva como cero",
+          float(r0.lineas[0].cantidad_fisica) == 0.0)
+    rz, lz, ocz = r0.id, r0.lineas[0].id, oc0.id
+
+with session_scope() as s:
+    rzres = sv.match_recibo_lineas(
+        s, recibo_id=rz, asignaciones={lz: ocz},
+        usuario="recibo@akt.com")
+    check("Faltante total genera diferencia 5",
+          rzres["lineas"][0]["faltante"] == 5.0)
 
 print("\n=== 3. SOBRANTE SEGREGADO ===")
 with session_scope() as s:
@@ -368,6 +404,61 @@ check("Tabla asocia cantidades 8 y 5",
       and cantidades.get("7700149385725") == 5.0, str(cantidades))
 check("OCR no presume cantidad física",
       all(float(x["cantidad_fisica"]) == 0 for x in lineas_tabla))
+
+print("\n=== 10A. OCR DE TABLA CON CANTIDADES ===")
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    tabla = Image.new("RGB", (1800, 520), "white")
+    d = ImageDraw.Draw(tabla)
+    try:
+        fnt = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 38)
+    except Exception:
+        fnt = ImageFont.load_default()
+
+    headers = [("Proveedor", 40), ("Código", 350), ("Descripción", 720),
+               ("Cantidad", 1420), ("Serial", 1600)]
+    for txt, x in headers:
+        d.text((x, 30), txt, fill="black", font=fnt)
+
+    rows = [
+        ("CHONGQING-012", "7700149386142", "Carenaje Farola 200DS+ Mp", "179", "NONE"),
+        ("CHONGQING-012", "7700149386173", "Cubierta Tras 200DS+ Mp", "179", "NONE"),
+        ("SANYANG IN-001", "7700149603447", "Cubierta manubrio JetEvo Mp", "60", "NONE"),
+        ("SANYANG IN-001", "7700149603980", "Cubta Frontal Der JetEvo Mp", "60", "NONE"),
+    ]
+    y = 110
+    for prov, cod, desc, qty, serial in rows:
+        for txt, x in ((prov, 40), (cod, 350), (desc, 720),
+                       (qty, 1420), (serial, 1600)):
+            d.text((x, y), txt, fill="black", font=fnt)
+        y += 85
+
+    bio_tab = io.BytesIO()
+    tabla.save(bio_tab, format="PNG")
+    res_tab = analizar_documento(
+        "bin_tabla.png", bio_tab.getvalue(), "image/png")
+    res_tab["confianza_texto"] = max(
+        float(res_tab.get("confianza_texto") or 0), 0.8)
+    res_tab = completar_con_catalogo(res_tab, {
+        "7700149386142": "Carenaje Farola 200DS+ Mp",
+        "7700149386173": "Cubierta Tras 200DS+ Mp",
+        "7700149603447": "Cubierta manubrio JetEvo Mp",
+        "7700149603980": "Cubta Frontal Der JetEvo Mp",
+    })
+    qty_tab = {
+        x["articulo"]: float(x["cantidad_documento"])
+        for x in res_tab.get("lineas", [])
+    }
+    check("OCR tabla conserva 179 en primera referencia",
+          qty_tab.get("7700149386142") == 179.0, str(qty_tab))
+    check("OCR tabla conserva 179 en segunda referencia",
+          qty_tab.get("7700149386173") == 179.0, str(qty_tab))
+    check("OCR tabla conserva 60 en referencias JetEvo",
+          qty_tab.get("7700149603447") == 60.0
+          and qty_tab.get("7700149603980") == 60.0, str(qty_tab))
+except Exception as e:
+    check("OCR tabla ejecuta sin excepción", False, f"{type(e).__name__}: {e}")
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:
