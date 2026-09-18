@@ -356,6 +356,36 @@ def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
             if len(mejor_texto) >= 30 and mejor_conf >= 0.55:
                 break
         if mejor_texto:
+            # En tablas, RapidOCR conserva mejor la geometría pero puede omitir
+            # filas completas. Tesseract se ejecuta como lectura complementaria
+            # y aporta referencias no vistas por RapidOCR.
+            complemento = ""
+            conf_tess = 0.0
+            try:
+                variantes = _preprocesar_para_ocr(img)
+                preferida = variantes[1][1] if len(variantes) > 1 else img
+                complemento, conf_tess = _ocr_tesseract(preferida)
+            except Exception as e:
+                diagnosticos.append(
+                    f"Tesseract complementario: {type(e).__name__}: {e}")
+
+            if complemento:
+                rapid_norm = re.sub(r"\s+", " ", mejor_texto.upper())
+                nuevas = []
+                for linea in complemento.splitlines():
+                    ln = " ".join(linea.split()).strip()
+                    if not ln:
+                        continue
+                    # Agrega solo líneas que aporten contenido no presente.
+                    ln_norm = re.sub(r"\s+", " ", ln.upper())
+                    if ln_norm not in rapid_norm:
+                        nuevas.append(ln)
+                if nuevas:
+                    mejor_texto = mejor_texto + "\n" + "\n".join(nuevas)
+                    mejor_conf = max(
+                        mejor_conf,
+                        (mejor_conf + conf_tess) / 2.0 if conf_tess else mejor_conf)
+                    return mejor_texto, mejor_conf, f"RAPIDOCR/{mejor_var}+TESSERACT", ""
             return mejor_texto, mejor_conf, f"RAPIDOCR/{mejor_var}", ""
         diagnosticos.append("RapidOCR no detectó texto.")
     except Exception as e:
