@@ -149,6 +149,57 @@ with session_scope() as s:
     check("Reactivación persiste tras nuevo session_scope",
           s.get(Proveedor, PID).activo is True)
 
+print("\n=== 0AC. ELIMINACIÓN SEGURA DE PROVEEDORES ===")
+with session_scope() as s:
+    p_del = Proveedor(
+        codigo="VDRDEL", nombre="Proveedor para eliminar",
+        nit="900999001", ubicacion_origen="UB-DEL-O",
+        ubicacion_destino="UB-DEL-D", tolerancia_averia_pct=1.0,
+        activo=False)
+    s.add(p_del); s.flush()
+    PID_DEL = p_del.id
+    u_del = Ubicacion(
+        codigo="UB-DEL-D", proveedor_id=PID_DEL, activo=True,
+        cerrada=False, restringida=False)
+    s.add(u_del); s.flush()
+    UID_DEL = u_del.id
+
+with session_scope() as s:
+    deps = sv.dependencias_proveedor(s, PID_DEL)
+    check("Proveedor nuevo sin historia puede eliminarse", len(deps) == 0, str(deps))
+    res_del = sv.eliminar_proveedor_seguro(
+        s, PID_DEL, usuario="inventarios@akt.com")
+    check("Eliminar proveedor libera una ubicación",
+          res_del["ubicaciones_liberadas"] == 1)
+
+with session_scope() as s:
+    check("Proveedor eliminado ya no existe", s.get(Proveedor, PID_DEL) is None)
+    check("Ubicación del proveedor eliminado queda libre",
+          s.get(Ubicacion, UID_DEL).proveedor_id is None)
+
+with session_scope() as s:
+    p_dep = Proveedor(
+        codigo="VDRDELDEP", nombre="Proveedor con dependencia",
+        nit="900999002", ubicacion_origen="UB-ORIGEN",
+        ubicacion_destino="UB-PROV-01", tolerancia_averia_pct=1.0,
+        activo=False)
+    s.add(p_dep); s.flush()
+    PID_DEP = p_dep.id
+    s.add(OrdenCompra(
+        numero="OC-DEL-BLOCK", proveedor_id=PID_DEP,
+        articulo="CP-A", cantidad=1, estado="ABIERTA",
+        fecha=dt.date.today()))
+
+with session_scope() as s:
+    deps = sv.dependencias_proveedor(s, PID_DEP)
+    check("OC bloquea eliminación física",
+          any(d["tabla"] == "ordenes_compra" for d in deps), str(deps))
+    esperar_error(
+        "Proveedor con trazabilidad no se elimina",
+        lambda: sv.eliminar_proveedor_seguro(
+            s, PID_DEP, usuario="inventarios@akt.com"),
+        "no se puede eliminar")
+
 print("\n=== 0B. REGLAS DESDE / HASTA DEL BIN ===")
 with session_scope() as s:
     esperar_error(
