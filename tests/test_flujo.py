@@ -4,13 +4,15 @@ import io
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test.db"))
 
 from core.db import init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
-                              estructurar, inferir_origen)  # noqa: E402
+                              estructurar, inferir_origen, lineas_desde_catalogo,
+                              _texto_rapid_ordenado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -326,6 +328,46 @@ check("Extractor detecta ubicación destino",
       ext_cat["ubicacion_destino"]["valor"] == "UB-PROV-01")
 check("Extractor detecta reproceso/garantía",
       ext_cat["es_reproceso_sugerido"] is True)
+
+# Simula RapidOCR detectando celdas separadas en la misma fila.
+fake_rapid = SimpleNamespace(
+    txts=[
+        "7700149386142", "Carenaje Farola 200DS+ Mp", "12",
+        "7700149386173", "Cubierta Tras 200DS+ Mp", "8",
+        "7700149385725", "Cubta Der Tanq Gas 200DS+ Mp", "5",
+    ],
+    scores=[0.99] * 9,
+    boxes=[
+        [[10, 10], [210, 10], [210, 40], [10, 40]],
+        [[260, 10], [760, 10], [760, 40], [260, 40]],
+        [[900, 10], [960, 10], [960, 40], [900, 40]],
+        [[10, 70], [210, 70], [210, 100], [10, 100]],
+        [[260, 70], [760, 70], [760, 100], [260, 100]],
+        [[900, 70], [960, 70], [960, 100], [900, 100]],
+        [[10, 130], [210, 130], [210, 160], [10, 160]],
+        [[260, 130], [760, 130], [760, 160], [260, 160]],
+        [[900, 130], [960, 130], [960, 160], [900, 160]],
+    ],
+)
+texto_tabla, _ = _texto_rapid_ordenado(fake_rapid)
+check("RapidOCR recompone tres filas de tabla",
+      len(texto_tabla.splitlines()) == 3, texto_tabla)
+
+catalogo_tabla = {
+    "7700149386142": "Carenaje Farola 200DS+ Mp",
+    "7700149386173": "Cubierta Tras 200DS+ Mp",
+    "7700149385725": "Cubta Der Tanq Gas 200DS+ Mp",
+}
+lineas_tabla = lineas_desde_catalogo(texto_tabla, catalogo_tabla, 0.99)
+cantidades = {x["articulo"]: x["cantidad_documento"] for x in lineas_tabla}
+check("Tabla recupera todas las referencias", len(cantidades) == 3, str(cantidades))
+check("Tabla asocia cantidad 12 y no confunde 200DS",
+      cantidades.get("7700149386142") == 12.0, str(cantidades))
+check("Tabla asocia cantidades 8 y 5",
+      cantidades.get("7700149386173") == 8.0
+      and cantidades.get("7700149385725") == 5.0, str(cantidades))
+check("OCR no presume cantidad física",
+      all(float(x["cantidad_fisica"]) == 0 for x in lineas_tabla))
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:
