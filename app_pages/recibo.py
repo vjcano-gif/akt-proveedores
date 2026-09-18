@@ -114,7 +114,6 @@ def _consulta(user):
                 "OC": l.orden_compra.numero if l.orden_compra else "",
                 "Aceptado": l.cantidad_match or 0,
                 "Match": l.estado_match or "",
-                "Desde": l.ubicacion_desde, "Hasta": l.ubicacion_hasta,
                 "Lote": l.lote,
             })
         st.dataframe(pd.DataFrame(detalle), use_container_width=True, hide_index=True)
