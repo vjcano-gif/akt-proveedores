@@ -28,6 +28,7 @@ _AKT_PROVIDER_SIGNATURE = {"id", "codigo", "nombre", "tolerancia_averia_pct"}
 _engine = None
 _Session = None
 _active_schema = None
+_schema_preflight_done = False
 
 
 def _resolve_url() -> str:
@@ -82,6 +83,45 @@ def _detectar_schema_postgres(url: str) -> str:
         probe.dispose()
 
 
+def _quote_table(engine, schema: str | None, table: str) -> str:
+    prep = engine.dialect.identifier_preparer
+    qt = prep.quote(table)
+    if schema:
+        return f"{prep.quote_schema(schema)}.{qt}"
+    return qt
+
+
+def _preflight_required_columns():
+    """Garantiza columnas aditivas críticas antes de cualquier consulta ORM.
+
+    SQLAlchemy create_all() no altera tablas existentes. Por eso una instalación
+    previa puede tener proveedores sin columnas agregadas por versiones nuevas.
+    Este guard es deliberadamente pequeño y seguro: solo agrega columnas
+    opcionales conocidas y nunca elimina/renombra datos.
+    """
+    global _schema_preflight_done
+    if _schema_preflight_done:
+        return
+
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        _schema_preflight_done = True
+        return
+
+    schema = _active_schema or "public"
+    qprov = _quote_table(engine, schema, "proveedores")
+    with engine.begin() as conn:
+        conn.execute(text(
+            f"ALTER TABLE IF EXISTS {qprov} "
+            "ADD COLUMN IF NOT EXISTS ubicacion_origen VARCHAR(80)"
+        ))
+        conn.execute(text(
+            f"ALTER TABLE IF EXISTS {qprov} "
+            "ADD COLUMN IF NOT EXISTS ubicacion_destino VARCHAR(80)"
+        ))
+    _schema_preflight_done = True
+
+
 def get_active_schema() -> str | None:
     """Schema lógico de AKT. En SQLite devuelve None."""
     get_engine()
@@ -130,6 +170,7 @@ def is_postgres() -> bool:
 
 def get_session():
     get_engine()
+    _preflight_required_columns()
     return _Session()
 
 
@@ -149,7 +190,15 @@ def session_scope():
 def init_db():
     """Crea/migra únicamente las tablas pertenecientes al schema activo de AKT."""
     engine = get_engine()
+
+    # Si proveedores ya existe de una versión anterior, repara primero sus
+    # columnas críticas. Si no existe, ALTER TABLE IF EXISTS no hace nada.
+    _preflight_required_columns()
+
     Base.metadata.create_all(engine)
+
+    # En una base nueva create_all ya crea las columnas. En una existente,
+    # el preflight anterior las agregó antes de cualquier consulta ORM.
     from core.migrations import run_migrations
     run_migrations(engine, schema=get_active_schema())
 
