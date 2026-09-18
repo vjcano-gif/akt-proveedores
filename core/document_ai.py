@@ -1525,6 +1525,20 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 
     propuestas = lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf)
     propuestas_bin = lineas_bin_desde_texto(resultado.get("texto", ""), catalogo, cf)
+
+    es_imagen = bool(resultado.get("entrada_imagen"))
+    metodo = str(resultado.get("metodo") or "")
+    bin_score, bin_filas_texto = _score_bin_texto(resultado.get("texto", ""))
+
+    # En una fotografía BIN, las líneas de texto estructuradas son el camino
+    # más seguro porque el código se acepta únicamente si existe EXACTAMENTE en
+    # el maestro y la cantidad debe aparecer antes de NONE/NONE. La geometría
+    # RapidOCR queda como respaldo y no puede pisar una cantidad validada.
+    if es_imagen and propuestas_bin and bin_score >= 20:
+        for ln in propuestas_bin:
+            ln["fuente"] = "BIN_TABLA_IMAGEN_VALIDADA"
+            ln["confianza"] = round(min(max(cf, 0.90), 0.99), 3)
+
     propuestas_espaciales = []
     for row in resultado.get("bin_filas_espaciales", []) or []:
         key = str(row.get("articulo") or "").strip().upper()
@@ -1554,9 +1568,17 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         qty_nueva = float(ln.get("cantidad_documento") or 0)
         fuente_nueva = str(ln.get("fuente") or "")
         fuente_actual = str(actual.get("fuente") or "")
-        prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1,
-                     "BIN_TABLA": 2, "BIN_ESPACIAL": 3,
-                     "BIN_PDF_ESPACIAL": 4, "BIN_PDF_CLIP": 5, "BIN_PDF_CODIGO": 6}
+        prioridad = {
+            "OCR_HEURISTICO": 0,
+            "OCR": 0,
+            "OCR+MAESTRO": 1,
+            "BIN_ESPACIAL": 2,
+            "BIN_TABLA": 3,
+            "BIN_PDF_ESPACIAL": 4,
+            "BIN_PDF_CLIP": 5,
+            "BIN_PDF_CODIGO": 6,
+            "BIN_TABLA_IMAGEN_VALIDADA": 8,
+        }
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
@@ -1566,6 +1588,34 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
                     actual[campo] = ln.get(campo)
         if ln.get("descripcion"):
             actual["descripcion"] = ln["descripcion"]
+
+    # Política anti-hallucination para BIN fotografiados:
+    # si el texto estructurado recuperó varias filas válidas, la lista final
+    # se limita a esos códigos exactos del maestro. Una caja espacial con un
+    # código distinto (aunque casualmente exista en el maestro) no se añade.
+    if es_imagen and bin_filas_texto >= 2 and propuestas_bin:
+        codigos_texto_validos = {
+            str(x.get("articulo") or "").strip().upper()
+            for x in propuestas_bin
+            if str(x.get("articulo") or "").strip()
+        }
+        resultado["lineas"] = [
+            x for x in (resultado.get("lineas") or [])
+            if str(x.get("articulo") or "").strip().upper()
+            in codigos_texto_validos
+        ]
+        existentes = {
+            str(x.get("articulo") or "").strip().upper(): x
+            for x in resultado["lineas"]
+        }
+        resultado["lineas_descartadas_no_validadas"] = max(
+            0,
+            len(propuestas_espaciales) - len([
+                x for x in propuestas_espaciales
+                if str(x.get("articulo") or "").strip().upper()
+                in codigos_texto_validos
+            ]),
+        )
 
     depuradas, vistos = [], set()
     for ln in resultado.get("lineas", []) or []:
@@ -1590,7 +1640,13 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     name = (nombre or "").lower()
     mime = mime or ""
 
-    if mime.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+    es_imagen = bool(
+        mime.startswith("image/")
+        or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+    )
+    out["entrada_imagen"] = es_imagen
+
+    if es_imagen:
         out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
     elif mime == "application/pdf" or name.endswith(".pdf"):
         # Para PDF nativo, conserva X/Y de cada palabra; no depende del texto plano.
