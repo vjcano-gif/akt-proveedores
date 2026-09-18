@@ -311,7 +311,10 @@ def _extraer_documento(soporte, proveedor_id):
 
     contenido = soporte.getvalue()
     digest = hashlib.sha256(contenido).hexdigest()[:16]
-    clave = f"extract_{soporte.name}_{digest}_{proveedor_id}"
+    # Versiona el resultado de extracción para no reutilizar en session_state
+    # una lectura hecha por un parser anterior después de un redeploy.
+    extractor_version = "pdf-row-code-v2"
+    clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
         with st.spinner("Procesando documento automáticamente..."):
