@@ -112,6 +112,9 @@ def run_migrations(engine, schema=None):
 
     if "proveedores" in tables:
         _add_column(
+            engine, "proveedores", "ubicacion_origen",
+            "ubicacion_origen VARCHAR(80)", schema=schema)
+        _add_column(
             engine, "proveedores", "ubicacion_destino",
             "ubicacion_destino VARCHAR(80)", schema=schema)
 
@@ -188,6 +191,10 @@ def run_migrations(engine, schema=None):
                 f"ON {_q(engine, schema, 'recibo_lineas')} (orden_compra_id)"
             ))
         if "proveedores" in tables:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_origen "
+                f"ON {_q(engine, schema, 'proveedores')} (ubicacion_origen)"
+            ))
             conn.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_destino "
                 f"ON {_q(engine, schema, 'proveedores')} (ubicacion_destino)"
