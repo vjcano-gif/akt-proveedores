@@ -19,6 +19,7 @@ from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
 import core.services as sv  # noqa: E402
+import core.document_ai as dai  # noqa: E402
 from core.services import campos_faltantes_proveedor, proveedor_listo_para_activar  # noqa: E402
 from core.auth import alcance_proveedor, puede  # noqa: E402
 from core.ui import catalogo_proveedores  # noqa: E402
@@ -844,6 +845,82 @@ check("BIN foto conserva exactamente los 14 códigos del documento",
       set(obtenido_inter) == set(esperado_inter), str(obtenido_inter))
 check("BIN foto prioriza cantidades texto/NONE-NONE sobre geometría errada",
       obtenido_inter == esperado_inter, str(obtenido_inter))
+
+print("\n=== 10A1. MISTRAL DOCUMENT AI (MOCK) ===")
+_mistral_original = dai._mistral_document_ai
+try:
+    dai._mistral_document_ai = lambda nombre, data, mime=None: {
+        "ok": True,
+        "texto": (
+            "MOVIMIENTO BIN A BIN\n"
+            "Proveedor | Código | Descripción | Cantidad | Serial | Lote | Desde | Hasta"
+        ),
+        "tipo_documento": "BIN_A_BIN",
+        "referencia": "BIN-IA-001",
+        "fecha": "18/09/2026",
+        "modelo": "mistral-ocr-4-1",
+        "usage_info": {"pages_processed": 1},
+        "filas": [
+            {
+                "proveedor": "CHONGQING-012",
+                "codigo": "7700149213509",
+                "descripcion": "Cbta Lat Izq Tras 300Rally Mp",
+                "cantidad": 98,
+                "serial": "NONE", "lote": "NONE",
+                "desde": "WSERE PINT 1 1 1",
+                "hasta": "WSERE WINT 1 1 1",
+            },
+            {
+                "proveedor": "CHONGQING-012",
+                "codigo": "7700149649926",
+                "descripcion": "Cubta Fron Sup Der SR1-A MP",
+                "cantidad": 120,
+                "serial": "NONE", "lote": "NONE",
+                "desde": "WSERE PINT 1 1 1",
+                "hasta": "WSERE WINT 1 1 1",
+            },
+            # El servicio puede devolver algo que no existe en el maestro.
+            # Debe descartarse localmente y nunca mostrarse al usuario.
+            {
+                "proveedor": "X",
+                "codigo": "9999999999999",
+                "descripcion": "Inventado",
+                "cantidad": 777,
+                "serial": "NONE", "lote": "NONE",
+                "desde": "X", "hasta": "Y",
+            },
+        ],
+    }
+
+    analisis_ia = analizar_documento(
+        "foto_bin.jpg", b"BYTES-DE-PRUEBA", "image/jpeg")
+    catalogo_ia = {
+        "7700149213509": "Cbta Lat Izq Tras 300Rally Mp",
+        "7700149649926": "Cubta Fron Sup Der SR1-A MP",
+    }
+    completar_con_catalogo(analisis_ia, catalogo_ia)
+    cantidades_ia = {
+        x["articulo"]: float(x["cantidad_documento"])
+        for x in analisis_ia["lineas"]
+    }
+    check("Mistral AI clasifica BIN automáticamente",
+          analisis_ia.get("origen_sugerido") == "BIN_A_BIN",
+          str(analisis_ia.get("origen_sugerido")))
+    check("Mistral AI conserva cantidades 98/120",
+          cantidades_ia == {
+              "7700149213509": 98.0,
+              "7700149649926": 120.0,
+          }, str(cantidades_ia))
+    check("Mistral AI descarta código que no existe en maestro",
+          "9999999999999" not in cantidades_ia, str(cantidades_ia))
+    check("Mistral AI conserva DESDE/HASTA",
+          all(
+              x.get("ubicacion_desde") == "WSERE PINT 1 1 1"
+              and x.get("ubicacion_hasta") == "WSERE WINT 1 1 1"
+              for x in analisis_ia["lineas"]
+          ), str(analisis_ia["lineas"]))
+finally:
+    dai._mistral_document_ai = _mistral_original
 
 # Tabla BIN completa: valida geometría de Código/Cantidad/DESDE/HASTA.
 def _box(cx, cy, w=100, h=24):
