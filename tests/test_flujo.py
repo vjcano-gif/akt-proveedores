@@ -769,11 +769,15 @@ try:
         ("SANYANG IN-001", "7700149616157", "Base silla tras 125SC-R PRO Mp", "288",
          "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
     ]
-    xs_pdf = [20, 120, 260, 540, 635, 775, 925, 1120]
+    # Cantidad se coloca ligeramente a la izquierda del encabezado para
+    # reproducir el alineado real del ERP. Cada fila se imprime dos veces con
+    # un pequeño desplazamiento para simular las capas duplicadas del PDF real.
+    xs_pdf = [20, 120, 260, 526, 635, 775, 925, 1120]
     y_pdf = 175
     for row in rows_pdf:
         for txt_cell, x_cell in zip(row, xs_pdf):
             page.insert_text((x_cell, y_pdf), txt_cell, fontsize=8)
+            page.insert_text((x_cell + 1.8, y_pdf + 0.9), txt_cell, fontsize=8)
         y_pdf += 28
 
     pdf_bytes = pdf_doc.tobytes()
