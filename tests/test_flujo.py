@@ -12,7 +12,8 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdte
 from core.db import init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
-                              lineas_bin_desde_texto, _texto_rapid_ordenado)  # noqa: E402
+                              lineas_bin_desde_texto, _texto_rapid_ordenado,
+                              _extraer_bin_columnas_resultado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -429,15 +430,49 @@ check("Tabla asocia cantidades 8 y 5",
 check("OCR no presume cantidad física",
       all(float(x["cantidad_fisica"]) == 0 for x in lineas_tabla))
 
+# Tabla BIN completa: valida geometría de Código/Cantidad/DESDE/HASTA.
+def _box(cx, cy, w=100, h=24):
+    return [
+        [cx-w/2, cy-h/2], [cx+w/2, cy-h/2],
+        [cx+w/2, cy+h/2], [cx-w/2, cy+h/2],
+    ]
+
+headers_txt = [
+    "Proveedor", "Código", "Descripción", "Cantidad",
+    "Serial", "Lote", "Desde", "Hasta",
+]
+xs = [70, 210, 420, 650, 760, 850, 1010, 1260]
+row_txt = [
+    "CHONGQING-012", "7700149386142", "Carenaje Farola 200DS+ Mp",
+    "179", "NONE", "NONE", "WSERE-PSER",
+    "MOTOS-WSERE-WSER-VIPI-NTAR",
+]
+fake_bin = SimpleNamespace(
+    txts=headers_txt + row_txt,
+    scores=[0.99] * 16,
+    boxes=[_box(x, 30) for x in xs] + [_box(x, 80) for x in xs],
+)
+filas_bin_geom = _extraer_bin_columnas_resultado(fake_bin)
+check("Parser geométrico BIN obtiene una fila", len(filas_bin_geom) == 1,
+      str(filas_bin_geom))
+if filas_bin_geom:
+    fg = filas_bin_geom[0]
+    check("Parser geométrico conserva cantidad 179",
+          fg["cantidad_documento"] == 179.0, str(fg))
+    check("Parser geométrico conserva DESDE",
+          fg["ubicacion_desde"] == "WSERE-PSER", str(fg))
+    check("Parser geométrico conserva HASTA",
+          fg["ubicacion_hasta"] == "MOTOS-WSERE-WSER-VIPI-NTAR", str(fg))
+
 sample_bin_real = """
-Proveedor Código Descripción Cantidad Serial
-CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 NONE
-CHONGQING-012 7700149386173 Cubierta Tras 200DS+ Mp 179 NONE
-CHONGQING-012 7700149385725 Cubta Der Tanq Gas 200DS+ Mp 179 NONE
-CHONGQING-012 7700149385718 Cubta Izq Tanq Gas 200DS+ Mp 179 NONE
-CHONGQING-012 7700149386081 Guardabarro Del Frontal Mp 179 NONE
-SANYANG IN-001 7700149603447 Cubierta manubrio JetEvo Mp 60 NONE
-SANYANG IN-001 7700149603980 Cubta Frontal Der JetEvo Mp 60 NONE
+Proveedor Código Descripción Cantidad Serial Lote Desde Hasta
+CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149386173 Cubierta Tras 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149385725 Cubta Der Tanq Gas 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149385718 Cubta Izq Tanq Gas 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149386081 Guardabarro Del Frontal Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+SANYANG IN-001 7700149603447 Cubierta manubrio JetEvo Mp 60 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+SANYANG IN-001 7700149603980 Cubta Frontal Der JetEvo Mp 60 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
 """
 catalogo_bin = {
     "7700149386142": "Carenaje Farola 200DS+ Mp",
