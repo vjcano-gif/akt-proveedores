@@ -570,6 +570,96 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
         else:
             paso = max(12.0, anchors[0]["h"] * 1.8)
 
+        # Prelectura independiente de la columna CANTIDAD.
+        #
+        # Regla importante para los BIN del ERP: las cuatro columnas no siempre
+        # comparten exactamente el mismo baseline Y. En el PDF real, las
+        # cantidades de filas posteriores pueden quedar visualmente alineadas
+        # pero PyMuPDF las reporta unos puntos arriba/abajo. Si las buscamos
+        # dentro de la banda vertical de cada código, terminan en la fila vecina
+        # o fuera de la banda.
+        #
+        # Por eso primero leemos TODA la columna Cantidad, la ordenamos de arriba
+        # hacia abajo y, cuando el número de celdas coincide con el número de
+        # códigos, hacemos el emparejamiento por orden de fila. Es la relación
+        # más estable de una tabla de ancho fijo y no depende del baseline.
+        qty_y_min = max(header_y + 2.0, anchors[0]["cy"] - paso * 0.90)
+        qty_y_max = min(float(page.rect.height), anchors[-1]["cy"] + paso * 0.90)
+        qty_col_words = [
+            w for w in words
+            if qty_y_min <= w["cy"] <= qty_y_max
+            and (x_qty - 90.0) <= w["cx"] < (x_serial + 10.0)
+            and re.fullmatch(r"\d+(?:[.,]\d+)?", str(w["txt"] or "").strip())
+        ]
+        qty_col_words = _dedupe_pdf_words(qty_col_words)
+
+        # Agrupa tokens numéricos que pertenecen a una misma celda. Esto cubre
+        # PDFs que separan 288 como "2" + "88", sin colapsar el 288 de filas
+        # consecutivas porque están separados verticalmente.
+        qty_groups = []
+        for w in sorted(qty_col_words, key=lambda z: (z["cy"], z["x0"])):
+            target = None
+            best_dist = None
+            for g in qty_groups:
+                dist = abs(w["cy"] - g["cy"])
+                tol = max(3.5, 0.55 * max(w["h"], g["h"]))
+                if dist <= tol and (best_dist is None or dist < best_dist):
+                    target, best_dist = g, dist
+            if target is None:
+                qty_groups.append({"cy": w["cy"], "h": w["h"], "items": [w]})
+            else:
+                target["items"].append(w)
+                n = len(target["items"])
+                target["cy"] = ((target["cy"] * (n - 1)) + w["cy"]) / n
+                target["h"] = max(target["h"], w["h"])
+
+        qty_cells = []
+        for g in sorted(qty_groups, key=lambda z: z["cy"]):
+            items = _dedupe_pdf_words(g["items"])
+            toks = [
+                re.sub(r"[^0-9,.-]", "", str(w["txt"] or ""))
+                for w in sorted(items, key=lambda z: z["x0"])
+            ]
+            toks = [t for t in toks if t]
+            val = None
+            if toks:
+                if len(set(toks)) == 1:
+                    val = _num(toks[0])
+                else:
+                    unido = "".join(
+                        t.replace(".", "").replace(",", "") for t in toks)
+                    if unido.isdigit() and len(unido) <= 9:
+                        val = _num(unido)
+                    if val is None or val <= 0:
+                        vals = [_num(t) for t in toks]
+                        vals = [v for v in vals if v is not None and v > 0]
+                        if vals:
+                            val = max(vals)
+            if val is not None and val > 0:
+                qty_cells.append({"cy": g["cy"], "valor": float(val)})
+
+        qty_por_indice = [None] * len(anchors)
+        if len(qty_cells) == len(anchors):
+            # Camino preferido: tabla completa => emparejamiento ordinal.
+            for j, celda in enumerate(qty_cells):
+                qty_por_indice[j] = celda["valor"]
+        else:
+            # Fallback conservador si falta alguna celda: asignación uno-a-uno
+            # por cercanía vertical, sin reutilizar cantidades.
+            usados = set()
+            for j, anchor_j in enumerate(anchors):
+                candidatos_q = [
+                    (abs(celda["cy"] - anchor_j["cy"]), k, celda["valor"])
+                    for k, celda in enumerate(qty_cells)
+                    if k not in usados
+                    and abs(celda["cy"] - anchor_j["cy"]) <= paso * 0.92
+                ]
+                if candidatos_q:
+                    candidatos_q.sort(key=lambda z: z[0])
+                    _, k, val = candidatos_q[0]
+                    qty_por_indice[j] = val
+                    usados.add(k)
+
         for i, anchor in enumerate(anchors):
             if i == 0:
                 top = max(header_y + 2.0, anchor["cy"] - paso * 0.52)
@@ -604,8 +694,8 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
             ]
             qty_tokens = [q for q in qty_tokens if q]
 
-            qty = None
-            if qty_tokens:
+            qty = qty_por_indice[i]
+            if (qty is None or qty <= 0) and qty_tokens:
                 # Capas duplicadas pueden producir 156,156. Si todos los tokens
                 # son iguales se toma una sola vez. Si el PDF partió un número
                 # en glifos/tokens (1 + 56), se recompone por orden X.
