@@ -1,5 +1,8 @@
 """Prueba de aislamiento cuando public ya pertenece a otra aplicación."""
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import create_engine, inspect, text
 
