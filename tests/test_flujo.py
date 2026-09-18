@@ -824,6 +824,110 @@ try:
 except Exception as e:
     check("PDF BIN nativo ejecuta sin excepción", False, f"{type(e).__name__}: {e}")
 
+print("\n=== 10A3. PDF BIN REAL: PROVEEDOR Y CÓDIGO PEGADOS SIN ESPACIO ===")
+# Reproduce EXACTAMENTE la falla observada en producción con el documento
+# real BIN2654425_UMO.pdf: el ERP origen no deja espacio entre el código del
+# proveedor y el código de artículo cuando ambos caen en la misma celda
+# ("SANYANG IN-0017700149422819" llega como una sola palabra de PyMuPDF).
+# La prueba sintética anterior (10A2) inserta proveedor y código como dos
+# llamadas independientes en columnas separadas y por eso NUNCA ejercitó
+# este camino de código: pasaba en pruebas y seguía fallando con el PDF
+# real. Aquí se reconstruye el documento con las coordenadas de encabezado
+# reales (obtenidas de get_text('words'/'rawdict') sobre el PDF real) y se
+# concatena proveedor+código en una sola inserción de texto, tal como
+# aparece en el reporte real. También incluye la fila de pie de página
+# "Cantidad Total 812.00", que en el documento real cae dentro del rango X
+# de la columna Código y generaba una fila fantasma con cantidad 0.
+try:
+    import fitz
+
+    pdf_doc = fitz.open()
+    page = pdf_doc.new_page(width=800, height=600)
+
+    page.insert_text((383, 90), "MOVIMIENTO BIN A BIN", fontsize=10)
+    page.insert_text((24, 118), "Id de Bin: BIN2654425", fontsize=8)
+
+    # Coordenadas X reales de cada encabezado, tomadas del PDF real.
+    headers_reales = [
+        ("Proveedor", 11.52), ("Código", 76.32), ("Descripción", 154.08),
+        ("Cantidad", 313.92), ("Serial", 365.76), ("Lote", 452.16),
+        ("Desde", 538.56), ("Hasta", 650.88),
+    ]
+    for txt_h, x_h in headers_reales:
+        page.insert_text((x_h, 163), txt_h, fontsize=8)
+
+    def _fila_real(y, proveedor, codigo, desc, cant, pegado):
+        """pegado=True reproduce el defecto: proveedor+código en una sola
+        inserción de texto, sin espacio, como en el documento real."""
+        if pegado:
+            page.insert_text((11.52, y), proveedor + codigo,
+                             fontsize=8, fontname="courier")
+        else:
+            page.insert_text((11.52, y), proveedor, fontsize=8, fontname="courier")
+            page.insert_text((76.32, y), codigo, fontsize=8, fontname="courier")
+        page.insert_text((154.08, y), desc, fontsize=8, fontname="courier")
+        page.insert_text((313.92, y), cant, fontsize=8, fontname="courier")
+        page.insert_text((365.76, y), "NONE", fontsize=8, fontname="courier")
+        page.insert_text((452.16, y), "NONE", fontsize=8, fontname="courier")
+        page.insert_text((538.56, y), "WSERE PUMO 1 1 1", fontsize=8, fontname="courier")
+        page.insert_text((650.88, y), "WSERE WUMO 1 1 1", fontsize=8, fontname="courier")
+
+    _fila_real(181, "CHONGQING-012 ", "7700149453691",
+               "Base Silla 200DS+ Mp", "80", pegado=False)
+    _fila_real(190, "SANYANG IN-001", "7700149422819",
+               "Base Sillin RX Mp", "156", pegado=True)
+    _fila_real(199, "SANYANG IN-001", "7705946161657",
+               "Base silla tras 125SC-R PRO Mp", "288", pegado=True)
+    _fila_real(208, "SANYANG IN-001", "7705946161923",
+               "Base sillin Del SC-R PRO Mp", "288", pegado=True)
+
+    # Pie de página real: cae dentro del rango X de la columna Código.
+    page.insert_text((11.52, 532), "Cantidad Total", fontsize=8)
+    page.insert_text((97.92, 532), "812.00", fontsize=8)
+    page.insert_text((400.32, 559), "End of Report", fontsize=8)
+
+    pdf_bytes_real = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    esperado_real = {
+        "7700149453691": 80.0,
+        "7700149422819": 156.0,
+        "7705946161657": 288.0,
+        "7705946161923": 288.0,
+    }
+
+    filas_real = extraer_bin_columnas_pdf(pdf_bytes_real)
+    check("BIN real (pegado): exactamente 4 filas, sin pie de página fantasma",
+          len(filas_real) == 4, str(filas_real))
+    obtenido_real = {x["articulo"]: x["cantidad_documento"] for x in filas_real}
+    check("BIN real (pegado): código no queda contaminado con el proveedor",
+          set(obtenido_real.keys()) == set(esperado_real.keys()), str(obtenido_real))
+    check("BIN real (pegado): cantidades 80/156/288/288 correctas",
+          obtenido_real == esperado_real, str(obtenido_real))
+    check("BIN real (pegado): los dos 288 son dos filas distintas",
+          sum(1 for x in filas_real if x["cantidad_documento"] == 288.0) == 2,
+          str(filas_real))
+
+    catalogo_real = {
+        "7700149453691": "Base Silla 200DS+ Mp",
+        "7700149422819": "Base Sillin RX Mp",
+        "7705946161657": "Base silla tras 125SC-R PRO Mp",
+        "7705946161923": "Base sillin Del SC-R PRO Mp",
+    }
+    analisis_real = analizar_documento(
+        "BIN2654425_UMO.pdf", pdf_bytes_real, "application/pdf")
+    completar_con_catalogo(analisis_real, catalogo_real)
+    lineas_finales = {
+        x["articulo"]: x["cantidad_documento"]
+        for x in analisis_real.get("lineas", [])
+    }
+    check("Pipeline completo (analizar_documento + completar_con_catalogo) "
+          "produce 80/156/288/288, no 0",
+          lineas_finales == esperado_real, str(lineas_finales))
+except Exception as e:
+    check("BIN real (proveedor+código pegados) ejecuta sin excepción",
+          False, f"{type(e).__name__}: {e}")
+
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:
     from PIL import Image, ImageDraw, ImageFont
