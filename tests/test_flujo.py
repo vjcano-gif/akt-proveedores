@@ -612,6 +612,61 @@ if filas_bin_geom:
     check("BIN detecta HASTA inconsistente a nivel documento",
           not inconsistente["bin_hasta_consistente"], str(inconsistente))
 
+# PDF/ERP puede traer dos capas de texto superpuestas. Debe deduplicar
+# cada palabra sin borrar repeticiones legítimas como "1 1 1".
+def _rect(x0, x1, cy, h=14):
+    return [
+        [x0, cy-h/2], [x1, cy-h/2],
+        [x1, cy+h/2], [x0, cy+h/2],
+    ]
+
+dup_txts = []
+dup_boxes = []
+header_defs = [
+    ("Proveedor", 15, 85), ("Código", 120, 175), ("Descripción", 260, 345),
+    ("Cantidad", 540, 600), ("Serial", 635, 680), ("Lote", 775, 810),
+    ("Desde", 900, 945), ("Hasta", 1120, 1160),
+]
+for txt_h, x0_h, x1_h in header_defs:
+    dup_txts.append(txt_h)
+    dup_boxes.append(_rect(x0_h, x1_h, 30))
+
+row_defs = [
+    ("CHONGQING-012", 15, 105),
+    ("7700149453691", 120, 210),
+    ("Base", 260, 285), ("Silla", 290, 315), ("200DS+", 320, 360), ("Mp", 365, 380),
+    ("80", 545, 558),
+    ("NONE", 640, 675),
+    ("NONE", 780, 815),
+    ("WSERE", 920, 955), ("PUMO", 965, 995),
+    ("1", 1005, 1010), ("1", 1018, 1023), ("1", 1031, 1036),
+    ("WSERE", 1125, 1160), ("WUMO", 1170, 1200),
+    ("1", 1210, 1215), ("1", 1223, 1228), ("1", 1236, 1241),
+]
+for txt_v, x0_v, x1_v in row_defs:
+    # Capa visible.
+    dup_txts.append(txt_v)
+    dup_boxes.append(_rect(x0_v, x1_v, 80))
+    # Capa duplicada casi en la misma coordenada.
+    dup_txts.append(txt_v)
+    dup_boxes.append(_rect(x0_v + 0.4, x1_v + 0.4, 80.2))
+
+fake_pdf_dup = SimpleNamespace(
+    txts=dup_txts,
+    boxes=dup_boxes,
+    scores=[1.0] * len(dup_txts),
+)
+filas_dup = _extraer_bin_columnas_resultado(fake_pdf_dup)
+check("Parser elimina capas PDF duplicadas", len(filas_dup) == 1, str(filas_dup))
+if filas_dup:
+    fd = filas_dup[0]
+    check("PDF duplicado conserva cantidad 80",
+          fd["cantidad_documento"] == 80.0, str(fd))
+    check("PDF duplicado deja DESDE exacto sin repetir",
+          fd["ubicacion_desde"] == "WSERE PUMO 1 1 1", str(fd))
+    check("PDF duplicado deja HASTA exacto sin repetir",
+          fd["ubicacion_hasta"] == "WSERE WUMO 1 1 1", str(fd))
+
 sample_bin_real = """
 Proveedor Código Descripción Cantidad Serial Lote Desde Hasta
 CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
