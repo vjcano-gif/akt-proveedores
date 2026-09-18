@@ -270,6 +270,17 @@ with session_scope() as s:
         codigo="UB-DOC-ALT", proveedor_id=PID_DOC_ALT,
         activo=True, cerrada=False, restringida=False))
 
+    p_doc_real = Proveedor(
+        codigo="VDRDOCREAL", nombre="Proveedor destino BIN real",
+        nit="900999778", ubicacion_origen="WSERE-PSER",
+        ubicacion_destino="MOTOS-WSERE-WSER-VIPI-NTAR",
+        tolerancia_averia_pct=1.0, activo=True)
+    s.add(p_doc_real); s.flush()
+    PID_DOC_REAL = p_doc_real.id
+    s.add(Ubicacion(
+        codigo="MOTOS-WSERE-WSER-VIPI-NTAR", proveedor_id=PID_DOC_REAL,
+        activo=True, cerrada=False, restringida=False))
+
 extr_destino = {
     "ocr_ok": True,
     "confianza_texto": 0.99,
@@ -317,6 +328,37 @@ check("Foto/OCR promueve HASTA detectado desde texto",
 check("Foto/OCR bloquea proveedor seleccionado incorrecto",
       extr_destino_ocr.get("proveedor_destino_coincide") is False,
       str(extr_destino_ocr))
+
+# Caso equivalente al pantallazo real: el maestro incluye prefijo MOTOS-,
+# mientras el BIN fotografiado imprime HASTA sin ese prefijo y con "TE" al final.
+extr_bin_foto_real = {
+    "ocr_ok": True,
+    "confianza_texto": 0.98,
+    "texto": (
+        "MOVIMIENTO BIN A BIN\n"
+        "Id de Bin: BIN2686958\n"
+        "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta\n"
+        "CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 "
+        "NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE\n"
+        "SANYANG IN-0017700149603447 Cubierta manubrio JetEvo Mp 60 "
+        "NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE"
+    ),
+    "lineas": [],
+    "bin_desde_valores": [],
+    "bin_hasta_valores": [],
+    "orden_compra": {"valor": None},
+    "nit": {"valor": None},
+}
+extr_bin_foto_real = _enriquecer_extraccion(extr_bin_foto_real, PID)
+check("Foto BIN estándar identifica proveedor aunque maestro tenga prefijo MOTOS",
+      extr_bin_foto_real.get("proveedor_destino_detectado_id") == PID_DOC_REAL,
+      str(extr_bin_foto_real))
+check("Foto BIN estándar detecta que no corresponde al proveedor seleccionado",
+      extr_bin_foto_real.get("proveedor_destino_coincide") is False,
+      str(extr_bin_foto_real))
+check("Foto BIN estándar recupera HASTA maestro para validar",
+      extr_bin_foto_real.get("bin_hasta_canon") == "MOTOS-WSERE-WSER-VIPI-NTAR",
+      str(extr_bin_foto_real))
 
 print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
 with session_scope() as s:
