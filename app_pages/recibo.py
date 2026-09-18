@@ -213,7 +213,8 @@ def _enriquecer_extraccion(extr, proveedor_id):
         from core.models import Ubicacion
         codigos_ubi = [
             u.codigo for u in s.query(Ubicacion).filter(
-                Ubicacion.activo.is_(True)).all()
+                Ubicacion.activo.is_(True),
+                Ubicacion.cerrada.is_(False)).all()
         ]
         for ln in extr.get("lineas", []) or []:
             for campo in ("ubicacion_desde", "ubicacion_hasta"):
@@ -471,8 +472,6 @@ def _registrar(user):
 
     ref_sugerida = str(((extr or {}).get("referencia") or {}).get("valor") or "")
     fecha_sugerida = _fecha_ocr(extr)
-
-    ubicaciones_validas = ui.catalogo_ubicaciones(pid)
 
     c1, c2, c3, c4 = st.columns(4)
     referencia = c1.text_input(
