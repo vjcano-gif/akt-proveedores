@@ -523,39 +523,126 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
         }
 
         header_y = max(headers[k]["cy"] for k in required)
-        filas = _agrupar_pdf_filas(words, header_y + 2.0)
 
-        for row in filas:
+        # Para PDF, cada CÓDIGO es el ancla vertical de una fila. Esto evita
+        # depender de que Cantidad/Serial/Desde/Hasta tengan exactamente el
+        # mismo Y que Código/Descripción; varios ERP desplazan celdas unos
+        # puntos y el agrupador por baseline perdía cantidades desde la fila 2.
+        code_left, code_right = bounds["codigo"]
+        anchors = []
+        for w in words:
+            if w["cy"] <= header_y + 2.0:
+                continue
+            if not (code_left <= w["cx"] < code_right):
+                continue
+            codigo_cand = re.sub(r"\s+", "", w["txt"])
+            if not re.fullmatch(r"[A-Z0-9._/-]{5,60}", codigo_cand, re.I):
+                continue
+            if not re.search(r"\d", codigo_cand):
+                continue
+            anchors.append({**w, "codigo": codigo_cand})
+
+        # Dedup adicional de códigos por capas PDF.
+        anchors.sort(key=lambda a: (a["cy"], a["x0"]))
+        anchors_unicos = []
+        for a in anchors:
+            if anchors_unicos:
+                prev = anchors_unicos[-1]
+                if (a["codigo"].upper() == prev["codigo"].upper()
+                        and abs(a["cy"] - prev["cy"]) <= max(5.0, a["h"] * 0.7)):
+                    continue
+            anchors_unicos.append(a)
+        anchors = anchors_unicos
+
+        if not anchors:
+            continue
+
+        # Espaciado típico entre renglones, usado para cerrar la primera/última
+        # banda sin absorber encabezados o pie de página.
+        diffs = [
+            anchors[i+1]["cy"] - anchors[i]["cy"]
+            for i in range(len(anchors)-1)
+            if anchors[i+1]["cy"] - anchors[i]["cy"] > 2.0
+        ]
+        if diffs:
+            diffs_ord = sorted(diffs)
+            paso = diffs_ord[len(diffs_ord)//2]
+        else:
+            paso = max(12.0, anchors[0]["h"] * 1.8)
+
+        for i, anchor in enumerate(anchors):
+            if i == 0:
+                top = max(header_y + 2.0, anchor["cy"] - paso * 0.52)
+            else:
+                top = (anchors[i-1]["cy"] + anchor["cy"]) / 2.0
+
+            if i + 1 < len(anchors):
+                bottom = (anchor["cy"] + anchors[i+1]["cy"]) / 2.0
+            else:
+                bottom = min(float(page.rect.height), anchor["cy"] + paso * 0.58)
+
+            # Banda completa de la referencia; tolera desplazamientos verticales
+            # entre las diferentes celdas de la misma fila.
+            row = [w for w in words if top <= w["cy"] < bottom]
+
             cells = {}
             for key, (left, right) in bounds.items():
-                # Incluye una palabra si su centro cae dentro de la región.
                 cell_words = [w for w in row if left <= w["cx"] < right]
                 cells[key] = _texto_celda_pdf(cell_words)
 
-            codigo = re.sub(r"\s+", "", cells.get("codigo", ""))
-            if not re.fullmatch(r"[A-Z0-9._/-]{5,60}", codigo, re.I):
-                continue
+            codigo = anchor["codigo"]
 
-            qty_text = cells.get("cantidad", "")
-            # Cantidad debe ser el único número de la región; si la capa PDF
-            # repite el valor, _dedupe_pdf_words ya lo reduce.
-            nums = re.findall(r"(?<![A-Z0-9])\d+(?:[.,]\d+)?(?![A-Z0-9])", qty_text, re.I)
-            qty = _num(nums[-1]) if nums else _num(qty_text)
+            qty_words = [
+                w for w in row
+                if bounds["cantidad"][0] <= w["cx"] < bounds["cantidad"][1]
+                and re.search(r"\d", w["txt"])
+            ]
+            qty_words = _dedupe_pdf_words(qty_words)
+            qty_tokens = [
+                re.sub(r"[^0-9,.-]", "", w["txt"])
+                for w in sorted(qty_words, key=lambda z: z["x0"])
+            ]
+            qty_tokens = [q for q in qty_tokens if q]
+
+            qty = None
+            if qty_tokens:
+                # Capas duplicadas pueden producir 156,156. Si todos los tokens
+                # son iguales se toma una sola vez. Si el PDF partió un número
+                # en glifos/tokens (1 + 56), se recompone por orden X.
+                if len(set(qty_tokens)) == 1:
+                    qty = _num(qty_tokens[0])
+                else:
+                    concatenado = "".join(q.replace(".", "").replace(",", "")
+                                         for q in qty_tokens)
+                    if concatenado.isdigit() and len(concatenado) <= 9:
+                        qty = _num(concatenado)
+                    if qty is None or qty <= 0:
+                        candidatos = [
+                            (_num(q), q) for q in qty_tokens
+                            if _num(q) is not None and _num(q) > 0
+                        ]
+                        if candidatos:
+                            qty = max(v for v, _ in candidatos)
+
             if qty is None or qty <= 0:
-                # Rescate: busca un token numérico próximo al encabezado Cantidad.
+                # Último rescate: cualquier token numérico cerca de la columna
+                # Cantidad dentro de la banda del código.
                 candidatos = []
                 for w in row:
                     if not re.fullmatch(r"\d+(?:[.,]\d+)?", w["txt"]):
                         continue
-                    if (x_qty - 45.0) <= w["cx"] < (x_serial - 5.0):
+                    if (x_qty - 55.0) <= w["cx"] < (x_serial - 3.0):
                         val = _num(w["txt"])
                         if val and val > 0:
                             candidatos.append((abs(w["cx"] - x_qty), val))
                 if candidatos:
                     candidatos.sort(key=lambda z: z[0])
                     qty = candidatos[0][1]
+
             if qty is None or qty <= 0:
-                continue
+                # Conserva la referencia para que la interfaz pueda señalar qué
+                # cantidad falta en vez de perder por completo la fila.
+                qty = 0.0
 
             out.append({
                 "articulo": codigo,
@@ -567,7 +654,7 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
                 "ubicacion_desde": cells.get("desde", "").strip().upper(),
                 "ubicacion_hasta": cells.get("hasta", "").strip().upper(),
                 "proveedor_bin": cells.get("proveedor", ""),
-                "fuente": "BIN_PDF_CLIP",
+                "fuente": "BIN_PDF_CODIGO",
             })
 
     return out
@@ -1042,7 +1129,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         fuente_actual = str(actual.get("fuente") or "")
         prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1,
                      "BIN_TABLA": 2, "BIN_ESPACIAL": 3,
-                     "BIN_PDF_ESPACIAL": 4, "BIN_PDF_CLIP": 5}
+                     "BIN_PDF_ESPACIAL": 4, "BIN_PDF_CLIP": 5, "BIN_PDF_CODIGO": 6}
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
