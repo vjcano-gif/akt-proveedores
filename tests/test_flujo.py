@@ -95,6 +95,17 @@ with session_scope() as s:
                                    ubicacion_hasta="UB-PROC-01")]),
         "Debe ser UB-PROV-01")
 
+print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
+with session_scope() as s:
+    r0 = sv.crear_recibo(
+        s, proveedor_id=PID, origen="BIN_A_BIN", referencia="BIN-CERO",
+        usuario="test", ubicacion_destino="UB-PROV-01",
+        lineas=[sv.LineaRecibo(
+            "CP-C", "Soporte", cantidad_documento=10, cantidad_fisica=0,
+            ubicacion_hasta="UB-PROV-01")])
+    check("Cantidad física cero no se reemplaza por documento",
+          float(r0.lineas[0].cantidad_fisica) == 0.0)
+
 print("\n=== 1. BIN -> MATCH -> INVENTARIO ===")
 with session_scope() as s:
     r = sv.crear_recibo(
