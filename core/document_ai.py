@@ -1152,9 +1152,31 @@ def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
     rapid_score, rapid_filas = _score_bin_texto(rapid_texto)
     tess_score, tess_filas = _score_bin_texto(tess_texto)
 
-    # Si cualquiera de los motores reconoce una estructura BIN real, prima la
-    # estructura sobre la confianza promedio. En empate, más filas completas;
-    # después, confianza.
+    # Para el formato estándar "MOVIMIENTO BIN A BIN" fotografiado,
+    # Tesseract PSM 6 es la fuente AUTORITATIVA de códigos y cantidades cuando
+    # logra reconstruir al menos 2 filas completas Código/Cantidad/NONE/NONE.
+    #
+    # Motivo: RapidOCR puede mantener una confianza muy alta aunque confunda
+    # dígitos de la misma forma (98->38, 120->170) o fragmente un código. Ese
+    # error es especialmente peligroso porque parece un dato válido. Por tanto,
+    # no se desempata por confianza cuando Tesseract ya reconstruyó la tabla.
+    if tess_texto and tess_filas >= 2 and tess_score >= 36:
+        return (
+            tess_texto, tess_conf, "TESSERACT/BIN_ESTRUCTURADO",
+            " | ".join(diagnosticos),
+        )
+
+    # Si Tesseract no alcanzó una tabla utilizable, RapidOCR queda como
+    # respaldo estructurado. Nunca se combinan sus cantidades con las de una
+    # tabla Tesseract ya validada.
+    if rapid_texto and rapid_filas >= 2 and rapid_score >= 36:
+        return (
+            rapid_texto, rapid_conf,
+            f"RAPIDOCR/{rapid_var}/BIN_ESTRUCTURADO",
+            " | ".join(diagnosticos),
+        )
+
+    # Para otros documentos sí conserva el criterio general.
     if max(rapid_score, tess_score) >= 20:
         if (tess_score, tess_filas, tess_conf) > (
                 rapid_score, rapid_filas, rapid_conf):
