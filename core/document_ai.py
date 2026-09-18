@@ -187,6 +187,139 @@ def _refinar_celdas_numericas(img, res):
     return refinados
 
 
+def _refinar_cantidades_bin(img, res, txts):
+    """Relee exclusivamente la columna Cantidad de un BIN con varios votos OCR.
+
+    RapidOCR puede ubicar correctamente una celda pero confundir dígitos de igual
+    longitud (p.ej. 98 -> 38). El refinador genérico anterior no reemplazaba ese
+    caso. Aquí localizamos la columna por los encabezados CANTIDAD/SERIAL y
+    re-leemos solo esas celdas con Tesseract en varias variantes de alto aumento.
+    """
+    txts = list(txts or [])
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or len(boxes) != len(txts):
+        return txts
+
+    try:
+        import cv2
+        import pytesseract
+        from collections import Counter
+    except Exception:
+        return txts
+
+    dets = []
+    for i, (txt, box) in enumerate(zip(txts, boxes)):
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in box]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            dets.append({
+                "i": i,
+                "txt": str(txt or "").strip(),
+                "x0": min(xs), "x1": max(xs),
+                "y0": min(ys), "y1": max(ys),
+                "cx": (min(xs) + max(xs)) / 2.0,
+                "cy": (min(ys) + max(ys)) / 2.0,
+                "h": max(1.0, max(ys) - min(ys)),
+                "w": max(1.0, max(xs) - min(xs)),
+            })
+        except Exception:
+            continue
+
+    headers = {}
+    for d in dets:
+        n = _norm_cabecera(d["txt"])
+        if n == "CANTIDAD" and "cantidad" not in headers:
+            headers["cantidad"] = d
+        elif n == "SERIAL" and "serial" not in headers:
+            headers["serial"] = d
+        elif n == "LOTE" and "lote" not in headers:
+            headers["lote"] = d
+
+    if "cantidad" not in headers or "serial" not in headers:
+        return txts
+
+    x_qty = headers["cantidad"]["x0"]
+    x_serial = headers["serial"]["x0"]
+    header_y = max(d["cy"] for d in headers.values())
+    ancho_col = max(20.0, x_serial - x_qty)
+    h_img, w_img = img.shape[:2]
+    scores = list(getattr(res, "scores", None) or [])
+
+    candidatos = [
+        d for d in dets
+        if d["cy"] > header_y + 3
+        and (x_qty - 0.45 * ancho_col) <= d["cx"] < (x_serial - 1.0)
+        and len(re.sub(r"\s+", "", d["txt"])) <= 8
+        and bool(re.search(r"[0-9OBISZ]", d["txt"], re.I))
+    ]
+
+    for d in candidatos:
+        try:
+            pad_x = max(10, int(d["w"] * 0.55))
+            pad_y = max(7, int(d["h"] * 0.55))
+            x1 = max(0, int(d["x0"]) - pad_x)
+            x2 = min(w_img, int(d["x1"]) + pad_x)
+            y1 = max(0, int(d["y0"]) - pad_y)
+            y2 = min(h_img, int(d["y1"]) + pad_y)
+            crop = img[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            escala = max(4, min(8, int(round(120 / max(12, gray.shape[0])))))
+            enlarged = cv2.resize(
+                gray, None, fx=escala, fy=escala,
+                interpolation=cv2.INTER_CUBIC)
+            enlarged = cv2.copyMakeBorder(
+                enlarged, 28, 28, 45, 45,
+                cv2.BORDER_CONSTANT, value=255)
+
+            clahe = cv2.createCLAHE(clipLimit=2.3, tileGridSize=(8, 8))
+            contrast = clahe.apply(enlarged)
+            _, otsu = cv2.threshold(
+                contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            adaptive = cv2.adaptiveThreshold(
+                contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 31, 11)
+
+            lecturas = []
+            for variante in (enlarged, contrast, otsu, adaptive):
+                for psm in (7, 8):
+                    raw = pytesseract.image_to_string(
+                        variante,
+                        config=(
+                            f"--oem 3 --psm {psm} "
+                            "-c tessedit_char_whitelist=0123456789"
+                        ),
+                    )
+                    val = re.sub(r"\D", "", raw or "")
+                    if 1 <= len(val) <= 6:
+                        lecturas.append(val)
+
+            if not lecturas:
+                continue
+
+            votos = Counter(lecturas)
+            mejor, n_votos = votos.most_common(1)[0]
+            original = re.sub(r"\D", "", d["txt"])
+            try:
+                score_rapid = float(scores[d["i"]]) if d["i"] < len(scores) else 0.0
+            except Exception:
+                score_rapid = 0.0
+
+            # Reemplaza si hay consenso real entre preprocesamientos/PSM.
+            # También permite rescatar una lectura cuando RapidOCR no produjo
+            # un entero limpio o reportó baja confianza.
+            if n_votos >= 2:
+                txts[d["i"]] = mejor
+            elif (not original or score_rapid < 0.72) and mejor:
+                txts[d["i"]] = mejor
+        except Exception:
+            continue
+
+    return txts
+
+
 def _ocr_rapid(img) -> tuple[str, float]:
     """OCR principal conservando estructura espacial de tablas."""
     engine = _rapid_engine()
@@ -350,11 +483,12 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
 
 
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae filas BIN usando la geometría real de las columnas."""
+    """Extrae filas BIN usando geometría + relectura reforzada de cantidades."""
     try:
         img = _decode_image(data)
         res = _rapid_engine()(img)
         txts = _refinar_celdas_numericas(img, res)
+        txts = _refinar_cantidades_bin(img, res, txts)
         return _extraer_bin_columnas_resultado(res, txts)
     except Exception:
         return []
