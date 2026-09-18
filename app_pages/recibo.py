@@ -15,7 +15,7 @@ from core.services import (
     LineaRecibo, ReglaNegocio, confirmar_recibo_simple, crear_recibo,
     guardar_archivo, leer_archivo, match_recibo_lineas,
     ordenes_compra_abiertas, sellar_recibo, sugerir_oc_por_linea,
-    validar_bin_a_bin,
+    ubicacion_destino_proveedor, validar_bin_a_bin,
 )
 
 ORIGENES = {
@@ -379,14 +379,27 @@ def _registrar(user):
     ref_sugerida = str(((extr or {}).get("referencia") or {}).get("valor") or "")
     fecha_sugerida = _fecha_ocr(extr)
 
+    # La ubicación destino es una regla maestra del proveedor, no una decisión
+    # del operador durante el recibo.
+    try:
+        with session_scope() as s:
+            ubic_maestra = ubicacion_destino_proveedor(s, pid)
+            ubic_dest = ubic_maestra.codigo
+    except ReglaNegocio as e:
+        st.error(str(e))
+        st.info(
+            "Configure la ubicación en **Maestros → Proveedores**. "
+            "Cada proveedor debe tener una ubicación destino designada.")
+        return
+
     ubicaciones_validas = ui.catalogo_ubicaciones(pid)
-    ubicaciones = [""] + ubicaciones_validas
     ubi_ocr = str(
         (((extr or {}).get("ubicacion_destino") or {}).get("valor") or "")
     ).strip().upper()
-    ubi_default = next(
-        (u for u in ubicaciones_validas if str(u).upper() == ubi_ocr), "")
-    idx_ubi = ubicaciones.index(ubi_default) if ubi_default in ubicaciones else 0
+    if ubi_ocr and ubi_ocr != ubic_dest.upper():
+        st.error(
+            f"El documento parece indicar destino **{ubi_ocr}**, pero el proveedor "
+            f"tiene designado **{ubic_dest}**. Revise el documento antes de continuar.")
 
     c1, c2, c3 = st.columns(3)
     referencia = c1.text_input(
@@ -398,11 +411,12 @@ def _registrar(user):
         "Fecha del documento",
         value=fecha_sugerida,
         key=f"rec_fecha_{suffix}")
-    ubic_dest = c3.selectbox(
+    c3.text_input(
         "Ubicación destino",
-        ubicaciones,
-        index=idx_ubi,
-        key=f"rec_dest_{suffix}")
+        value=ubic_dest,
+        disabled=True,
+        key=f"rec_dest_{suffix}",
+        help="Ubicación definida en el maestro del proveedor.")
 
     c1, c2 = st.columns([1, 2])
     reproceso = c1.checkbox(
