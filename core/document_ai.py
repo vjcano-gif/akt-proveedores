@@ -680,10 +680,17 @@ def lineas_bin_desde_texto(texto: str, catalogo: dict[str, str],
             continue
         codigo, descripcion = mapa[codigo_key]
         despues = linea[pos + len(codigo_key):].strip()
+        # Formato BIN habitual:
+        # Descripción | Cantidad | Serial | Lote | Desde | Hasta
         m = re.search(
             r"\s([0-9]{1,9}(?:[.,][0-9]+)?)\s+"
-            r"(?:NONE|N/?A|[A-Z][A-Z0-9._/-]{1,40})\s*$",
+            r"(?:NONE|N/?A)\s+(?:NONE|N/?A)(?:\s+|$)",
             despues, re.I)
+        if not m:
+            m = re.search(
+                r"\s([0-9]{1,9}(?:[.,][0-9]+)?)\s+"
+                r"(?:NONE|N/?A|[A-Z][A-Z0-9._/-]{1,40})\s*$",
+                despues, re.I)
         if not m:
             m = re.search(r"\s([0-9]{1,9}(?:[.,][0-9]+)?)\s*$", despues)
         qty = _num(m.group(1)) if m else None
