@@ -1081,14 +1081,43 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
 
 
 
-def inferir_origen(texto: str) -> str | None:
-    """Sugiere el tipo documental a partir del texto OCR."""
-    t = (texto or "").upper()
-    if re.search(r"\bBIN(?:\s+A\s+BIN)?\b", t):
-        return "BIN_A_BIN"
-    if re.search(r"\b(FACTURA|FACTURACION|F[VE]-?\d)\b", t):
-        return "FACTURA"
-    return None
+def clasificar_origen(texto: str, bin_filas: list[dict] | None = None) -> tuple[str | None, float, str]:
+    """Clasifica el documento como BIN A BIN o FACTURA con evidencia explícita.
+
+    El estándar BIN de AKT se reconoce por cualquiera de estas señales fuertes:
+    - título "MOVIMIENTO BIN A BIN" / "BIN A BIN";
+    - "Id de Bin" más las columnas tabulares DESDE/HASTA;
+    - parser espacial BIN exitoso (Código/Cantidad/Serial/Lote/Desde/Hasta).
+
+    Para facturas se conserva la detección por FACTURA/FV/FE. Si no hay evidencia
+    suficiente, devuelve None para que el usuario pueda escoger manualmente.
+    """
+    t = " ".join((texto or "").upper().split())
+    filas = list(bin_filas or [])
+
+    if re.search(r"\bMOVIMIENTO\s+BIN\s+A\s+BIN\b", t):
+        return "BIN_A_BIN", 0.99, "Título MOVIMIENTO BIN A BIN"
+    if re.search(r"\bBIN\s+A\s+BIN\b", t):
+        return "BIN_A_BIN", 0.98, "Texto BIN A BIN"
+    if (re.search(r"\bID\s+DE\s+BIN\b", t)
+            and "DESDE" in t and "HASTA" in t
+            and "CANTIDAD" in t):
+        return "BIN_A_BIN", 0.97, "Estructura estándar Id de Bin + tabla"
+    if filas:
+        return "BIN_A_BIN", 0.96, "Estructura tabular BIN reconocida"
+
+    if re.search(r"\bFACTURA(?:CION)?\b", t):
+        return "FACTURA", 0.98, "Texto FACTURA"
+    if re.search(r"\bF[VE][-\s]?[A-Z0-9._/-]{2,}\b", t):
+        return "FACTURA", 0.94, "Número de factura FV/FE"
+
+    return None, 0.0, ""
+
+
+def inferir_origen(texto: str, bin_filas: list[dict] | None = None) -> str | None:
+    """Compatibilidad: devuelve solo el tipo documental sugerido."""
+    origen, _, _ = clasificar_origen(texto, bin_filas)
+    return origen
 
 
 def _cantidad_probable(resto: str):
@@ -1348,6 +1377,10 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     out["confianza_texto"] = round(cf, 3)
     out["diagnostico"] = diagnostico
     out["ocr_ok"] = bool(texto.strip())
-    out["origen_sugerido"] = inferir_origen(texto)
+    origen, origen_cf, origen_evidencia = clasificar_origen(
+        texto, out["bin_filas_espaciales"])
+    out["origen_sugerido"] = origen
+    out["origen_confianza"] = round(float(origen_cf), 3)
+    out["origen_evidencia"] = origen_evidencia
     out["requiere_revision"] = cf < 0.85 or not out["lineas"]
     return out
