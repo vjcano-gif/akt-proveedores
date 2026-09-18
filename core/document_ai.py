@@ -2077,18 +2077,25 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     name = (nombre or "").lower()
     mime = mime or ""
 
-    # Motor principal opcional: Mistral Document AI. Si MISTRAL_API_KEY no
-    # existe o la API falla, el flujo cae automáticamente al OCR local.
-    ia = _mistral_document_ai(nombre, data, mime)
+    # Motor principal: GPT-5 nano Vision cuando OPENAI_API_KEY existe.
+    # Si no está configurado o falla, intenta Mistral (si tiene clave) y luego
+    # cae automáticamente al OCR local existente.
+    ia = _openai_document_ai(nombre, data, mime)
+    if not (ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))):
+        ia_mistral = _mistral_document_ai(nombre, data, mime)
+        if ia_mistral and ia_mistral.get("ok"):
+            ia = ia_mistral
     ia_ok = bool(ia and ia.get("ok") and (ia.get("texto") or ia.get("filas")))
 
     if ia_ok:
         texto = str(ia.get("texto") or "")
         cf = 0.97
-        metodo = f"MISTRAL_DOCUMENT_AI/{ia.get('modelo') or 'mistral-ocr-latest'}"
+        fuente_ia = str(ia.get("fuente") or "MISTRAL_DOCUMENT_AI")
+        metodo = f"{fuente_ia}/{ia.get('modelo') or 'document-ai'}"
         diagnostico = ""
         out = estructurar(texto, cf)
         out["entrada_ia"] = True
+        out["ia_fuente"] = fuente_ia
         out["ia_modelo"] = ia.get("modelo")
         out["ia_usage_info"] = ia.get("usage_info") or {}
         out["lineas_ia"] = list(ia.get("filas") or [])
@@ -2116,7 +2123,7 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                 "ubicacion_desde": str(row.get("desde") or "").strip(),
                 "ubicacion_hasta": str(row.get("hasta") or "").strip(),
                 "proveedor_bin": str(row.get("proveedor") or "").strip(),
-                "fuente": "MISTRAL_DOCUMENT_AI",
+                "fuente": fuente_ia,
             })
         out["bin_filas_espaciales"] = filas_ia_bin
     else:
@@ -2151,10 +2158,10 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     tipo_ia = str((ia or {}).get("tipo_documento") or "").strip().upper() if ia_ok else ""
     if tipo_ia == "BIN_A_BIN":
         origen, origen_cf, origen_evidencia = (
-            "BIN_A_BIN", 0.995, "Mistral Document AI")
+            "BIN_A_BIN", 0.995, str(ia.get("fuente") or "Document AI"))
     elif tipo_ia == "FACTURA":
         origen, origen_cf, origen_evidencia = (
-            "FACTURA", 0.995, "Mistral Document AI")
+            "FACTURA", 0.995, str(ia.get("fuente") or "Document AI"))
     else:
         origen, origen_cf, origen_evidencia = clasificar_origen(
             texto, out.get("bin_filas_espaciales") or [])
