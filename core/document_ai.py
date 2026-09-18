@@ -447,6 +447,61 @@ def _texto_celda_pdf(items: list[dict]) -> str:
     return " ".join(d["txt"] for d in sorted(items, key=lambda z: z["x0"])).strip()
 
 
+def _chars_pdf_pagina(page) -> list[dict]:
+    """Aplana get_text('rawdict') a una lista de caracteres con su bbox.
+
+    Se usa solo para reconstruir columnas cuando dos celdas contiguas quedan
+    pegadas en una misma palabra/space de PyMuPDF (ver _codigo_por_columna).
+    """
+    out = []
+    try:
+        raw = page.get_text("rawdict")
+    except Exception:
+        return out
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                for ch in span.get("chars", []):
+                    c = str(ch.get("c") or "")
+                    if not c or c.isspace():
+                        continue
+                    x0, y0, x1, y1 = ch.get("bbox", (0, 0, 0, 0))
+                    out.append({
+                        "c": c,
+                        "x0": float(x0), "x1": float(x1),
+                        "cy": (float(y0) + float(y1)) / 2.0,
+                    })
+    return out
+
+
+def _codigo_por_columna(chars: list[dict], word: dict, x_codigo: float) -> str:
+    """Recupera el código de artículo cuando viene pegado al proveedor.
+
+    Algunos ERP no dejan espacio entre el código del proveedor y el código
+    de artículo cuando ambos caen en la misma celda visual (p.ej.
+    "SANYANG IN-0017700149422819"). PyMuPDF entonces entrega esa celda como
+    una sola palabra/token, contaminando el código real con el sufijo del
+    proveedor ("IN-001"). La columna Código, sin embargo, SIEMPRE empieza en
+    la misma X que su encabezado ("Código"): se reconstruye el código
+    tomando, por posición de carácter, solo lo que cae a la derecha de esa
+    X, en vez de adivinar por longitud o forma del texto.
+    """
+    if word["x0"] >= x_codigo - 1.0:
+        # La palabra ya empieza en la columna Código: no hay contaminación.
+        return re.sub(r"\s+", "", word["txt"])
+    tol_y = max(2.0, word["h"] * 0.6)
+    seleccion = [
+        ch for ch in chars
+        if abs(ch["cy"] - word["cy"]) <= tol_y
+        and ch["x0"] >= x_codigo - 0.5
+        and ch["x0"] < word["x1"] + 0.5
+    ]
+    if not seleccion:
+        return re.sub(r"\s+", "", word["txt"])
+    seleccion.sort(key=lambda z: z["x0"])
+    return "".join(ch["c"] for ch in seleccion)
+
+
 def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
     """Extrae BIN nativo por regiones geométricas de columna.
 
@@ -528,6 +583,9 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
         # depender de que Cantidad/Serial/Desde/Hasta tengan exactamente el
         # mismo Y que Código/Descripción; varios ERP desplazan celdas unos
         # puntos y el agrupador por baseline perdía cantidades desde la fila 2.
+        chars_pagina = _chars_pdf_pagina(page)
+        x_codigo_hdr = headers["codigo"]["x0"]
+
         code_left, code_right = bounds["codigo"]
         anchors = []
         for w in words:
@@ -535,7 +593,7 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
                 continue
             if not (code_left <= w["cx"] < code_right):
                 continue
-            codigo_cand = re.sub(r"\s+", "", w["txt"])
+            codigo_cand = _codigo_por_columna(chars_pagina, w, x_codigo_hdr)
             if not re.fullmatch(r"[A-Z0-9._/-]{5,60}", codigo_cand, re.I):
                 continue
             if not re.search(r"\d", codigo_cand):
@@ -665,6 +723,13 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
             for key, (left, right) in bounds.items():
                 cell_words = [w for w in row if left <= w["cx"] < right]
                 cells[key] = _texto_celda_pdf(cell_words)
+
+            # Descarta anclas espurias (p.ej. "Cantidad Total 812.00" en el
+            # pie de página) que caen dentro del rango X de la columna
+            # Código pero no son una fila real: una fila BIN legítima
+            # siempre trae descripción y/o serial/lote.
+            if not cells.get("descripcion") and not cells.get("serial") and not cells.get("lote"):
+                continue
 
             codigo = anchor["codigo"]
 
