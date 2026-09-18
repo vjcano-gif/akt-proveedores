@@ -341,10 +341,6 @@ def _proveedores(user):
         creados = actualizados = 0
         errores = []
         with session_scope() as s:
-            ubicaciones = {
-                u.codigo: u for u in s.query(Ubicacion).filter(
-                    Ubicacion.activo.is_(True)).all()
-            }
             for _, r in df.iterrows():
                 cod = str(r.get("codigo") or "").strip()
                 if not cod:
@@ -392,42 +388,28 @@ def _proveedores(user):
                         f"{cod}: NO se activa. Faltan: {', '.join(faltan)}.")
                     activo_objetivo = False
 
-                # Las ubicaciones son obligatorias para estar activo. Un proveedor
-                # inactivo puede conservarlas vacías mientras termina parametrización.
-                if desde:
-                    if desde not in ubicaciones:
-                        errores.append(f"{cod}: DESDE {desde} no existe o está inactiva.")
-                        activo_objetivo = False
-                        desde = ""
-                    elif ubicaciones[desde].cerrada:
-                        errores.append(f"{cod}: DESDE {desde} está cerrada.")
-                        activo_objetivo = False
-                        desde = ""
-                if hasta:
-                    if hasta not in ubicaciones:
-                        errores.append(f"{cod}: HASTA {hasta} no existe o está inactiva.")
-                        activo_objetivo = False
-                        hasta = ""
-                    elif ubicaciones[hasta].cerrada:
-                        errores.append(f"{cod}: HASTA {hasta} está cerrada.")
-                        activo_objetivo = False
-                        hasta = ""
-                    elif ubicaciones[hasta].proveedor_id and (
-                            p is None or ubicaciones[hasta].proveedor_id != p.id):
-                        errores.append(
-                            f"{cod}: HASTA {hasta} pertenece a otro proveedor.")
-                        activo_objetivo = False
-                        hasta = ""
-
                 if nuevo:
-                    p = Proveedor(codigo=cod)
+                    p = Proveedor(codigo=cod, nombre=nombre[:200], activo=False)
                     s.add(p)
                     s.flush()
+
+                # DESDE/HASTA pueden venir escritos directamente. Si no existen
+                # en Ubicaciones, se crean automáticamente.
+                try:
+                    if desde:
+                        asegurar_ubicacion_ingresada(
+                            s, desde, rol="ORIGEN")
+                    if hasta:
+                        asegurar_ubicacion_ingresada(
+                            s, hasta, rol="DESTINO", proveedor_id=p.id)
+                except Exception as e:
+                    errores.append(f"{cod}: {e}")
+                    activo_objetivo = False
 
                 # Libera el HASTA anterior si el proveedor cambió de ubicación.
                 anterior = str(p.ubicacion_destino or "").strip().upper()
                 if anterior and anterior != hasta:
-                    u_ant = ubicaciones.get(anterior)
+                    u_ant = s.query(Ubicacion).filter_by(codigo=anterior).first()
                     if u_ant and u_ant.proveedor_id == p.id:
                         u_ant.proveedor_id = None
                         if (u_ant.rol or "").upper() == "DESTINO":
@@ -441,8 +423,11 @@ def _proveedores(user):
                 p.activo = bool(activo_objetivo)
 
                 if hasta:
-                    ubicaciones[hasta].proveedor_id = p.id
-                    ubicaciones[hasta].rol = "DESTINO"
+                    u_hasta = s.query(Ubicacion).filter_by(codigo=hasta).first()
+                    if u_hasta and u_hasta.activo and not u_hasta.cerrada:
+                        if not u_hasta.proveedor_id or u_hasta.proveedor_id == p.id:
+                            u_hasta.proveedor_id = p.id
+                            u_hasta.rol = "DESTINO"
                 creados += nuevo
                 actualizados += (not nuevo)
 
@@ -453,7 +438,8 @@ def _proveedores(user):
         ayuda=(
             "Para activar un proveedor son obligatorios: código, nombre, NIT, "
             "ubicacion_desde, ubicacion_hasta y tolerancia_averia_pct. "
-            "Los inactivos pueden quedar incompletos mientras se parametrizan."))
+            "DESDE/HASTA pueden ser valores nuevos: la app los crea automáticamente "
+            "en el maestro de Ubicaciones. Los inactivos pueden quedar incompletos."))
 
     with session_scope() as s:
         ubicaciones_activas = [
