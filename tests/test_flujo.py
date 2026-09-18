@@ -766,7 +766,9 @@ try:
          "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
         ("SANYANG IN-001", "7700149422819", "Base Sillin RX Mp", "156",
          "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
-        ("SANYANG IN-001", "7700149616157", "Base silla tras 125SC-R PRO Mp", "288",
+        ("SANYANG IN-001", "7705946161657", "Base silla tras 125SC-R PRO Mp", "288",
+         "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+        ("SANYANG IN-001", "7705946161923", "Base sillin Del SC-R PRO Mp", "288",
          "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
     ]
     # Cantidad se coloca ligeramente a la izquierda del encabezado para
@@ -776,9 +778,10 @@ try:
     # Reproduce el fallo real: desde la segunda fila, Cantidad y ubicaciones
     # tienen baselines distintos al Código/Descripción.
     offsets_por_fila = [
-        [0, 0, 0, 0,   0, 0, 0,    0],
-        [0, 0, 0, 6.5, 0, 0, 4.2,  4.2],
-        [0, 0, 0, -6,  0, 0, -3.8, -3.8],
+        [0, 0, 0, 0,    0, 0, 0,    0],
+        [0, 0, 0, 7.5,  0, 0, 4.2,  4.2],
+        [0, 0, 0, 12.5, 0, 0, -3.8, -3.8],
+        [0, 0, 0, -12.5,0, 0, 5.5,  5.5],
     ]
     y_pdf = 175
     for idx_row, row in enumerate(rows_pdf):
@@ -792,12 +795,13 @@ try:
     pdf_doc.close()
 
     filas_pdf = extraer_bin_columnas_pdf(pdf_bytes)
-    check("PDF BIN obtiene las 3 filas", len(filas_pdf) == 3, str(filas_pdf))
+    check("PDF BIN obtiene las 4 filas reales", len(filas_pdf) == 4, str(filas_pdf))
     qty_pdf = {x["articulo"]: x["cantidad_documento"] for x in filas_pdf}
-    check("PDF BIN conserva cantidades 80/156/288",
+    check("PDF BIN conserva cantidades reales 80/156/288/288",
           qty_pdf.get("7700149453691") == 80.0
           and qty_pdf.get("7700149422819") == 156.0
-          and qty_pdf.get("7700149616157") == 288.0,
+          and qty_pdf.get("7705946161657") == 288.0
+          and qty_pdf.get("7705946161923") == 288.0,
           str(qty_pdf))
     check("PDF BIN reconoce DESDE",
           all(x["ubicacion_desde"] == "WSERE PUMO 1 1 1" for x in filas_pdf),
@@ -809,7 +813,7 @@ try:
     analisis_pdf = analizar_documento(
         "BIN2654425.pdf", pdf_bytes, "application/pdf")
     check("Analizador PDF usa geometría BIN",
-          len(analisis_pdf.get("bin_filas_espaciales") or []) == 3,
+          len(analisis_pdf.get("bin_filas_espaciales") or []) == 4,
           str(analisis_pdf.get("bin_filas_espaciales")))
     check("Analizador PDF resume DESDE documental",
           analisis_pdf.get("bin_ubicacion_desde") == "WSERE PUMO 1 1 1",
