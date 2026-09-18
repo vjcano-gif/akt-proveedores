@@ -1,6 +1,7 @@
 """Recibo de mercancía: documento -> revisión -> match por línea con OC -> inventario."""
 import datetime as dt
 import hashlib
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -8,8 +9,8 @@ import streamlit as st
 from core import ui
 from core.auth import alcance_proveedor, puede
 from core.db import session_scope
-from core.document_ai import analizar_documento
-from core.models import OrdenCompra, Proveedor, Recibo
+from core.document_ai import analizar_documento, completar_con_catalogo
+from core.models import Articulo, OrdenCompra, Proveedor, Recibo
 from core.services import (
     LineaRecibo, ReglaNegocio, confirmar_recibo_simple, crear_recibo,
     guardar_archivo, leer_archivo, match_recibo_lineas,
@@ -139,17 +140,108 @@ def _consulta(user):
                     ui.err(str(e))
 
 
-def _extraer_documento(soporte):
+def _nit_normalizado(valor):
+    return "".join(ch for ch in str(valor or "") if ch.isdigit())
+
+
+def _fecha_ocr(extr):
+    raw = str(((extr or {}).get("fecha") or {}).get("valor") or "").strip()
+    hoy_colombia = dt.datetime.now(ZoneInfo("America/Bogota")).date()
+    if not raw:
+        return hoy_colombia
+    try:
+        if len(raw) >= 10 and raw[:4].isdigit() and raw[4] in "-/":
+            ts = pd.to_datetime(raw, yearfirst=True, errors="raise")
+        else:
+            ts = pd.to_datetime(raw, dayfirst=True, errors="raise")
+        return ts.date()
+    except Exception:
+        try:
+            ts = pd.to_datetime(raw, errors="raise")
+            return ts.date()
+        except Exception:
+            return hoy_colombia
+
+
+def _enriquecer_extraccion(extr, proveedor_id):
+    """Cruza OCR con maestros y OC para autocompletar líneas con datos reales."""
+    if not extr or not extr.get("ocr_ok"):
+        return extr
+
+    with session_scope() as s:
+        articulos = s.query(Articulo).filter(Articulo.activo.is_(True)).all()
+        catalogo = {a.codigo: (a.descripcion or "") for a in articulos}
+        completar_con_catalogo(extr, catalogo)
+
+        # Si el documento trae OC, úsela como respaldo para líneas que el OCR
+        # no pudo leer completamente. Nunca sobreescribe una cantidad OCR > 0.
+        oc_num = str(((extr.get("orden_compra") or {}).get("valor") or "")).strip()
+        if oc_num:
+            ocs = s.query(OrdenCompra).filter(
+                OrdenCompra.proveedor_id == proveedor_id,
+                OrdenCompra.numero == oc_num,
+                OrdenCompra.estado == "ABIERTA",
+            ).order_by(OrdenCompra.id).all()
+
+            existentes = {
+                str(x.get("articulo") or "").strip().upper(): x
+                for x in (extr.get("lineas") or [])
+                if str(x.get("articulo") or "").strip()
+            }
+            for oc in ocs:
+                key = oc.articulo.upper()
+                if key not in existentes:
+                    ln = {
+                        "articulo": oc.articulo,
+                        "descripcion": catalogo.get(oc.articulo, ""),
+                        "cantidad_documento": max(0.0, float(oc.pendiente or 0)),
+                        "cantidad_fisica": max(0.0, float(oc.pendiente or 0)),
+                        "confianza": 0.75,
+                        "fuente": "OC_ABIERTA",
+                    }
+                    extr.setdefault("lineas", []).append(ln)
+                    existentes[key] = ln
+                elif float(existentes[key].get("cantidad_documento") or 0) <= 0:
+                    existentes[key]["cantidad_documento"] = max(
+                        0.0, float(oc.pendiente or 0))
+                    existentes[key]["cantidad_fisica"] = max(
+                        0.0, float(oc.pendiente or 0))
+                    existentes[key]["fuente"] = "OC_ABIERTA"
+
+        # Sugiere proveedor origen por NIT, solo si existe en el maestro.
+        nit = _nit_normalizado(((extr.get("nit") or {}).get("valor")))
+        prov_origen_id = None
+        if nit:
+            for p in s.query(Proveedor).filter(
+                    Proveedor.activo.is_(True), Proveedor.id != proveedor_id).all():
+                if _nit_normalizado(p.nit) == nit:
+                    prov_origen_id = p.id
+                    break
+        extr["proveedor_origen_sugerido_id"] = prov_origen_id
+
+    extr["requiere_revision"] = (
+        float(extr.get("confianza_texto") or 0) < 0.85
+        or not extr.get("lineas")
+        or any(float(x.get("cantidad_documento") or 0) <= 0
+               for x in extr.get("lineas", []))
+    )
+    return extr
+
+
+def _extraer_documento(soporte, proveedor_id):
+    """Procesa automáticamente un archivo nuevo; no requiere botón intermedio."""
     if soporte is None:
-        return None
+        return None, "manual"
+
     contenido = soporte.getvalue()
     digest = hashlib.sha256(contenido).hexdigest()[:16]
-    clave = f"extract_{soporte.name}_{digest}"
-    if st.button("Leer documento automáticamente", key=f"btn_{clave}"):
-        with st.spinner("Leyendo documento y buscando artículos/cantidades..."):
+    clave = f"extract_{soporte.name}_{digest}_{proveedor_id}"
+
+    if clave not in st.session_state:
+        with st.spinner("Procesando documento automáticamente..."):
             try:
-                st.session_state[clave] = analizar_documento(
-                    soporte.name, contenido, soporte.type)
+                extr = analizar_documento(soporte.name, contenido, soporte.type)
+                st.session_state[clave] = _enriquecer_extraccion(extr, proveedor_id)
             except Exception as e:
                 st.session_state[clave] = {
                     "ocr_ok": False,
@@ -160,7 +252,8 @@ def _extraer_documento(soporte):
                     "requiere_revision": True,
                     "diagnostico": f"{type(e).__name__}: {e}",
                 }
-    return st.session_state.get(clave)
+
+    return st.session_state.get(clave), digest
 
 
 def _registrar(user):
@@ -172,14 +265,24 @@ def _registrar(user):
     if not pid:
         return
 
-    origen = st.radio(
-        "Origen del recibo", list(ORIGENES),
-        format_func=lambda k: ORIGENES[k], horizontal=False)
-
     soporte = st.file_uploader(
-        "Documento de entrada (PDF o foto)", type=["pdf", "png", "jpg", "jpeg"],
-        key="rec_soporte")
-    extr = _extraer_documento(soporte)
+        "Documento de entrada (PDF o foto)",
+        type=["pdf", "png", "jpg", "jpeg"],
+        key="rec_soporte",
+        help="Al cargar el archivo se procesa automáticamente y se completan los campos detectados.")
+
+    extr, digest = _extraer_documento(soporte, pid)
+    suffix = digest or "manual"
+
+    origenes = list(ORIGENES)
+    origen_sugerido = (extr or {}).get("origen_sugerido")
+    indice_origen = origenes.index(origen_sugerido) if origen_sugerido in origenes else 0
+    origen = st.radio(
+        "Origen del recibo", origenes,
+        index=indice_origen,
+        format_func=lambda k: ORIGENES[k],
+        horizontal=False,
+        key=f"rec_origen_{suffix}")
 
     if extr:
         cf = int(100 * float(extr.get("confianza_texto") or 0))
@@ -189,26 +292,31 @@ def _registrar(user):
         if not extr.get("ocr_ok"):
             st.error(
                 "No fue posible extraer texto del documento. "
-                "La imagen no se procesará automáticamente hasta corregir el OCR.")
+                "Puede continuar con captura manual o revisar el diagnóstico.")
             if diagnostico:
                 with st.expander("Diagnóstico OCR"):
                     st.code(diagnostico)
         elif extr.get("requiere_revision"):
             st.warning(
-                f"Documento leído por {metodo} con confianza aproximada {cf}%. "
-                "Revise y confirme los datos antes de crear el recibo.")
-            if diagnostico:
-                st.caption(f"Motor alterno utilizado / diagnóstico: {diagnostico}")
+                f"Documento procesado automáticamente por {metodo} con confianza "
+                f"aproximada {cf}%. Revise los campos marcados antes de crear el recibo.")
         else:
             st.success(
-                f"Documento leído por {metodo}. Confianza de texto aproximada: {cf}%.")
-            if diagnostico:
-                st.caption(f"Diagnóstico: {diagnostico}")
+                f"Documento procesado automáticamente por {metodo}. "
+                f"Confianza aproximada: {cf}%.")
 
-        with st.expander("Texto detectado", expanded=bool(extr.get("ocr_ok"))):
+        if diagnostico:
+            st.caption(f"Diagnóstico OCR: {diagnostico}")
+
+        with st.expander("Texto detectado", expanded=False):
             texto_ocr = extr.get("texto", "")
             st.text(texto_ocr[:12000] if texto_ocr else "Sin texto detectado.")
 
+        oc_detectada = str(((extr.get("orden_compra") or {}).get("valor") or "")).strip()
+        if oc_detectada:
+            st.caption(f"OC detectada: **{oc_detectada}**")
+
+    # Proveedor origen: si el NIT coincide con el maestro, queda preseleccionado.
     prov_origen_id = None
     if origen == "FACTURA":
         with session_scope() as s:
@@ -217,51 +325,123 @@ def _registrar(user):
             ).order_by(Proveedor.nombre).all()
             ops = {"— No identificado —": None}
             ops.update({f"{p.nombre} ({p.codigo})": p.id for p in provs})
-        sel_po = st.selectbox("Proveedor ORIGEN", list(ops), key="rec_prov_origen")
+
+        sugerido_id = (extr or {}).get("proveedor_origen_sugerido_id")
+        labels = list(ops)
+        sugerido_label = next(
+            (label for label, value in ops.items() if value == sugerido_id),
+            labels[0])
+        sel_po = st.selectbox(
+            "Proveedor ORIGEN", labels,
+            index=labels.index(sugerido_label),
+            key=f"rec_prov_origen_{suffix}")
         prov_origen_id = ops[sel_po]
 
-    ref_sugerida = ""
-    if extr:
-        ref_sugerida = str((extr.get("referencia") or {}).get("valor") or "")
+    ref_sugerida = str(((extr or {}).get("referencia") or {}).get("valor") or "")
+    fecha_sugerida = _fecha_ocr(extr)
+
+    ubicaciones_validas = ui.catalogo_ubicaciones(pid)
+    ubicaciones = [""] + ubicaciones_validas
+    ubi_ocr = str(
+        (((extr or {}).get("ubicacion_destino") or {}).get("valor") or "")
+    ).strip().upper()
+    ubi_default = next(
+        (u for u in ubicaciones_validas if str(u).upper() == ubi_ocr), "")
+    idx_ubi = ubicaciones.index(ubi_default) if ubi_default in ubicaciones else 0
+
     c1, c2, c3 = st.columns(3)
     referencia = c1.text_input(
-        "Referencia / No. documento", value=ref_sugerida,
-        placeholder="BIN2686958 · FV-3-8619", key="rec_ref")
-    fecha_doc = c2.date_input("Fecha del documento", dt.date.today(), key="rec_fecha")
-    ubicaciones = [""] + ui.catalogo_ubicaciones(pid)
-    ubic_dest = c3.selectbox("Ubicación destino", ubicaciones, key="rec_dest")
+        "Referencia / No. documento",
+        value=ref_sugerida,
+        placeholder="BIN2686958 · FV-3-8619",
+        key=f"rec_ref_{suffix}")
+    fecha_doc = c2.date_input(
+        "Fecha del documento",
+        value=fecha_sugerida,
+        key=f"rec_fecha_{suffix}")
+    ubic_dest = c3.selectbox(
+        "Ubicación destino",
+        ubicaciones,
+        index=idx_ubi,
+        key=f"rec_dest_{suffix}")
 
     c1, c2 = st.columns([1, 2])
-    reproceso = c1.checkbox("Es reproceso (garantía/calidad)", key="rec_repro")
-    obs = c2.text_input("Observación general", key="rec_obs")
+    reproceso = c1.checkbox(
+        "Es reproceso (garantía/calidad)",
+        value=bool((extr or {}).get("es_reproceso_sugerido", False)),
+        key=f"rec_repro_{suffix}")
+    obs = c2.text_input("Observación general", key=f"rec_obs_{suffix}")
 
     st.markdown("##### Líneas del recibo")
+    modos = ["Documento leído", "Manual", "Cargue masivo"]
+    modo_default = 0 if soporte is not None else 1
     modo = st.radio(
-        "Captura", ["Documento leído", "Manual", "Cargue masivo"],
-        index=0 if extr and extr.get("lineas") else 1,
-        horizontal=True, key="modo_rec")
+        "Captura", modos,
+        index=modo_default,
+        horizontal=True,
+        key=f"modo_rec_{suffix}")
 
     lineas_df = None
     if modo == "Cargue masivo":
-        ui.boton_plantilla("recibo_lineas", key="rec")
+        ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
-            "Archivo de líneas", type=["csv", "xlsx", "xls"], key="up_rec")
+            "Archivo de líneas", type=["csv", "xlsx", "xls"],
+            key=f"up_rec_{suffix}")
         lineas_df = ui.leer_archivo_tabular(arch)
+
     elif modo == "Documento leído":
-        lineas = extr.get("lineas", []) if extr else []
+        lineas = list((extr or {}).get("lineas") or [])
         if not lineas:
-            st.info("No se identificaron líneas automáticamente. Use captura Manual.")
+            st.info(
+                "El OCR leyó el documento, pero no pudo identificar líneas de artículo. "
+                "Puede completar la tabla manualmente.")
+
+        ubi_desde_ocr = str(
+            (((extr or {}).get("ubicacion_origen") or {}).get("valor") or "")
+        ).strip().upper()
+        ubi_desde = next(
+            (u for u in ubicaciones_validas if str(u).upper() == ubi_desde_ocr), "")
+
         base = pd.DataFrame(lineas or [{
             "articulo": "", "descripcion": "", "cantidad_documento": 0.0,
             "cantidad_fisica": 0.0, "lote": "", "serial": "",
-            "ubicacion_desde": "", "ubicacion_hasta": ubic_dest,
+            "ubicacion_desde": ubi_desde, "ubicacion_hasta": ubic_dest,
         }])
-        for col in ("lote", "serial", "ubicacion_desde", "ubicacion_hasta"):
+
+        for col, default in (
+            ("lote", ""), ("serial", ""),
+            ("ubicacion_desde", ubi_desde),
+            ("ubicacion_hasta", ubic_dest),
+        ):
             if col not in base.columns:
-                base[col] = ubic_dest if col == "ubicacion_hasta" else ""
-        base = base.drop(columns=["confianza"], errors="ignore")
+                base[col] = default
+            elif default:
+                base[col] = base[col].replace("", default)
+
+        base = base.drop(columns=["confianza", "fuente"], errors="ignore")
         lineas_df = st.data_editor(
-            base, num_rows="dynamic", use_container_width=True, key="ed_rec_ai")
+            base,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=f"ed_rec_ai_{suffix}",
+            column_config={
+                "articulo": st.column_config.TextColumn("Artículo", required=True),
+                "descripcion": st.column_config.TextColumn("Descripción"),
+                "cantidad_documento": st.column_config.NumberColumn(
+                    "Cantidad documento", min_value=0.0),
+                "cantidad_fisica": st.column_config.NumberColumn(
+                    "Cantidad física", min_value=0.0),
+            })
+
+        detectadas = [
+            x for x in lineas
+            if str(x.get("articulo") or "").strip()
+        ]
+        if detectadas:
+            st.caption(
+                f"{len(detectadas)} línea(s) detectada(s) automáticamente. "
+                "Confirme cantidades antes de crear el recibo.")
+
     else:
         base = pd.DataFrame([{
             "articulo": "", "descripcion": "", "cantidad_documento": 0.0,
@@ -269,10 +449,13 @@ def _registrar(user):
             "ubicacion_desde": "", "ubicacion_hasta": ubic_dest,
         }])
         lineas_df = st.data_editor(
-            base, num_rows="dynamic", use_container_width=True, key="ed_rec_manual")
+            base, num_rows="dynamic", use_container_width=True,
+            key=f"ed_rec_manual_{suffix}")
 
     if lineas_df is not None and not lineas_df.empty:
-        st.caption("Los datos son una propuesta. Confirme artículo y cantidad física antes de guardar.")
+        st.caption(
+            "Los datos autocompletados son una propuesta: el usuario confirma antes "
+            "de que el documento afecte el flujo.")
 
     if st.button("Crear recibo", type="primary", use_container_width=True):
         if lineas_df is None or lineas_df.empty:
