@@ -758,6 +758,93 @@ check("Tabla asocia cantidades 8 y 5",
 check("OCR no presume cantidad física",
       all(float(x["cantidad_fisica"]) == 0 for x in lineas_tabla))
 
+# Regresión de producción: BIN fotografiado. El texto estructurado correcto
+# debe ganar sobre una geometría RapidOCR que inventó un código y cambió
+# cantidades. Solo se aceptan códigos EXACTOS presentes en el maestro.
+texto_inter = """
+MOVIMIENTO BIN A BIN
+Id de Bin: BIN2720232
+Proveedor Código Descripción Cantidad Serial Lote Desde Hasta
+CHONGQING-012 7700149213509 Cbta Lat Izq Tras 300Rally Mp 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149213622 Cbta Tanq Der Decor Rally Mp 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149213639 Cbta Tanq Izq Decor Rally Mp 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149212113 Cbta Tanque Izq 300Rally Mp 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149649926 Cubta Fron Sup Der SR1-A MP 120 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149649933 Cubta Int Cent Inf SR1-A MP 150 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149648813 Cubta Lat inf Der SR1-A MP 100 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149212359 Guardabarro Del 300Rally Mp 72 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149211895 Quilla Izq 300Ral MP 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149212120 Tap Lat Der 300Rally Mp 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+CHONGQING-012 7700149212144 Tap Lat Izq 300Rally Mp 98 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+GUANGDONG-024 7700149266475 Tanque 125CH Mp 100 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+GUANGDONG-024 7700149266468 Tapa Lat Sup Der CH125 Mp 150 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+GUANGDONG-024 7700149266451 Tapa Lat Sup Izq CH125 Mp 150 NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1
+"""
+catalogo_inter = {
+    "7700149213509": "Cbta Lat Izq Tras 300Rally Mp",
+    "7700149213622": "Cbta Tanq Der Decor Rally Mp",
+    "7700149213639": "Cbta Tanq Izq Decor Rally Mp",
+    "7700149212113": "Cbta Tanque Izq 300Rally Mp",
+    "7700149649926": "Cubta Fron Sup Der SR1-A MP",
+    "7700149649933": "Cubta Int Cent Inf SR1-A MP",
+    "7700149648813": "Cubta Lat inf Der SR1-A MP",
+    "7700149212359": "Guardabarro Del 300Rally Mp",
+    "7700149211895": "Quilla Izq 300Ral MP",
+    "7700149212120": "Tap Lat Der 300Rally Mp",
+    "7700149212144": "Tap Lat Izq 300Rally Mp",
+    "7700149266475": "Tanque 125CH Mp",
+    "7700149266468": "Tapa Lat Sup Der CH125 Mp",
+    "7700149266451": "Tapa Lat Sup Izq CH125 Mp",
+    # Existe en el maestro, pero NO está en el documento: simula una
+    # alucinación espacial que casualmente coincide con un código válido.
+    "7700999999999": "Articulo ajeno al BIN",
+}
+esperado_inter = {
+    "7700149213509": 98.0,
+    "7700149213622": 98.0,
+    "7700149213639": 98.0,
+    "7700149212113": 98.0,
+    "7700149649926": 120.0,
+    "7700149649933": 150.0,
+    "7700149648813": 100.0,
+    "7700149212359": 72.0,
+    "7700149211895": 98.0,
+    "7700149212120": 98.0,
+    "7700149212144": 98.0,
+    "7700149266475": 100.0,
+    "7700149266468": 150.0,
+    "7700149266451": 150.0,
+}
+resultado_inter = estructurar(texto_inter, 0.91)
+resultado_inter["confianza_texto"] = 0.91
+resultado_inter["metodo"] = "TESSERACT/BIN_ESTRUCTURADO"
+resultado_inter["entrada_imagen"] = True
+resultado_inter["bin_filas_espaciales"] = [
+    {
+        "articulo": "7700149213509",
+        "descripcion_ocr": "Cbta Lat Izq Tras 300Rally Mp",
+        "cantidad_documento": 38.0,  # lectura geométrica errada
+        "fuente": "BIN_ESPACIAL",
+    },
+    {
+        "articulo": "7700999999999",
+        "descripcion_ocr": "Articulo ajeno al BIN",
+        "cantidad_documento": 999.0,  # código inventado/ajeno
+        "fuente": "BIN_ESPACIAL",
+    },
+]
+completar_con_catalogo(resultado_inter, catalogo_inter)
+obtenido_inter = {
+    x["articulo"]: float(x["cantidad_documento"])
+    for x in resultado_inter["lineas"]
+}
+check("BIN foto no inventa códigos fuera del texto validado",
+      "7700999999999" not in obtenido_inter, str(obtenido_inter))
+check("BIN foto conserva exactamente los 14 códigos del documento",
+      set(obtenido_inter) == set(esperado_inter), str(obtenido_inter))
+check("BIN foto prioriza cantidades texto/NONE-NONE sobre geometría errada",
+      obtenido_inter == esperado_inter, str(obtenido_inter))
+
 # Tabla BIN completa: valida geometría de Código/Cantidad/DESDE/HASTA.
 def _box(cx, cy, w=100, h=24):
     return [
