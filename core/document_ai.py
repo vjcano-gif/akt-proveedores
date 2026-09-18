@@ -142,11 +142,144 @@ def _texto_rapid_ordenado(res) -> tuple[str, list[float]]:
     return "\n".join(lineas).strip(), confs
 
 
+
+def _filas_rapid_detalladas(res):
+    """Agrupa detecciones RapidOCR en filas conservando coordenadas completas."""
+    txts = list(getattr(res, "txts", None) or [])
+    boxes = getattr(res, "boxes", None)
+    raw_scores = list(getattr(res, "scores", None) or [])
+    if boxes is None or len(boxes) != len(txts):
+        return []
+
+    dets = []
+    for i, (txt, box) in enumerate(zip(txts, boxes)):
+        txt = str(txt or "").strip()
+        if not txt:
+            continue
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in box]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            x1, x2 = min(xs), max(xs)
+            y1, y2 = min(ys), max(ys)
+            score = float(raw_scores[i]) if i < len(raw_scores) else 0.0
+        except Exception:
+            continue
+        dets.append({
+            "texto": txt, "x1": x1, "x2": x2, "y1": y1, "y2": y2,
+            "x": x1, "cy": (y1 + y2) / 2.0, "h": max(1.0, y2 - y1),
+            "score": score,
+        })
+
+    dets.sort(key=lambda d: (d["cy"], d["x"]))
+    filas = []
+    for det in dets:
+        mejor = None
+        mejor_dist = None
+        for fila in filas:
+            dist = abs(det["cy"] - fila["cy"])
+            tol = max(10.0, 0.65 * max(det["h"], fila["h"]))
+            if dist <= tol and (mejor_dist is None or dist < mejor_dist):
+                mejor, mejor_dist = fila, dist
+        if mejor is None:
+            filas.append({"cy": det["cy"], "h": det["h"], "items": [det]})
+        else:
+            mejor["items"].append(det)
+            n = len(mejor["items"])
+            mejor["cy"] = ((mejor["cy"] * (n - 1)) + det["cy"]) / n
+            mejor["h"] = max(mejor["h"], det["h"])
+
+    filas.sort(key=lambda f: f["cy"])
+    for fila in filas:
+        fila["items"].sort(key=lambda d: d["x1"])
+        fila["texto"] = " ".join(x["texto"] for x in fila["items"]).strip()
+        fila["y1"] = min(x["y1"] for x in fila["items"])
+        fila["y2"] = max(x["y2"] for x in fila["items"])
+    return filas
+
+
+def _ocr_numero_celda(img, x1, x2, y1, y2):
+    """Segunda lectura dedicada a una celda de cantidad."""
+    try:
+        import cv2
+        import pytesseract
+
+        h, w = img.shape[:2]
+        margen_x = max(8, int((x2 - x1) * 0.45))
+        margen_y = max(5, int((y2 - y1) * 0.45))
+        xa = max(0, int(x1 - margen_x))
+        xb = min(w, int(x2 + margen_x))
+        ya = max(0, int(y1 - margen_y))
+        yb = min(h, int(y2 + margen_y))
+        crop = img[ya:yb, xa:xb]
+        if crop.size == 0:
+            return None
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        _, bw = cv2.threshold(
+            gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        txt = pytesseract.image_to_string(
+            bw,
+            config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,"
+        )
+        vals = re.findall(r"\d+(?:[.,]\d+)?", txt or "")
+        if not vals:
+            return None
+        return _num(vals[0])
+    except Exception:
+        return None
+
+
+def _refinar_cantidades_tabla(img, res, texto_base):
+    """Añade una cantidad explícita a cada fila usando la columna CANTIDAD.
+
+    Esto corrige casos en que el OCR general lee 179 como 1. El encabezado
+    determina la posición X de la columna y cada celda se re-lee ampliada con
+    un OCR limitado únicamente a dígitos.
+    """
+    filas = _filas_rapid_detalladas(res)
+    if not filas:
+        return texto_base
+
+    cabecera = None
+    item_cantidad = None
+    for i, fila in enumerate(filas):
+        for item in fila["items"]:
+            t = re.sub(r"[^A-Z]", "", item["texto"].upper())
+            if t.startswith("CANT") or "CANTIDAD" in t:
+                cabecera, item_cantidad = i, item
+                break
+        if item_cantidad:
+            break
+    if item_cantidad is None:
+        return texto_base
+
+    qx1, qx2 = item_cantidad["x1"], item_cantidad["x2"]
+    lineas = []
+    for i, fila in enumerate(filas):
+        linea = fila["texto"]
+        if i > cabecera:
+            # Solo re-lee filas que contienen una referencia numérica larga.
+            articulo = any(
+                re.fullmatch(r"\d{10,16}", re.sub(r"\s+", "", x["texto"]))
+                for x in fila["items"]
+            )
+            if articulo:
+                qty = _ocr_numero_celda(
+                    img, qx1, qx2, fila["y1"], fila["y2"])
+                if qty is not None and qty >= 0:
+                    qty_txt = str(int(qty)) if float(qty).is_integer() else str(qty)
+                    linea = f"{linea} CANTIDAD {qty_txt}"
+        lineas.append(linea)
+    return "\n".join(lineas).strip()
+
+
 def _ocr_rapid(img) -> tuple[str, float]:
-    """OCR principal conservando estructura espacial de tablas."""
+    """OCR principal + segunda lectura específica de la columna Cantidad."""
     engine = _rapid_engine()
     res = engine(img)
     texto, scores = _texto_rapid_ordenado(res)
+    texto = _refinar_cantidades_tabla(img, res, texto)
     confianza = sum(scores) / len(scores) if scores else 0.0
     return texto, confianza
 
