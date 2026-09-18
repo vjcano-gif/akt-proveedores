@@ -888,6 +888,8 @@ def _registrar(user):
 
         if diagnostico:
             st.caption(f"Diagnóstico OCR: {diagnostico}")
+        if extr.get("diagnostico_bin"):
+            st.warning(extr["diagnostico_bin"])
 
         with st.expander("Texto detectado", expanded=False):
             texto_ocr = extr.get("texto", "")
