@@ -87,6 +87,10 @@ def run_migrations(engine):
     insp = inspect(engine)
     tables = set(insp.get_table_names())
 
+    if "proveedores" in tables:
+        _add_column(engine, "proveedores", "ubicacion_destino_id",
+                    "ubicacion_destino_id INTEGER")
+
     if "archivos" in tables:
         _add_column(engine, "archivos", "storage_path", "storage_path VARCHAR(500)")
         _add_column(engine, "archivos", "sha256", "sha256 VARCHAR(64)")
@@ -108,8 +112,44 @@ def run_migrations(engine):
     if "bom" in tables:
         _migrar_unique_bom(engine)
 
+
+    # Para instalaciones existentes: si el proveedor tiene una sola ubicación
+    # activa, o una sola ubicación activa con rol DESTINO, la adopta como
+    # ubicación destino por defecto.
+    if "proveedores" in tables and "ubicaciones" in tables:
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                "SELECT id FROM proveedores WHERE ubicacion_destino_id IS NULL"
+            )).fetchall()
+            for (pid,) in rows:
+                destinos = conn.execute(text(
+                    "SELECT id FROM ubicaciones "
+                    "WHERE proveedor_id = :pid AND activo = :activo "
+                    "AND COALESCE(cerrada, 0) = :cerrada "
+                    "AND UPPER(COALESCE(rol, '')) = 'DESTINO' "
+                    "ORDER BY id"
+                ), {"pid": pid, "activo": True, "cerrada": False}).fetchall()
+                candidatos = [r[0] for r in destinos]
+                if len(candidatos) != 1:
+                    todas = conn.execute(text(
+                        "SELECT id FROM ubicaciones "
+                        "WHERE proveedor_id = :pid AND activo = :activo "
+                        "AND COALESCE(cerrada, 0) = :cerrada ORDER BY id"
+                    ), {"pid": pid, "activo": True, "cerrada": False}).fetchall()
+                    candidatos = [r[0] for r in todas]
+                if len(candidatos) == 1:
+                    conn.execute(text(
+                        "UPDATE proveedores SET ubicacion_destino_id = :uid "
+                        "WHERE id = :pid"
+                    ), {"uid": candidatos[0], "pid": pid})
+
     # Índices de apoyo. CREATE INDEX IF NOT EXISTS funciona en SQLite y PostgreSQL.
     with engine.begin() as conn:
+        if "proveedores" in tables:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_destino "
+                "ON proveedores (ubicacion_destino_id)"
+            ))
         if "archivos" in tables:
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_archivos_sha256 ON archivos (sha256)"
