@@ -320,6 +320,10 @@ def _proveedores(user):
         "Cada proveedor operativo debe tener dos ubicaciones obligatorias del BIN: "
         "DESDE (control con alerta) y HASTA (control bloqueante).")
 
+    mensaje_guardado = st.session_state.pop("prov_guardado_mensaje", None)
+    if mensaje_guardado:
+        st.success(mensaje_guardado)
+
     def _faltantes_valores(codigo, nombre, nit, desde, hasta, tolerancia):
         return campos_faltantes_proveedor(
             codigo=codigo,
@@ -571,12 +575,15 @@ def _proveedores(user):
         st.info(f"No hay proveedores en el segmento **{estado_filtro}**.")
         return
 
+    editor_version = int(st.session_state.get("prov_editor_version", 0))
+    editor_key = f"ed_prov_{editor_version}"
+
     ed = st.data_editor(
         pd.DataFrame(filas),
         use_container_width=True,
         height=380,
         hide_index=True,
-        key="ed_prov",
+        key=editor_key,
         num_rows="fixed",
         disabled=["id", "codigo", "listo_para_activar"],
         column_config={
@@ -608,16 +615,59 @@ def _proveedores(user):
             + ("…" if len(incompletos) > 8 else ""))
 
     if st.button("Guardar cambios", type="primary", key="sv_prov"):
-        n, errores = 0, []
+        errores = []
+        actualizados = activados = inactivados = 0
+
+        # Streamlit guarda los cambios del data_editor como parches por índice.
+        # Usarlos explícitamente evita perder checkboxes al reconstruir la tabla
+        # durante el rerun.
+        estado_editor = st.session_state.get(editor_key, {}) or {}
+        parches = estado_editor.get("edited_rows", {}) or {}
+
+        # Normaliza las claves porque Streamlit puede entregarlas como int o str.
+        indices_editados = []
+        for k in parches:
+            try:
+                indices_editados.append(int(k))
+            except (TypeError, ValueError):
+                pass
+
+        # Fallback defensivo: si por versión de Streamlit no expone edited_rows,
+        # compara el dataframe editado con la foto original mostrada.
+        if not indices_editados:
+            originales = pd.DataFrame(filas).reset_index(drop=True)
+            editados = ed.reset_index(drop=True)
+            for i in range(min(len(originales), len(editados))):
+                a = originales.iloc[i].fillna("").astype(str).to_dict()
+                b = editados.iloc[i].fillna("").astype(str).to_dict()
+                if a != b:
+                    indices_editados.append(i)
+
+        indices_editados = sorted(set(
+            i for i in indices_editados if 0 <= i < len(ed)
+        ))
+
+        if not indices_editados:
+            st.info("No hay cambios pendientes para guardar.")
+            return
+
+        estados_esperados = {}
+
         with session_scope() as s:
             ubicaciones = {
                 u.codigo: u for u in s.query(Ubicacion).filter(
                     Ubicacion.activo.is_(True)).all()
             }
-            for _, r in ed.iterrows():
+
+            for i in indices_editados:
+                r = ed.iloc[i]
                 p = s.get(Proveedor, int(r["id"]))
                 if not p:
+                    errores.append(f"Fila {i + 1}: proveedor no encontrado.")
                     continue
+
+                activo_anterior = bool(p.activo)
+                activar = bool(r.get("activo"))
 
                 nombre = str(r.get("nombre") or "").strip()
                 nit = str(r.get("nit") or "").strip()
@@ -625,40 +675,60 @@ def _proveedores(user):
                 hasta = str(r.get("ubicacion_hasta") or "").strip().upper()
                 try:
                     tolerancia = float(r.get("tolerancia_averia_pct"))
+                    if pd.isna(tolerancia):
+                        tolerancia = None
                 except (TypeError, ValueError):
                     tolerancia = None
-                activar = bool(r.get("activo"))
+
+                # DESACTIVAR SIEMPRE ES VÁLIDO. No debe quedar condicionado por
+                # DESDE/HASTA, NIT ni ningún otro campo pendiente.
+                if activo_anterior and not activar:
+                    p.activo = False
+                    s.flush()
+                    estados_esperados[p.id] = False
+                    inactivados += 1
+                    actualizados += 1
+                    continue
 
                 faltan = _faltantes_valores(
                     p.codigo, nombre, nit, desde, hasta, tolerancia)
 
-                # Regla dura: nunca persistir Activo=True si falta un campo.
+                # Una activación nueva sí exige parametrización completa.
                 if activar and faltan:
                     p.activo = False
+                    estados_esperados[p.id] = False
                     errores.append(
                         f"{p.codigo}: NO se activó. Faltan: {', '.join(faltan)}.")
-                    # Permite guardar lo que sí fue diligenciado para completar
-                    # progresivamente el maestro.
-                    activar = False
+                    actualizados += 1
+                    continue
 
                 u_desde = ubicaciones.get(desde) if desde else None
                 u_hasta = ubicaciones.get(hasta) if hasta else None
 
-                if desde and (not u_desde or u_desde.cerrada):
-                    errores.append(f"{p.codigo}: DESDE {desde} no disponible.")
-                    activar = False
+                if activar and (not u_desde or u_desde.cerrada):
                     p.activo = False
-                    continue
-                if hasta and (not u_hasta or u_hasta.cerrada):
-                    errores.append(f"{p.codigo}: HASTA {hasta} no disponible.")
-                    activar = False
-                    p.activo = False
-                    continue
-                if u_hasta and u_hasta.proveedor_id and u_hasta.proveedor_id != p.id:
+                    estados_esperados[p.id] = False
                     errores.append(
-                        f"{p.codigo}: HASTA {hasta} pertenece a otro proveedor.")
-                    activar = False
+                        f"{p.codigo}: no se activa; DESDE {desde or '(vacío)'} "
+                        "no está disponible.")
+                    actualizados += 1
+                    continue
+                if activar and (not u_hasta or u_hasta.cerrada):
                     p.activo = False
+                    estados_esperados[p.id] = False
+                    errores.append(
+                        f"{p.codigo}: no se activa; HASTA {hasta or '(vacío)'} "
+                        "no está disponible.")
+                    actualizados += 1
+                    continue
+                if (activar and u_hasta and u_hasta.proveedor_id
+                        and u_hasta.proveedor_id != p.id):
+                    p.activo = False
+                    estados_esperados[p.id] = False
+                    errores.append(
+                        f"{p.codigo}: no se activa; HASTA {hasta} pertenece "
+                        "a otro proveedor.")
+                    actualizados += 1
                     continue
 
                 anterior = str(p.ubicacion_destino or "").strip().upper()
@@ -675,17 +745,53 @@ def _proveedores(user):
                     p.tolerancia_averia_pct = tolerancia
                 p.ubicacion_origen = desde or None
                 p.ubicacion_destino = hasta or None
-                p.activo = bool(activar and not faltan)
+                p.activo = bool(activar)
 
                 if u_hasta:
                     u_hasta.proveedor_id = p.id
                     u_hasta.rol = "DESTINO"
-                n += 1
 
+                if not activo_anterior and p.activo:
+                    activados += 1
+                elif activo_anterior and not p.activo:
+                    inactivados += 1
+                estados_esperados[p.id] = bool(p.activo)
+                actualizados += 1
+
+            # Obliga a emitir los UPDATE antes de salir de la transacción.
+            s.flush()
+
+        # Verificación independiente después del COMMIT.
+        fallos_persistencia = []
+        if estados_esperados:
+            with session_scope() as s:
+                for pid, esperado in estados_esperados.items():
+                    p = s.get(Proveedor, pid)
+                    if p is None or bool(p.activo) != esperado:
+                        fallos_persistencia.append(pid)
+
+        if fallos_persistencia:
+            ui.err(
+                "La base no confirmó el cambio de estado para los proveedores: "
+                + ", ".join(map(str, fallos_persistencia[:10])))
+            return
+
+        # Fuerza un widget nuevo en el siguiente rerun; así la tabla se reconstruye
+        # exclusivamente desde la base y no reutiliza parches antiguos.
+        st.session_state["prov_editor_version"] = editor_version + 1
         ui.limpiar_cache()
-        ui.ok(f"{n} proveedores actualizados.")
-        for e in errores:
-            st.warning(e, icon="⚠️")
+
+        if errores:
+            st.session_state["prov_guardado_mensaje"] = (
+                f"{actualizados} cambios guardados · {inactivados} inactivados · "
+                f"{activados} activados. " + " | ".join(errores[:5])
+            )
+        else:
+            st.session_state["prov_guardado_mensaje"] = (
+                f"{actualizados} cambios guardados · {inactivados} inactivados · "
+                f"{activados} activados."
+            )
+        st.rerun()
 
 
 # ----------------------------------------------------------- órdenes de compra

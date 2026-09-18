@@ -132,6 +132,23 @@ check("Selector excluye proveedor inactivo", "VDRINACT" not in codigos_activos)
 check("Rol PROVEEDOR queda acotado a su proveedor",
       alcance_proveedor({"rol": "PROVEEDOR", "proveedor_id": PID}) == PID)
 
+print("\n=== 0AB. PERSISTENCIA ESTADO PROVEEDOR ===")
+with session_scope() as s:
+    p = s.get(Proveedor, PID)
+    p.activo = False
+with session_scope() as s:
+    check("Desactivación persiste tras nuevo session_scope",
+          s.get(Proveedor, PID).activo is False)
+df_inact = catalogo_proveedores()
+check("Proveedor desactivado desaparece del catálogo activo",
+      "VDR0013714" not in set(df_inact["codigo"].tolist()))
+with session_scope() as s:
+    p = s.get(Proveedor, PID)
+    p.activo = True
+with session_scope() as s:
+    check("Reactivación persiste tras nuevo session_scope",
+          s.get(Proveedor, PID).activo is True)
+
 print("\n=== 0B. REGLAS DESDE / HASTA DEL BIN ===")
 with session_scope() as s:
     esperar_error(
