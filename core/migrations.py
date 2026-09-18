@@ -91,6 +91,54 @@ def run_migrations(engine):
         _add_column(engine, "archivos", "storage_path", "storage_path VARCHAR(500)")
         _add_column(engine, "archivos", "sha256", "sha256 VARCHAR(64)")
 
+    if "proveedores" in tables:
+        _add_column(engine, "proveedores", "ubicacion_destino",
+                    "ubicacion_destino VARCHAR(80)")
+        # Backfill conservador: si ya existe una ubicación activa asociada al proveedor,
+        # úsela como principal. Se prefiere rol DESTINO; si no existe, toma la primera.
+        if "ubicaciones" in tables:
+            with engine.begin() as conn:
+                if engine.dialect.name == "postgresql":
+                    conn.execute(text("""
+                        UPDATE proveedores p
+                           SET ubicacion_destino = u.codigo
+                          FROM LATERAL (
+                               SELECT codigo
+                                 FROM ubicaciones
+                                WHERE proveedor_id = p.id
+                                  AND activo = TRUE
+                                  AND cerrada = FALSE
+                                ORDER BY CASE WHEN UPPER(COALESCE(rol,'')) = 'DESTINO'
+                                              THEN 0 ELSE 1 END,
+                                         id
+                                LIMIT 1
+                          ) u
+                         WHERE (p.ubicacion_destino IS NULL OR p.ubicacion_destino = '')
+                    """))
+                else:
+                    conn.execute(text("""
+                        UPDATE proveedores
+                           SET ubicacion_destino = (
+                               SELECT codigo
+                                 FROM ubicaciones
+                                WHERE ubicaciones.proveedor_id = proveedores.id
+                                  AND activo = 1
+                                  AND cerrada = 0
+                                ORDER BY CASE WHEN UPPER(COALESCE(rol,'')) = 'DESTINO'
+                                              THEN 0 ELSE 1 END,
+                                         id
+                                LIMIT 1
+                           )
+                         WHERE (ubicacion_destino IS NULL OR ubicacion_destino = '')
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM ubicaciones
+                                WHERE ubicaciones.proveedor_id = proveedores.id
+                                  AND activo = 1
+                                  AND cerrada = 0
+                           )
+                    """))
+
     if "recibos" in tables:
         _add_column(engine, "recibos", "proveedor_origen_id",
                     "proveedor_origen_id INTEGER")
@@ -118,4 +166,9 @@ def run_migrations(engine):
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_recibo_lineas_oc "
                 "ON recibo_lineas (orden_compra_id)"
+            ))
+        if "proveedores" in tables:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_destino "
+                "ON proveedores (ubicacion_destino)"
             ))
