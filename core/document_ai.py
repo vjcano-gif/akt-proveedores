@@ -1552,6 +1552,23 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     metodo = str(resultado.get("metodo") or "")
     bin_score, bin_filas_texto = _score_bin_texto(resultado.get("texto", ""))
 
+    es_bin_imagen = bool(
+        es_imagen and (
+            resultado.get("origen_sugerido") == "BIN_A_BIN"
+            or "BIN_ESTRUCTURADO" in metodo
+            or bin_score >= 20
+        )
+    )
+
+    # En una fotografía BIN eliminamos por completo las líneas heurísticas que
+    # nacieron antes de validar la tabla. Es preferible mostrar una fila como
+    # "no leída" a inventar un código o una cantidad plausible pero incorrecta.
+    # A partir de aquí solo vuelven a entrar filas con:
+    #   código EXACTO del maestro + cantidad seguida de NONE/NONE.
+    if es_bin_imagen:
+        resultado["lineas"] = []
+        existentes = {}
+
     # En una fotografía BIN, las líneas de texto estructuradas son el camino
     # más seguro porque el código se acepta únicamente si existe EXACTAMENTE en
     # el maestro y la cantidad debe aparecer antes de NONE/NONE. La geometría
@@ -1580,7 +1597,23 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "fuente": row.get("fuente", "BIN_ESPACIAL"),
         })
 
-    for ln in propuestas + propuestas_bin + propuestas_espaciales:
+    if es_bin_imagen:
+        # Sin filas estructuradas válidas no se autocompletan cantidades desde
+        # OCR espacial ni heurístico. Se fuerza revisión en vez de inventar.
+        fuentes_merge = (
+            propuestas_bin + propuestas_espaciales
+            if propuestas_bin else []
+        )
+        if not propuestas_bin:
+            resultado["diagnostico_bin"] = (
+                "No se pudieron validar filas BIN con el patrón "
+                "Código + Cantidad + NONE + NONE. No se autocompletaron "
+                "códigos ni cantidades para evitar datos incorrectos."
+            )
+    else:
+        fuentes_merge = propuestas + propuestas_bin + propuestas_espaciales
+
+    for ln in fuentes_merge:
         key = ln["articulo"].upper()
         actual = existentes.get(key)
         if actual is None:
