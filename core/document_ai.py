@@ -625,13 +625,44 @@ def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
                             qty = max(v for v, _ in candidatos)
 
             if qty is None or qty <= 0:
-                # Último rescate: cualquier token numérico cerca de la columna
-                # Cantidad dentro de la banda del código.
+                # Rescate semántico para reportes BIN de ancho fijo: la cantidad
+                # aparece inmediatamente antes de SERIAL y LOTE. En algunos PDFs
+                # PyMuPDF desplaza horizontalmente la cantidad de las filas 2+
+                # fuera del rango calculado por el encabezado, aunque visualmente
+                # esté en la columna correcta.
+                #
+                # Ejemplo real:
+                #   ... Base Sillin RX Mp 156 NONE NONE WSERE ...
+                ordenados = sorted(_dedupe_pdf_words(row), key=lambda z: z["x0"])
+                marcadores_vacios = {"NONE", "N/A", "NA", "N.A.", "-"}
+                for j in range(0, max(0, len(ordenados) - 2)):
+                    raw_qty = str(ordenados[j]["txt"] or "").strip()
+                    s1 = str(ordenados[j + 1]["txt"] or "").strip().upper()
+                    s2 = str(ordenados[j + 2]["txt"] or "").strip().upper()
+                    if not re.fullmatch(r"\d+(?:[.,]\d+)?", raw_qty):
+                        continue
+                    if s1 not in marcadores_vacios or s2 not in marcadores_vacios:
+                        continue
+                    val = _num(raw_qty)
+                    if val is None or val <= 0:
+                        continue
+                    # Debe quedar después del código y antes de DESDE para no
+                    # confundir los dígitos de las ubicaciones con la cantidad.
+                    if ordenados[j]["cx"] <= anchor["cx"]:
+                        continue
+                    if ordenados[j]["cx"] >= x_desde:
+                        continue
+                    qty = val
+                    break
+
+            if qty is None or qty <= 0:
+                # Último rescate geométrico: acepta una franja algo más amplia.
+                # El candidato más cercano al encabezado Cantidad gana.
                 candidatos = []
                 for w in row:
                     if not re.fullmatch(r"\d+(?:[.,]\d+)?", w["txt"]):
                         continue
-                    if (x_qty - 55.0) <= w["cx"] < (x_serial - 3.0):
+                    if (x_qty - 75.0) <= w["cx"] < (x_serial + 8.0):
                         val = _num(w["txt"])
                         if val and val > 0:
                             candidatos.append((abs(w["cx"] - x_qty), val))
