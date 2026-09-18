@@ -1905,6 +1905,9 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         if qty is None or qty <= 0:
             continue
         oficial_cod, oficial_desc = mapa_upper[key]
+        fuente_ia = str(
+            resultado.get("ia_fuente") or "DOCUMENT_AI"
+        ).strip() or "DOCUMENT_AI"
         propuestas_ia.append({
             "articulo": oficial_cod,
             "descripcion": oficial_desc or str(row.get("descripcion") or ""),
@@ -1915,7 +1918,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "ubicacion_desde": str(row.get("desde") or ""),
             "ubicacion_hasta": str(row.get("hasta") or ""),
             "confianza": 0.99,
-            "fuente": "MISTRAL_DOCUMENT_AI",
+            "fuente": fuente_ia,
         })
 
     es_imagen = bool(resultado.get("entrada_imagen"))
@@ -1973,7 +1976,8 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         # local antes de llegar aquí.
         fuentes_merge = propuestas_ia
         resultado["diagnostico_bin"] = (
-            f"Document AI validó {len(propuestas_ia)} fila(s) contra el maestro."
+            f"{resultado.get('ia_fuente') or 'Document AI'} validó "
+            f"{len(propuestas_ia)} fila(s) contra el maestro."
         )
     elif es_bin_imagen:
         # Sin filas estructuradas válidas no se autocompletan cantidades desde
@@ -2012,6 +2016,8 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "BIN_PDF_CODIGO": 6,
             "BIN_TABLA_IMAGEN_VALIDADA": 8,
             "MISTRAL_DOCUMENT_AI": 20,
+            "OPENAI_GPT5_NANO": 20,
+            "DOCUMENT_AI": 20,
         }
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
