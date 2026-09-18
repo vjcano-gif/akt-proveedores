@@ -197,6 +197,126 @@ def _ocr_rapid(img) -> tuple[str, float]:
     return texto, confianza
 
 
+def _norm_cabecera(txt: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(txt or ""))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return re.sub(r"[^A-Z]", "", s.upper())
+
+
+def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
+    """Extrae columnas reales del BIN usando X/Y de RapidOCR.
+
+    Devuelve Código, Cantidad, Serial, Lote, DESDE y HASTA por fila.
+    """
+    try:
+        img = _decode_image(data)
+        res = _rapid_engine()(img)
+        txts = _refinar_celdas_numericas(img, res)
+        boxes = getattr(res, "boxes", None)
+        if boxes is None or len(boxes) != len(txts):
+            return []
+    except Exception:
+        return []
+
+    dets = []
+    for txt, box in zip(txts, boxes):
+        txt = str(txt or "").strip()
+        if not txt:
+            continue
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in box]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            dets.append({
+                "txt": txt,
+                "cx": (min(xs)+max(xs))/2,
+                "cy": (min(ys)+max(ys))/2,
+                "h": max(1.0, max(ys)-min(ys)),
+            })
+        except Exception:
+            continue
+
+    aliases = {
+        "proveedor": {"PROVEEDOR"},
+        "codigo": {"CODIGO"},
+        "descripcion": {"DESCRIPCION"},
+        "cantidad": {"CANTIDAD"},
+        "serial": {"SERIAL"},
+        "lote": {"LOTE"},
+        "desde": {"DESDE"},
+        "hasta": {"HASTA"},
+    }
+    headers = {}
+    for d in dets:
+        n = _norm_cabecera(d["txt"])
+        for key, vals in aliases.items():
+            if n in vals and key not in headers:
+                headers[key] = d
+
+    requeridas = {"codigo", "cantidad", "desde", "hasta"}
+    if not requeridas.issubset(headers):
+        return []
+
+    # Orden real de columnas según X; usa cabeceras disponibles.
+    columnas = sorted(
+        [(k, v["cx"]) for k, v in headers.items()],
+        key=lambda x: x[1])
+    header_y = max(headers[k]["cy"] for k in headers)
+    limites = []
+    for i in range(len(columnas)-1):
+        limites.append((columnas[i][1] + columnas[i+1][1]) / 2)
+
+    def columna_de_x(x):
+        idx = 0
+        while idx < len(limites) and x > limites[idx]:
+            idx += 1
+        return columnas[min(idx, len(columnas)-1)][0]
+
+    datos = [d for d in dets if d["cy"] > header_y + 4]
+    datos.sort(key=lambda d: (d["cy"], d["cx"]))
+    filas = []
+    for d in datos:
+        target = None
+        for fila in filas:
+            tol = max(9.0, 0.65 * max(d["h"], fila["h"]))
+            if abs(d["cy"] - fila["cy"]) <= tol:
+                target = fila
+                break
+        if target is None:
+            target = {"cy": d["cy"], "h": d["h"], "items": []}
+            filas.append(target)
+        target["items"].append(d)
+
+    out = []
+    for fila in filas:
+        celdas = {}
+        for d in sorted(fila["items"], key=lambda x: x["cx"]):
+            col = columna_de_x(d["cx"])
+            celdas.setdefault(col, []).append(d["txt"])
+        celdas = {k: " ".join(v).strip() for k, v in celdas.items()}
+
+        codigo = re.sub(r"\s+", "", celdas.get("codigo", ""))
+        if not re.fullmatch(r"[A-Z0-9._/-]{5,60}", codigo, re.I):
+            continue
+        qty = _num(celdas.get("cantidad"))
+        if qty is None or qty <= 0:
+            continue
+
+        out.append({
+            "articulo": codigo,
+            "descripcion_ocr": celdas.get("descripcion", ""),
+            "cantidad_documento": float(qty),
+            "cantidad_fisica": 0.0,
+            "serial": celdas.get("serial", ""),
+            "lote": celdas.get("lote", ""),
+            "ubicacion_desde": celdas.get("desde", "").strip().upper(),
+            "ubicacion_hasta": celdas.get("hasta", "").strip().upper(),
+            "proveedor_bin": celdas.get("proveedor", ""),
+            "fuente": "BIN_ESPACIAL",
+        })
+    return out
+
+
 def _ocr_tesseract(img) -> tuple[str, float]:
     """Fallback gratuito mediante el binario Tesseract del servidor."""
     import cv2
@@ -372,11 +492,13 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
         r"(?:fecha|date)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         r"\b(\d{4}-\d{2}-\d{2})\b",
     ], t)
+    # DESDE/HASTA de un BIN son columnas tabulares; no se extraen aquí
+    # porque tomar "la palabra siguiente" al encabezado produce falsos positivos.
     ubicacion_origen = _primero([
-        r"(?:ubicaci[oó]n\s+origen|desde)\s*[:#-]?\s*([A-Z0-9._/-]{2,40})",
+        r"(?:ubicaci[oó]n\s+origen)\s*[:#-]?\s*([A-Z0-9._/-]{2,40})",
     ], t)
     ubicacion_destino = _primero([
-        r"(?:ubicaci[oó]n\s+destino|destino|hasta)\s*[:#-]?\s*([A-Z0-9._/-]{2,40})",
+        r"(?:ubicaci[oó]n\s+destino)\s*[:#-]?\s*([A-Z0-9._/-]{2,40})",
     ], t)
     reproceso = bool(re.search(r"\b(REPROCESO|GARANT[IÍ]A|RETRABAJO)\b", t, re.I))
 
@@ -601,8 +723,26 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 
     propuestas = lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf)
     propuestas_bin = lineas_bin_desde_texto(resultado.get("texto", ""), catalogo, cf)
+    propuestas_espaciales = []
+    for row in resultado.get("bin_filas_espaciales", []) or []:
+        key = str(row.get("articulo") or "").strip().upper()
+        if key not in mapa_upper:
+            continue
+        oficial_cod, oficial_desc = mapa_upper[key]
+        propuestas_espaciales.append({
+            "articulo": oficial_cod,
+            "descripcion": oficial_desc or row.get("descripcion_ocr", ""),
+            "cantidad_documento": float(row.get("cantidad_documento") or 0),
+            "cantidad_fisica": 0.0,
+            "serial": row.get("serial", ""),
+            "lote": row.get("lote", ""),
+            "ubicacion_desde": row.get("ubicacion_desde", ""),
+            "ubicacion_hasta": row.get("ubicacion_hasta", ""),
+            "confianza": round(min(cf, 0.99), 3),
+            "fuente": "BIN_ESPACIAL",
+        })
 
-    for ln in propuestas + propuestas_bin:
+    for ln in propuestas + propuestas_bin + propuestas_espaciales:
         key = ln["articulo"].upper()
         actual = existentes.get(key)
         if actual is None:
@@ -612,11 +752,15 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         qty_nueva = float(ln.get("cantidad_documento") or 0)
         fuente_nueva = str(ln.get("fuente") or "")
         fuente_actual = str(actual.get("fuente") or "")
-        prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1, "BIN_TABLA": 2}
+        prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1,
+                     "BIN_TABLA": 2, "BIN_ESPACIAL": 3}
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
             actual["fuente"] = fuente_nueva
+            for campo in ("serial", "lote", "ubicacion_desde", "ubicacion_hasta"):
+                if ln.get(campo):
+                    actual[campo] = ln.get(campo)
         if ln.get("descripcion"):
             actual["descripcion"] = ln["descripcion"]
 
@@ -640,6 +784,11 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
     texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
     out = estructurar(texto, cf)
+    name = (nombre or "").lower()
+    if (mime or "").startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+        out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
+    else:
+        out["bin_filas_espaciales"] = []
     out["metodo"] = metodo
     out["confianza_texto"] = round(cf, 3)
     out["diagnostico"] = diagnostico
