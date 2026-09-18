@@ -540,7 +540,11 @@ def _registrar(user):
             if col not in base.columns:
                 base[col] = ""
 
-        base = base.drop(columns=["confianza", "fuente"], errors="ignore")
+        base = base.drop(columns=[
+            "confianza", "fuente",
+            "ubicacion_desde_ocr_raw", "ubicacion_desde_ocr_score",
+            "ubicacion_hasta_ocr_raw", "ubicacion_hasta_ocr_score",
+        ], errors="ignore")
 
         estado_key = f"rec_estado_{suffix}"
         df_key = f"rec_df_{suffix}"
