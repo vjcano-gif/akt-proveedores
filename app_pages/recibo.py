@@ -661,11 +661,32 @@ def _registrar(user):
         soporte = st.camera_input(
             "Tomar foto del documento",
             key="rec_camara",
+            resolution="1080p",
+            width="stretch",
             help=(
-                "Procure encuadrar el documento completo, de frente, con buena "
-                "iluminación y sin reflejos."
+                "La cámara solicita 1080p, la máxima resolución admitida por "
+                "Streamlit. Procure encuadrar el documento completo, de frente, "
+                "con buena iluminación y sin reflejos."
             ),
         )
+        if soporte is not None:
+            try:
+                from PIL import Image
+                import io
+                _img = Image.open(io.BytesIO(soporte.getvalue()))
+                st.caption(
+                    f"Foto capturada: **{_img.width} × {_img.height} px**. "
+                    "Se procesará con OCR reforzado para cantidades."
+                )
+                if min(_img.width, _img.height) < 900:
+                    st.warning(
+                        "La cámara del navegador entregó una imagen menor a 900 px "
+                        "en su lado corto. Para documentos con texto pequeño puede "
+                        "ser más confiable usar «Cargar archivo» con una foto tomada "
+                        "desde la cámara nativa del celular."
+                    )
+            except Exception:
+                pass
     else:
         soporte = st.file_uploader(
             "Documento de entrada (PDF o foto)",
