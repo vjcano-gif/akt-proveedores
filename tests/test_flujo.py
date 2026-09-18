@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test.db"))
 
 from core.db import init_db, session_scope  # noqa: E402
-from core.document_ai import analizar_documento, estructurar  # noqa: E402
+from core.document_ai import (analizar_documento, completar_con_catalogo,
+                              estructurar, inferir_origen)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -303,6 +304,28 @@ ext = estructurar(sample, 0.99)
 check("Extractor identifica referencia", ext["referencia"]["valor"] is not None)
 check("Extractor identifica OC", ext["orden_compra"]["valor"] == "OC-2026-0001")
 check("Extractor propone líneas", len(ext["lineas"]) >= 2)
+check("Extractor infiere FACTURA", inferir_origen(sample) == "FACTURA")
+
+sample_catalogo = """
+FACTURA FV-777
+FECHA 17/09/2026
+UBICACION DESTINO UB-PROV-01
+GARANTIA
+CP-A Carenaje Crudo CANTIDAD 12
+"""
+ext_cat = estructurar(sample_catalogo, 0.97)
+ext_cat["confianza_texto"] = 0.97
+ext_cat = completar_con_catalogo(
+    ext_cat, {"CP-A": "Carenaje Crudo", "CP-B": "Calca"})
+check("Maestro confirma artículo OCR",
+      any(x["articulo"] == "CP-A" for x in ext_cat["lineas"]))
+check("Maestro conserva/proponen cantidad 12",
+      any(x["articulo"] == "CP-A" and float(x["cantidad_documento"]) == 12
+          for x in ext_cat["lineas"]))
+check("Extractor detecta ubicación destino",
+      ext_cat["ubicacion_destino"]["valor"] == "UB-PROV-01")
+check("Extractor detecta reproceso/garantía",
+      ext_cat["es_reproceso_sugerido"] is True)
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:
