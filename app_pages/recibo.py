@@ -250,6 +250,69 @@ def _enriquecer_extraccion(extr, proveedor_id):
         extr["bin_desde_detalle"] = desde_canon
         extr["bin_hasta_detalle"] = hasta_canon
 
+        # Determina para qué proveedor está dirigido el BIN usando HASTA.
+        # En el proceso AKT, la ubicación HASTA es la ubicación destino
+        # configurada en el maestro del proveedor transformador. No se usa la
+        # columna "Proveedor" del BIN para esto, porque esa columna identifica
+        # proveedores/orígenes de los materiales y puede contener varios valores.
+        seleccionado = s.get(Proveedor, proveedor_id)
+        extr["proveedor_seleccionado_id"] = proveedor_id
+        extr["proveedor_seleccionado_codigo"] = (
+            seleccionado.codigo if seleccionado else "")
+        extr["proveedor_seleccionado_nombre"] = (
+            seleccionado.nombre if seleccionado else "")
+
+        destino_bin = _norm_ubi(extr.get("bin_hasta_canon") or "")
+        candidatos_destino = {}
+
+        if destino_bin:
+            # 1) Relación directa Ubicación -> Proveedor.
+            ubic_destino = s.query(Ubicacion).filter(
+                Ubicacion.codigo == destino_bin,
+                Ubicacion.activo.is_(True),
+                Ubicacion.cerrada.is_(False),
+            ).first()
+            if ubic_destino and ubic_destino.proveedor_id:
+                p_dest = s.get(Proveedor, ubic_destino.proveedor_id)
+                if p_dest and p_dest.activo:
+                    candidatos_destino[p_dest.id] = p_dest
+
+            # 2) Respaldo: ubicación_destino guardada directamente en Proveedor.
+            for p_dest in s.query(Proveedor).filter(
+                    Proveedor.activo.is_(True)).all():
+                if _norm_ubi(p_dest.ubicacion_destino) == destino_bin:
+                    candidatos_destino[p_dest.id] = p_dest
+
+        detectado = (
+            next(iter(candidatos_destino.values()))
+            if len(candidatos_destino) == 1 else None
+        )
+        extr["proveedor_destino_detectado_id"] = (
+            detectado.id if detectado else None)
+        extr["proveedor_destino_detectado_codigo"] = (
+            detectado.codigo if detectado else "")
+        extr["proveedor_destino_detectado_nombre"] = (
+            detectado.nombre if detectado else "")
+        extr["proveedor_destino_detectado_hasta"] = destino_bin
+
+        # None = no fue posible determinarlo con suficiente certeza.
+        # False = el documento pertenece inequívocamente a otro proveedor.
+        coincide = None
+        if detectado:
+            coincide = int(detectado.id) == int(proveedor_id)
+        elif destino_bin and seleccionado:
+            hasta_sel = _norm_ubi(seleccionado.ubicacion_destino)
+            # Solo afirmamos que NO corresponde cuando HASTA fue reconocido
+            # como una ubicación maestra real.
+            destino_conocido = s.query(Ubicacion.id).filter(
+                Ubicacion.codigo == destino_bin,
+                Ubicacion.activo.is_(True),
+                Ubicacion.cerrada.is_(False),
+            ).first() is not None
+            if destino_conocido and hasta_sel:
+                coincide = destino_bin == hasta_sel
+        extr["proveedor_destino_coincide"] = coincide
+
         # Si el documento trae OC, úsela como respaldo para líneas que el OCR
         # no pudo leer completamente. Nunca sobreescribe una cantidad OCR > 0.
         oc_num = str(((extr.get("orden_compra") or {}).get("valor") or "")).strip()
@@ -313,7 +376,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "pdf-row-code-v6"
+    extractor_version = "bin-destino-v7"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
