@@ -326,6 +326,12 @@ def _enriquecer_extraccion(extr, proveedor_id):
                 nd = _normalizar_codigo_ubicacion(destino_maestro)
                 if len(nd) < 6:
                     continue
+                # En el maestro algunas ubicaciones llevan el prefijo de UN
+                # "MOTOS-" mientras el reporte BIN imprime solo la ubicación.
+                variantes_nd = [nd]
+                if nd.startswith("MOTOS") and len(nd) > 10:
+                    variantes_nd.append(nd[5:])
+
                 mejor = 0.0
                 for linea in filas_texto:
                     partes_none = re.split(r"\bNONE\b", linea, maxsplit=2, flags=re.I)
@@ -334,19 +340,20 @@ def _enriquecer_extraccion(extr, proveedor_id):
                     if not nr:
                         continue
 
-                    pos = nr.rfind(nd)
-                    if pos >= 0:
-                        frac_inicio = pos / max(1, len(nr))
-                        # HASTA debe estar en la mitad posterior del remanente.
-                        if frac_inicio >= 0.28:
-                            mejor = max(mejor, 1.0 + 0.05 * frac_inicio)
-                        continue
+                    for nd_var in variantes_nd:
+                        pos = nr.rfind(nd_var)
+                        if pos >= 0:
+                            frac_inicio = pos / max(1, len(nr))
+                            # HASTA debe estar en la mitad posterior del remanente.
+                            if frac_inicio >= 0.28:
+                                mejor = max(mejor, 1.0 + 0.05 * frac_inicio)
+                            continue
 
-                    m = SequenceMatcher(None, nd, nr).find_longest_match()
-                    cobertura = m.size / max(1, len(nd))
-                    frac_inicio = m.b / max(1, len(nr))
-                    if cobertura >= 0.78 and frac_inicio >= 0.28:
-                        mejor = max(mejor, cobertura + 0.05 * frac_inicio)
+                        m = SequenceMatcher(None, nd_var, nr).find_longest_match()
+                        cobertura = m.size / max(1, len(nd_var))
+                        frac_inicio = m.b / max(1, len(nr))
+                        if cobertura >= 0.78 and frac_inicio >= 0.28:
+                            mejor = max(mejor, cobertura + 0.05 * frac_inicio)
 
                 if mejor > 0:
                     puntajes[p_dest.id] = (mejor, p_dest, destino_maestro)
@@ -458,7 +465,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "bin-destino-v10"
+    extractor_version = "bin-destino-v11"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
