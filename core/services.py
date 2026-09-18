@@ -326,7 +326,7 @@ class LineaRecibo:
     articulo: str
     descripcion: str = ""
     cantidad_documento: float = 0.0
-    cantidad_fisica: float = 0.0
+    cantidad_fisica: float | None = None
     lote: str = ""
     serial: str = ""
     ubicacion_desde: str = ""
@@ -382,7 +382,7 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
         if not cod:
             continue
         qdoc = float(ln.cantidad_documento or 0)
-        qfis = float(ln.cantidad_fisica if ln.cantidad_fisica not in (None, 0) else qdoc)
+        qfis = float(qdoc if ln.cantidad_fisica is None else ln.cantidad_fisica)
         s.add(ReciboLinea(
             recibo_id=r.id, articulo=cod, descripcion=ln.descripcion or "",
             cantidad_documento=qdoc, cantidad_fisica=qfis,
