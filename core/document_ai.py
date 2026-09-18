@@ -219,14 +219,48 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
         try:
             pts = [[float(p[0]), float(p[1])] for p in box]
             xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            x0, x1 = min(xs), max(xs)
+            y0, y1 = min(ys), max(ys)
             dets.append({
                 "txt": txt,
-                "cx": (min(xs)+max(xs))/2,
-                "cy": (min(ys)+max(ys))/2,
-                "h": max(1.0, max(ys)-min(ys)),
+                "x0": x0, "x1": x1,
+                "y0": y0, "y1": y1,
+                "cx": (x0+x1)/2,
+                "cy": (y0+y1)/2,
+                "w": max(1.0, x1-x0),
+                "h": max(1.0, y1-y0),
             })
         except Exception:
             continue
+
+    # Algunos ERP/PDF dibujan el mismo texto dos veces (por ejemplo para
+    # simular negrilla) y PyMuPDF devuelve ambas capas. Se eliminan únicamente
+    # detecciones del mismo texto que se superponen casi por completo. Esto no
+    # elimina valores legítimos repetidos como "1 1 1", porque ocupan X distintas.
+    depuradas = []
+    for d in sorted(dets, key=lambda x: (x["cy"], x["x0"])):
+        repetida = False
+        txt_norm = " ".join(d["txt"].upper().split())
+        for k in reversed(depuradas):
+            if abs(d["cy"] - k["cy"]) > max(d["h"], k["h"]) * 1.2:
+                break
+            if txt_norm != " ".join(k["txt"].upper().split()):
+                continue
+            ix = max(0.0, min(d["x1"], k["x1"]) - max(d["x0"], k["x0"]))
+            iy = max(0.0, min(d["y1"], k["y1"]) - max(d["y0"], k["y0"]))
+            inter = ix * iy
+            area_min = min(d["w"] * d["h"], k["w"] * k["h"])
+            solape = inter / area_min if area_min > 0 else 0.0
+            centros_casi_iguales = (
+                abs(d["cx"] - k["cx"]) <= max(1.5, 0.12 * min(d["w"], k["w"]))
+                and abs(d["cy"] - k["cy"]) <= max(1.0, 0.20 * min(d["h"], k["h"]))
+            )
+            if solape >= 0.72 or centros_casi_iguales:
+                repetida = True
+                break
+        if not repetida:
+            depuradas.append(d)
+    dets = depuradas
 
     aliases = {
         "proveedor": {"PROVEEDOR"},
@@ -249,20 +283,26 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
     if not requeridas.issubset(headers):
         return []
 
+    # Usa el inicio X de cada encabezado como ancla de columna. Con texto
+    # palabra-a-palabra (PDF nativo), el punto medio entre encabezados podía
+    # mandar los últimos tokens de DESDE a HASTA. El ancla izquierda mantiene
+    # cada palabra en su columna real hasta que comienza la siguiente.
     columnas = sorted(
-        [(k, v["cx"]) for k, v in headers.items()],
+        [(k, v["x0"]) for k, v in headers.items()],
         key=lambda x: x[1])
     header_y = max(headers[k]["cy"] for k in headers)
-    limites = [
-        (columnas[i][1] + columnas[i+1][1]) / 2
-        for i in range(len(columnas)-1)
-    ]
 
-    def columna_de_x(x):
+    def columna_de_det(d):
+        # Se asigna a la última columna cuyo inicio está a la izquierda del
+        # centro de la palabra/celda. Un pequeño margen absorbe desalineaciones.
+        x = d["cx"] + max(1.0, 0.08 * d["w"])
         idx = 0
-        while idx < len(limites) and x > limites[idx]:
-            idx += 1
-        return columnas[min(idx, len(columnas)-1)][0]
+        for i, (_, inicio_x) in enumerate(columnas):
+            if inicio_x <= x:
+                idx = i
+            else:
+                break
+        return columnas[idx][0]
 
     datos = [d for d in dets if d["cy"] > header_y + 4]
     datos.sort(key=lambda d: (d["cy"], d["cx"]))
@@ -283,7 +323,7 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
     for fila in filas:
         celdas = {}
         for d in sorted(fila["items"], key=lambda x: x["cx"]):
-            col = columna_de_x(d["cx"])
+            col = columna_de_det(d)
             celdas.setdefault(col, []).append(d["txt"])
         celdas = {k: " ".join(v).strip() for k, v in celdas.items()}
 
