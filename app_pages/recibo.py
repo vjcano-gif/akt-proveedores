@@ -376,7 +376,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "bin-destino-v7"
+    extractor_version = "bin-destino-v8"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -499,13 +499,53 @@ def _registrar(user):
 
     origenes = list(ORIGENES)
     origen_sugerido = (extr or {}).get("origen_sugerido")
+    origen_confianza = float((extr or {}).get("origen_confianza") or 0.0)
+    origen_evidencia = str((extr or {}).get("origen_evidencia") or "").strip()
+
+    # Alerta temprana: para BIN A BIN, HASTA identifica al proveedor
+    # transformador al que está dirigido el documento.
+    proveedor_doc_mismatch = bool(
+        soporte is not None
+        and origen_sugerido == "BIN_A_BIN"
+        and origen_confianza >= 0.90
+        and (extr or {}).get("proveedor_destino_coincide") is False
+    )
+
+    if soporte is not None and extr and origen_sugerido in ORIGENES:
+        pct_tipo = int(round(origen_confianza * 100))
+        st.info(
+            f"Tipo de documento detectado automáticamente: "
+            f"**{ORIGENES[origen_sugerido]}**"
+            + (f" ({pct_tipo}% de confianza)." if pct_tipo else ".")
+            + (f" Evidencia: {origen_evidencia}." if origen_evidencia else "")
+        )
+
+    if proveedor_doc_mismatch:
+        sel_nombre = str((extr or {}).get("proveedor_seleccionado_nombre") or "Proveedor seleccionado")
+        sel_codigo = str((extr or {}).get("proveedor_seleccionado_codigo") or "")
+        det_nombre = str((extr or {}).get("proveedor_destino_detectado_nombre") or "")
+        det_codigo = str((extr or {}).get("proveedor_destino_detectado_codigo") or "")
+        hasta_bin_alerta = str((extr or {}).get("proveedor_destino_detectado_hasta") or "")
+        destino_txt = (
+            f" El HASTA del documento corresponde a **{det_nombre} ({det_codigo})**."
+            if det_nombre else
+            f" El HASTA detectado es **{hasta_bin_alerta}**."
+        )
+        st.error(
+            f"Este BIN A BIN **no corresponde al proveedor seleccionado "
+            f"{sel_nombre}{f' ({sel_codigo})' if sel_codigo else ''}**."
+            + destino_txt
+            + " Cambie el proveedor antes de continuar con la recepción."
+        )
+
     indice_origen = origenes.index(origen_sugerido) if origen_sugerido in origenes else 0
     origen = st.radio(
         "Origen del recibo", origenes,
         index=indice_origen,
         format_func=lambda k: ORIGENES[k],
         horizontal=False,
-        key=f"rec_origen_{suffix}")
+        key=f"rec_origen_{suffix}",
+        help="Si el documento puede clasificarse con seguridad, el sistema deja seleccionado automáticamente BIN a BIN o Factura.")
 
     if extr:
         cf = int(100 * float(extr.get("confianza_texto") or 0))
@@ -648,7 +688,9 @@ def _registrar(user):
 
     lineas_df = None
     recepcion_estado = None
-    bloqueo_hasta = bool(error_hasta_doc) if origen == "BIN_A_BIN" else False
+    bloqueo_hasta = (
+        bool(error_hasta_doc) if origen == "BIN_A_BIN" else False
+    ) or proveedor_doc_mismatch
     if modo == "Cargue masivo":
         ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
@@ -832,6 +874,12 @@ def _registrar(user):
         crear_label = "Crear recibo con discrepancias"
 
     if st.button(crear_label, type="primary", use_container_width=True):
+        if proveedor_doc_mismatch:
+            ui.err(
+                "No se puede crear el recibo: el BIN A BIN detectado pertenece "
+                "a otro proveedor según su ubicación HASTA. Cambie el proveedor "
+                "seleccionado y vuelva a validar el documento.")
+            return
         if origen == "BIN_A_BIN" and bloqueo_hasta:
             ui.err(
                 "No se puede crear el recibo: HASTA debe coincidir con la "
