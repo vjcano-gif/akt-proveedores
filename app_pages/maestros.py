@@ -11,6 +11,7 @@ from core.auth import ROLES, hash_password, puede
 from core.db import session_scope
 from core.models import (Articulo, Bom, Inventario, OrdenCompra, Proveedor,
                          Ubicacion, Usuario)
+from core.services import campos_faltantes_proveedor
 
 
 def render(user):
@@ -319,6 +320,16 @@ def _proveedores(user):
         "Cada proveedor operativo debe tener dos ubicaciones obligatorias del BIN: "
         "DESDE (control con alerta) y HASTA (control bloqueante).")
 
+    def _faltantes_valores(codigo, nombre, nit, desde, hasta, tolerancia):
+        return campos_faltantes_proveedor(
+            codigo=codigo,
+            nombre=nombre,
+            nit=nit,
+            ubicacion_origen=desde,
+            ubicacion_destino=hasta,
+            tolerancia_averia_pct=tolerancia,
+        )
+
     def procesar(df):
         creados = actualizados = 0
         errores = []
@@ -334,34 +345,72 @@ def _proveedores(user):
                 p = s.query(Proveedor).filter_by(codigo=cod).first()
                 nuevo = p is None
 
+                nombre = str(r.get("nombre") or (p.nombre if p else "") or "").strip()
+                nit = str(r.get("nit") or (p.nit if p else "") or "").strip()
                 desde = str(
-                    r.get("ubicacion_desde") or r.get("ubicacion_origen") or ""
+                    r.get("ubicacion_desde")
+                    or r.get("ubicacion_origen")
+                    or (p.ubicacion_origen if p else "")
+                    or ""
                 ).strip().upper()
                 hasta = str(
-                    r.get("ubicacion_hasta") or r.get("ubicacion_destino") or ""
+                    r.get("ubicacion_hasta")
+                    or r.get("ubicacion_destino")
+                    or (p.ubicacion_destino if p else "")
+                    or ""
                 ).strip().upper()
+                try:
+                    tolerancia = float(
+                        r.get("tolerancia_averia_pct")
+                        if str(r.get("tolerancia_averia_pct") or "").strip().lower()
+                           not in ("", "nan", "none")
+                        else ((p.tolerancia_averia_pct if p else None) or 1.0)
+                    )
+                except (TypeError, ValueError):
+                    tolerancia = None
 
-                if not desde or not hasta:
+                activo_objetivo = _b(
+                    r.get("activo"),
+                    bool(p.activo) if p is not None else True)
+
+                # Para cualquier proveedor exigimos al menos código y nombre.
+                if not nombre:
+                    errores.append(f"{cod}: nombre obligatorio.")
+                    continue
+
+                faltan = _faltantes_valores(
+                    cod, nombre, nit, desde, hasta, tolerancia)
+                if activo_objetivo and faltan:
                     errores.append(
-                        f"{cod}: DESDE y HASTA son obligatorios.")
-                    continue
-                if desde not in ubicaciones:
-                    errores.append(f"{cod}: DESDE {desde} no existe o está inactiva.")
-                    continue
-                if hasta not in ubicaciones:
-                    errores.append(f"{cod}: HASTA {hasta} no existe o está inactiva.")
-                    continue
-                if ubicaciones[desde].cerrada:
-                    errores.append(f"{cod}: DESDE {desde} está cerrada.")
-                    continue
-                if ubicaciones[hasta].cerrada:
-                    errores.append(f"{cod}: HASTA {hasta} está cerrada.")
-                    continue
-                if ubicaciones[hasta].proveedor_id and (
-                        p is None or ubicaciones[hasta].proveedor_id != p.id):
-                    errores.append(
-                        f"{cod}: HASTA {hasta} pertenece a otro proveedor.")
-                    continue
+                        f"{cod}: NO se activa. Faltan: {', '.join(faltan)}.")
+                    activo_objetivo = False
+
+                # Las ubicaciones son obligatorias para estar activo. Un proveedor
+                # inactivo puede conservarlas vacías mientras termina parametrización.
+                if desde:
+                    if desde not in ubicaciones:
+                        errores.append(f"{cod}: DESDE {desde} no existe o está inactiva.")
+                        activo_objetivo = False
+                        desde = ""
+                    elif ubicaciones[desde].cerrada:
+                        errores.append(f"{cod}: DESDE {desde} está cerrada.")
+                        activo_objetivo = False
+                        desde = ""
+                if hasta:
+                    if hasta not in ubicaciones:
+                        errores.append(f"{cod}: HASTA {hasta} no existe o está inactiva.")
+                        activo_objetivo = False
+                        hasta = ""
+                    elif ubicaciones[hasta].cerrada:
+                        errores.append(f"{cod}: HASTA {hasta} está cerrada.")
+                        activo_objetivo = False
+                        hasta = ""
+                    elif ubicaciones[hasta].proveedor_id and (
+                            p is None or ubicaciones[hasta].proveedor_id != p.id):
+                        errores.append(
+                            f"{cod}: HASTA {hasta} pertenece a otro proveedor.")
+                        activo_objetivo = False
+                        hasta = ""
 
                 if nuevo:
                     p = Proveedor(codigo=cod)
@@ -377,20 +426,16 @@ def _proveedores(user):
                         if (u_ant.rol or "").upper() == "DESTINO":
                             u_ant.rol = None
 
-                p.nombre = str(r.get("nombre") or p.nombre or cod)[:200]
-                p.nit = str(r.get("nit") or p.nit or "")[:40]
-                p.ubicacion_origen = desde
-                p.ubicacion_destino = hasta
-                try:
-                    p.tolerancia_averia_pct = float(
-                        r.get("tolerancia_averia_pct")
-                        or p.tolerancia_averia_pct or 1.0)
-                except (TypeError, ValueError):
-                    pass
-                p.activo = _b(r.get("activo"), True)
+                p.nombre = nombre[:200]
+                p.nit = nit[:40]
+                p.ubicacion_origen = desde or None
+                p.ubicacion_destino = hasta or None
+                p.tolerancia_averia_pct = tolerancia if tolerancia is not None else 1.0
+                p.activo = bool(activo_objetivo)
 
-                ubicaciones[hasta].proveedor_id = p.id
-                ubicaciones[hasta].rol = "DESTINO"
+                if hasta:
+                    ubicaciones[hasta].proveedor_id = p.id
+                    ubicaciones[hasta].rol = "DESTINO"
                 creados += nuevo
                 actualizados += (not nuevo)
 
@@ -398,7 +443,10 @@ def _proveedores(user):
 
     _cargue(
         "proveedores", procesar,
-        ayuda="ubicacion_desde y ubicacion_hasta son obligatorias.")
+        ayuda=(
+            "Para activar un proveedor son obligatorios: código, nombre, NIT, "
+            "ubicacion_desde, ubicacion_hasta y tolerancia_averia_pct. "
+            "Los inactivos pueden quedar incompletos mientras se parametrizan."))
 
     with session_scope() as s:
         ubicaciones_activas = [
@@ -432,8 +480,12 @@ def _proveedores(user):
             help="Valor esperado en HASTA. Si difiere, el recibo se bloquea.")
 
         if st.button("Crear proveedor", type="primary", key="prov_new_btn"):
-            if not cod_new.strip() or not nom_new.strip() or not desde_new or not hasta_new:
-                ui.err("Código, nombre, DESDE y HASTA son obligatorios.")
+            faltan_new = _faltantes_valores(
+                cod_new, nom_new, nit_new, desde_new, hasta_new, tol_new)
+            if faltan_new:
+                ui.err(
+                    "No se puede crear un proveedor activo. Faltan: "
+                    + ", ".join(faltan_new) + ".")
             else:
                 try:
                     with session_scope() as s:
@@ -509,6 +561,9 @@ def _proveedores(user):
         "ubicacion_desde": p.ubicacion_origen or "",
         "ubicacion_hasta": p.ubicacion_destino or "",
         "tolerancia_averia_pct": p.tolerancia_averia_pct,
+        "listo_para_activar": not _faltantes_valores(
+            p.codigo, p.nombre, p.nit or "", p.ubicacion_origen or "",
+            p.ubicacion_destino or "", p.tolerancia_averia_pct),
         "activo": p.activo,
     } for p in provs_visibles]
 
@@ -523,25 +578,34 @@ def _proveedores(user):
         hide_index=True,
         key="ed_prov",
         num_rows="fixed",
-        disabled=["id", "codigo"],
+        disabled=["id", "codigo", "listo_para_activar"],
         column_config={
             "ubicacion_desde": st.column_config.SelectboxColumn(
                 "Ubicación DESDE", options=[""] + ubicaciones_activas, required=True),
             "ubicacion_hasta": st.column_config.SelectboxColumn(
                 "Ubicación HASTA", options=[""] + ubicaciones_activas, required=True),
+            "listo_para_activar": st.column_config.CheckboxColumn(
+                "Listo para activar",
+                help="Solo puede estar Activo cuando todos los campos obligatorios están completos."),
             "activo": st.column_config.CheckboxColumn("Activo"),
         })
 
-    pendientes = [
-        str(r["codigo"]) for _, r in ed.iterrows()
-        if not str(r.get("ubicacion_desde") or "").strip()
-        or not str(r.get("ubicacion_hasta") or "").strip()
-    ]
-    if pendientes:
+    incompletos = []
+    for _, r in ed.iterrows():
+        faltan = _faltantes_valores(
+            r.get("codigo"), r.get("nombre"), r.get("nit"),
+            r.get("ubicacion_desde"), r.get("ubicacion_hasta"),
+            r.get("tolerancia_averia_pct"))
+        if faltan:
+            incompletos.append((str(r["codigo"]), faltan))
+    if incompletos:
+        resumen = "; ".join(
+            f"{cod}: {', '.join(faltan)}"
+            for cod, faltan in incompletos[:8])
         st.warning(
-            "Proveedores pendientes de DESDE/HASTA: "
-            + ", ".join(pendientes[:12])
-            + ("…" if len(pendientes) > 12 else ""))
+            "Proveedores incompletos (no pueden activarse): "
+            + resumen
+            + ("…" if len(incompletos) > 8 else ""))
 
     if st.button("Guardar cambios", type="primary", key="sv_prov"):
         n, errores = 0, []
@@ -555,22 +619,46 @@ def _proveedores(user):
                 if not p:
                     continue
 
+                nombre = str(r.get("nombre") or "").strip()
+                nit = str(r.get("nit") or "").strip()
                 desde = str(r.get("ubicacion_desde") or "").strip().upper()
                 hasta = str(r.get("ubicacion_hasta") or "").strip().upper()
-                if not desde or not hasta:
-                    errores.append(f"{p.codigo}: DESDE y HASTA son obligatorios.")
-                    continue
-                u_desde = ubicaciones.get(desde)
-                u_hasta = ubicaciones.get(hasta)
-                if not u_desde or u_desde.cerrada:
+                try:
+                    tolerancia = float(r.get("tolerancia_averia_pct"))
+                except (TypeError, ValueError):
+                    tolerancia = None
+                activar = bool(r.get("activo"))
+
+                faltan = _faltantes_valores(
+                    p.codigo, nombre, nit, desde, hasta, tolerancia)
+
+                # Regla dura: nunca persistir Activo=True si falta un campo.
+                if activar and faltan:
+                    p.activo = False
+                    errores.append(
+                        f"{p.codigo}: NO se activó. Faltan: {', '.join(faltan)}.")
+                    # Permite guardar lo que sí fue diligenciado para completar
+                    # progresivamente el maestro.
+                    activar = False
+
+                u_desde = ubicaciones.get(desde) if desde else None
+                u_hasta = ubicaciones.get(hasta) if hasta else None
+
+                if desde and (not u_desde or u_desde.cerrada):
                     errores.append(f"{p.codigo}: DESDE {desde} no disponible.")
+                    activar = False
+                    p.activo = False
                     continue
-                if not u_hasta or u_hasta.cerrada:
+                if hasta and (not u_hasta or u_hasta.cerrada):
                     errores.append(f"{p.codigo}: HASTA {hasta} no disponible.")
+                    activar = False
+                    p.activo = False
                     continue
-                if u_hasta.proveedor_id and u_hasta.proveedor_id != p.id:
+                if u_hasta and u_hasta.proveedor_id and u_hasta.proveedor_id != p.id:
                     errores.append(
                         f"{p.codigo}: HASTA {hasta} pertenece a otro proveedor.")
+                    activar = False
+                    p.activo = False
                     continue
 
                 anterior = str(p.ubicacion_destino or "").strip().upper()
@@ -581,14 +669,17 @@ def _proveedores(user):
                         if (u_ant.rol or "").upper() == "DESTINO":
                             u_ant.rol = None
 
-                p.nombre = r["nombre"]
-                p.nit = r["nit"]
-                p.tolerancia_averia_pct = float(r["tolerancia_averia_pct"])
-                p.ubicacion_origen = desde
-                p.ubicacion_destino = hasta
-                p.activo = bool(r["activo"])
-                u_hasta.proveedor_id = p.id
-                u_hasta.rol = "DESTINO"
+                p.nombre = nombre
+                p.nit = nit
+                if tolerancia is not None:
+                    p.tolerancia_averia_pct = tolerancia
+                p.ubicacion_origen = desde or None
+                p.ubicacion_destino = hasta or None
+                p.activo = bool(activar and not faltan)
+
+                if u_hasta:
+                    u_hasta.proveedor_id = p.id
+                    u_hasta.rol = "DESTINO"
                 n += 1
 
         ui.limpiar_cache()

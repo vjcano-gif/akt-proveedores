@@ -29,6 +29,36 @@ class ReglaNegocio(Exception):
     """Error de validación de negocio (se muestra al usuario)."""
 
 
+def campos_faltantes_proveedor(*, codigo=None, nombre=None, nit=None,
+                               ubicacion_origen=None, ubicacion_destino=None,
+                               tolerancia_averia_pct=None) -> list[str]:
+    """Campos obligatorios para que un proveedor pueda estar ACTIVO."""
+    faltan = []
+    campos_texto = (
+        ("Código", codigo),
+        ("Nombre", nombre),
+        ("NIT", nit),
+        ("Ubicación DESDE", ubicacion_origen),
+        ("Ubicación HASTA", ubicacion_destino),
+    )
+    for etiqueta, valor in campos_texto:
+        s = str(valor or "").strip()
+        if not s or s.lower() in ("none", "nan"):
+            faltan.append(etiqueta)
+
+    try:
+        tol = float(tolerancia_averia_pct)
+        if math.isnan(tol):
+            faltan.append("Tolerancia de avería")
+    except (TypeError, ValueError):
+        faltan.append("Tolerancia de avería")
+    return faltan
+
+
+def proveedor_listo_para_activar(**kwargs) -> bool:
+    return not campos_faltantes_proveedor(**kwargs)
+
+
 # =========================================================================
 # TRAZABILIDAD
 # =========================================================================
