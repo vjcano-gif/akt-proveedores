@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS proveedores (
 	id SERIAL NOT NULL, 
 	codigo VARCHAR(40) NOT NULL, 
 	nombre VARCHAR(200) NOT NULL, 
-	nit VARCHAR(40), 
+	nit VARCHAR(40),
+	ubicacion_destino_id INTEGER,
 	tolerancia_averia_pct FLOAT, 
 	activo BOOLEAN, 
 	creado_en TIMESTAMP WITHOUT TIME ZONE, 
@@ -471,3 +472,5 @@ CREATE INDEX IF NOT EXISTS ix_novedades_creado_en ON novedades (creado_en);
 CREATE INDEX IF NOT EXISTS ix_archivos_sha256 ON archivos (sha256);
 CREATE INDEX IF NOT EXISTS ix_recibos_proveedor_origen_id ON recibos (proveedor_origen_id);
 CREATE INDEX IF NOT EXISTS ix_recibo_lineas_oc ON recibo_lineas (orden_compra_id);
+
+CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_destino ON proveedores (ubicacion_destino_id);
