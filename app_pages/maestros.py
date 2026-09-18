@@ -575,12 +575,15 @@ def _proveedores(user):
         st.info(f"No hay proveedores en el segmento **{estado_filtro}**.")
         return
 
+    editor_version = int(st.session_state.get("prov_editor_version", 0))
+    editor_key = f"ed_prov_{editor_version}"
+
     ed = st.data_editor(
         pd.DataFrame(filas),
         use_container_width=True,
         height=380,
         hide_index=True,
-        key="ed_prov",
+        key=editor_key,
         num_rows="fixed",
         disabled=["id", "codigo", "listo_para_activar"],
         column_config={
@@ -618,7 +621,7 @@ def _proveedores(user):
         # Streamlit guarda los cambios del data_editor como parches por índice.
         # Usarlos explícitamente evita perder checkboxes al reconstruir la tabla
         # durante el rerun.
-        estado_editor = st.session_state.get("ed_prov", {}) or {}
+        estado_editor = st.session_state.get(editor_key, {}) or {}
         parches = estado_editor.get("edited_rows", {}) or {}
 
         # Normaliza las claves porque Streamlit puede entregarlas como int o str.
@@ -773,8 +776,9 @@ def _proveedores(user):
                 + ", ".join(map(str, fallos_persistencia[:10])))
             return
 
-        # Elimina los parches viejos del widget antes de reconstruir la tabla.
-        st.session_state.pop("ed_prov", None)
+        # Fuerza un widget nuevo en el siguiente rerun; así la tabla se reconstruye
+        # exclusivamente desde la base y no reutiliza parches antiguos.
+        st.session_state["prov_editor_version"] = editor_version + 1
         ui.limpiar_cache()
 
         if errores:
