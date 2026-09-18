@@ -264,6 +264,8 @@ def _enriquecer_extraccion(extr, proveedor_id):
 
         destino_bin = _norm_ubi(extr.get("bin_hasta_canon") or "")
         candidatos_destino = {}
+        proveedores_activos = s.query(Proveedor).filter(
+            Proveedor.activo.is_(True)).all()
 
         if destino_bin:
             # 1) Relación directa Ubicación -> Proveedor.
@@ -278,10 +280,36 @@ def _enriquecer_extraccion(extr, proveedor_id):
                     candidatos_destino[p_dest.id] = p_dest
 
             # 2) Respaldo: ubicación_destino guardada directamente en Proveedor.
-            for p_dest in s.query(Proveedor).filter(
-                    Proveedor.activo.is_(True)).all():
+            for p_dest in proveedores_activos:
                 if _norm_ubi(p_dest.ubicacion_destino) == destino_bin:
                     candidatos_destino[p_dest.id] = p_dest
+
+        # 3) Fallback para FOTO/OCR: aunque el parser espacial no haya logrado
+        # separar todas las filas (por ejemplo proveedor+código pegados), busca
+        # la ubicación HASTA maestra directamente dentro del texto OCR completo.
+        # Se compactan espacios/guiones para tolerar pequeñas variaciones del OCR.
+        texto_compacto = _normalizar_codigo_ubicacion(extr.get("texto") or "")
+        coincidencias_texto = {}
+        if texto_compacto:
+            for p_dest in proveedores_activos:
+                destino_maestro = _norm_ubi(p_dest.ubicacion_destino)
+                nd = _normalizar_codigo_ubicacion(destino_maestro)
+                if len(nd) >= 6 and nd in texto_compacto:
+                    coincidencias_texto[p_dest.id] = (
+                        p_dest, texto_compacto.count(nd), destino_maestro)
+
+        if len(coincidencias_texto) == 1:
+            p_dest, repeticiones, destino_maestro = next(
+                iter(coincidencias_texto.values()))
+            candidatos_destino[p_dest.id] = p_dest
+            # Si HASTA no salió de la geometría pero aparece inequívocamente en
+            # el OCR, lo promovemos a HASTA documental para toda la validación.
+            if not destino_bin:
+                destino_bin = destino_maestro
+                extr["bin_hasta_canon"] = destino_maestro
+                extr["bin_hasta_canon_valores"] = [destino_maestro]
+                extr["bin_hasta_detectado_por_texto"] = True
+                extr["bin_hasta_repeticiones_texto"] = int(repeticiones)
 
         detectado = (
             next(iter(candidatos_destino.values()))
@@ -376,7 +404,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "bin-destino-v8"
+    extractor_version = "bin-destino-v9"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
