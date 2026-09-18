@@ -1073,42 +1073,105 @@ def _ocr_tesseract(img) -> tuple[str, float]:
     return texto, confianza
 
 
+def _score_bin_texto(texto: str) -> tuple[int, int]:
+    """Puntúa qué tan fielmente un OCR conserva la estructura de un BIN.
+
+    Para fotografías de BIN importa más recuperar filas completas
+    Código -> Cantidad -> NONE -> NONE que una confianza OCR promedio alta.
+    """
+    t = str(texto or "")
+    u = t.upper()
+    score = 0
+    if re.search(r"\bMOVIMIENTO\s+BIN\s+A\s+BIN\b", u):
+        score += 20
+    if all(x in u for x in ("CODIGO", "CANTIDAD", "SERIAL", "LOTE")):
+        score += 10
+    if "DESDE" in u and "HASTA" in u:
+        score += 6
+
+    filas = 0
+    for raw in t.splitlines():
+        linea = " ".join(raw.split())
+        if not linea:
+            continue
+        # Código largo + cantidad seguida de Serial/Lote vacíos.
+        if re.search(
+            r"\b[A-Z0-9._/-]*\d{8,16}[A-Z0-9._/-]*\b"
+            r".*?\s([0-9]{1,7}(?:[.,][0-9]+)?)\s+"
+            r"(?:NONE|N/?A)\s+(?:NONE|N/?A)(?:\s+|$)",
+            linea, re.I,
+        ):
+            filas += 1
+    score += filas * 8
+    return score, filas
+
+
 def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
-    """Devuelve texto, confianza, motor usado y diagnóstico."""
+    """Devuelve texto OCR escogiendo el motor que mejor conserva la tabla.
+
+    En BIN fotografiados no se acepta RapidOCR solo por tener confianza alta:
+    se compara contra Tesseract PSM 6 y gana el que recupere más filas completas
+    Código/Cantidad/NONE/NONE. Esto evita códigos/cantidades plausibles pero
+    erróneos generados por un OCR espacial.
+    """
     diagnosticos = []
     try:
         img = _decode_image(data)
     except Exception as e:
         return "", 0.0, "OCR", f"Decodificación: {type(e).__name__}: {e}"
 
-    # RapidOCR: prueba original y variantes, conservando el mejor resultado.
-    mejor_texto, mejor_conf, mejor_var = "", 0.0, ""
+    rapid_texto, rapid_conf, rapid_var = "", 0.0, ""
     try:
         for nombre_var, variante in _preprocesar_para_ocr(img):
             texto, conf = _ocr_rapid(variante)
-            if texto and (len(texto) > len(mejor_texto) or conf > mejor_conf + 0.08):
-                mejor_texto, mejor_conf, mejor_var = texto, conf, nombre_var
-            # Si ya hay una lectura razonable no triplica el tiempo de OCR.
-            if len(mejor_texto) >= 30 and mejor_conf >= 0.55:
+            if texto and (
+                    len(texto) > len(rapid_texto)
+                    or conf > rapid_conf + 0.08):
+                rapid_texto, rapid_conf, rapid_var = texto, conf, nombre_var
+            if len(rapid_texto) >= 30 and rapid_conf >= 0.55:
                 break
-        if mejor_texto:
-            return mejor_texto, mejor_conf, f"RAPIDOCR/{mejor_var}", ""
-        diagnosticos.append("RapidOCR no detectó texto.")
+        if not rapid_texto:
+            diagnosticos.append("RapidOCR no detectó texto.")
     except Exception as e:
         diagnosticos.append(f"RapidOCR: {type(e).__name__}: {e}")
 
-    # Tesseract: fallback independiente de ONNX.
+    tess_texto, tess_conf = "", 0.0
     try:
-        # Usa primero la variante de contraste, que suele rendir mejor en documentos.
-        variantes = _preprocesar_para_ocr(img)
-        preferida = variantes[1][1] if len(variantes) > 1 else img
-        texto, conf = _ocr_tesseract(preferida)
-        if texto:
-            return texto, conf, "TESSERACT", " | ".join(diagnosticos)
-        diagnosticos.append("Tesseract no detectó texto.")
+        # Para tablas BIN el original suele preservar mejor el espaciado de
+        # columnas que una binarización agresiva. PSM 6 reconstruye cada fila.
+        tess_texto, tess_conf = _ocr_tesseract(img)
+        if not tess_texto:
+            variantes = _preprocesar_para_ocr(img)
+            preferida = variantes[1][1] if len(variantes) > 1 else img
+            tess_texto, tess_conf = _ocr_tesseract(preferida)
+        if not tess_texto:
+            diagnosticos.append("Tesseract no detectó texto.")
     except Exception as e:
         diagnosticos.append(f"Tesseract: {type(e).__name__}: {e}")
 
+    rapid_score, rapid_filas = _score_bin_texto(rapid_texto)
+    tess_score, tess_filas = _score_bin_texto(tess_texto)
+
+    # Si cualquiera de los motores reconoce una estructura BIN real, prima la
+    # estructura sobre la confianza promedio. En empate, más filas completas;
+    # después, confianza.
+    if max(rapid_score, tess_score) >= 20:
+        if (tess_score, tess_filas, tess_conf) > (
+                rapid_score, rapid_filas, rapid_conf):
+            return (
+                tess_texto, tess_conf, "TESSERACT/BIN_ESTRUCTURADO",
+                " | ".join(diagnosticos),
+            )
+        if rapid_texto:
+            return (
+                rapid_texto, rapid_conf, f"RAPIDOCR/{rapid_var}/BIN_ESTRUCTURADO",
+                " | ".join(diagnosticos),
+            )
+
+    if rapid_texto:
+        return rapid_texto, rapid_conf, f"RAPIDOCR/{rapid_var}", " | ".join(diagnosticos)
+    if tess_texto:
+        return tess_texto, tess_conf, "TESSERACT", " | ".join(diagnosticos)
     return "", 0.0, "OCR_FALLIDO", " | ".join(diagnosticos)
 
 
