@@ -362,6 +362,31 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
             f"{ubicacion_destino}. Debe ser {ubicacion_principal}.")
     ubicacion_destino = ubicacion_principal
 
+    # En BIN a BIN, DESDE/HASTA son atributos del documento completo.
+    # Las líneas pueden conservarlos internamente por compatibilidad histórica,
+    # pero la validación se hace una sola vez.
+    if origen == "BIN_A_BIN":
+        desde_docs = []
+        hasta_docs = []
+        for ln in lineas:
+            d = str(ln.ubicacion_desde or "").strip().upper()
+            h = str(ln.ubicacion_hasta or "").strip().upper()
+            if d and d not in desde_docs:
+                desde_docs.append(d)
+            if h and h not in hasta_docs:
+                hasta_docs.append(h)
+
+        if not hasta_docs:
+            raise ReglaNegocio("El BIN no tiene un valor HASTA legible.")
+        if len(hasta_docs) > 1:
+            raise ReglaNegocio(
+                "El BIN contiene más de un valor HASTA; debe ser único para "
+                "todo el documento.")
+        if hasta_docs[0] != ubicacion_principal:
+            raise ReglaNegocio(
+                f"HASTA {hasta_docs[0]} no coincide con la ubicación asignada "
+                f"al proveedor ({ubicacion_principal}).")
+
     if proveedor_origen_id:
         po = s.get(Proveedor, proveedor_origen_id)
         if not po or not po.activo:
@@ -389,16 +414,7 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
         qfis = float(qdoc if ln.cantidad_fisica is None else ln.cantidad_fisica)
         desde_doc = str(ln.ubicacion_desde or "").strip().upper()
         hasta_doc = str(ln.ubicacion_hasta or "").strip().upper()
-
-        if origen == "BIN_A_BIN":
-            if not hasta_doc:
-                raise ReglaNegocio(
-                    f"Línea {cod}: el BIN no tiene valor HASTA legible.")
-            if hasta_doc != ubicacion_principal:
-                raise ReglaNegocio(
-                    f"Línea {cod}: HASTA {hasta_doc} no coincide con la ubicación "
-                    f"asignada al proveedor ({ubicacion_principal}).")
-        else:
+        if origen != "BIN_A_BIN":
             hasta_doc = hasta_doc or ubicacion_principal
 
         s.add(ReciboLinea(
@@ -417,27 +433,30 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
 
 
 def validar_bin_a_bin(s, recibo: Recibo, proveedor_id_logueado: int) -> list[str]:
-    """Devuelve alertas NO bloqueantes de DESDE.
-
-    HASTA se valida de forma bloqueante en crear_recibo().
-    """
-    alertas = []
+    """Valida DESDE una sola vez por BIN; es alerta no bloqueante."""
     prov = s.get(Proveedor, proveedor_id_logueado)
     if not prov:
         return ["Proveedor inexistente."]
 
-    esperado_desde = str(prov.ubicacion_origen or "").strip().upper()
+    esperado = str(prov.ubicacion_origen or "").strip().upper()
+    valores = []
     for ln in recibo.lineas:
-        desde = str(ln.ubicacion_desde or "").strip().upper()
-        if not desde:
-            alertas.append(
-                f"Línea {ln.articulo}: no fue posible leer la columna DESDE.")
-            continue
-        if esperado_desde and desde != esperado_desde:
-            alertas.append(
-                f"Línea {ln.articulo}: DESDE {desde} difiere de la ubicación "
-                f"esperada {esperado_desde}.")
-    return alertas
+        v = str(ln.ubicacion_desde or "").strip().upper()
+        if v and v not in valores:
+            valores.append(v)
+
+    if not valores:
+        return ["No fue posible leer DESDE en el BIN."]
+    if len(valores) > 1:
+        return [
+            "El BIN contiene más de un valor DESDE detectado: "
+            + ", ".join(valores[:4])
+        ]
+    if esperado and valores[0] != esperado:
+        return [
+            f"DESDE {valores[0]} difiere de la ubicación esperada {esperado}."
+        ]
+    return []
 
 def sellar_recibo(s, recibo_id: int, usuario: str) -> Recibo:
     """Proveedor certifica la factura; el documento pasa a PENDIENTE_MATCH."""
