@@ -200,6 +200,34 @@ with session_scope() as s:
             s, PID_DEP, usuario="inventarios@akt.com"),
         "no se puede eliminar")
 
+print("\n=== 0AD. INGRESO MANUAL DESDE / HASTA ===")
+with session_scope() as s:
+    p_manual = Proveedor(
+        codigo="VDRMANUAL", nombre="Proveedor ubicación manual",
+        nit="900999003", tolerancia_averia_pct=1.0, activo=False)
+    s.add(p_manual); s.flush()
+    PID_MANUAL = p_manual.id
+    u_desde_manual = sv.asegurar_ubicacion_ingresada(
+        s, "desde-nuevo-001", rol="ORIGEN")
+    u_hasta_manual = sv.asegurar_ubicacion_ingresada(
+        s, "hasta-nuevo-001", rol="DESTINO", proveedor_id=PID_MANUAL)
+    p_manual.ubicacion_origen = u_desde_manual.codigo
+    p_manual.ubicacion_destino = u_hasta_manual.codigo
+    p_manual.activo = True
+
+with session_scope() as s:
+    p_manual = s.get(Proveedor, PID_MANUAL)
+    check("DESDE escrito manualmente se crea en Ubicaciones",
+          s.query(Ubicacion).filter_by(codigo="DESDE-NUEVO-001").first() is not None)
+    u_hasta_manual = s.query(Ubicacion).filter_by(codigo="HASTA-NUEVO-001").first()
+    check("HASTA escrito manualmente se crea en Ubicaciones",
+          u_hasta_manual is not None)
+    check("HASTA nuevo queda asignado al proveedor",
+          u_hasta_manual is not None and u_hasta_manual.proveedor_id == PID_MANUAL)
+    check("Proveedor conserva DESDE/HASTA digitados",
+          p_manual.ubicacion_origen == "DESDE-NUEVO-001"
+          and p_manual.ubicacion_destino == "HASTA-NUEVO-001")
+
 print("\n=== 0B. REGLAS DESDE / HASTA DEL BIN ===")
 with session_scope() as s:
     esperar_error(
