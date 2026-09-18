@@ -146,23 +146,68 @@ def _kardex(user):
 
 def _traza(user):
     pid = alcance_proveedor(user)
-    busq = st.text_input("Buscar por ID de trazabilidad o referencia",
-                         placeholder="TRZ-BIN-2026-000001 · BIN2686958")
+    c1, c2, c3 = st.columns([1.7, 1.0, 1.0])
+    busq = c1.text_input(
+        "Buscar por ID de trazabilidad o referencia",
+        placeholder="TRZ-BIN-2026-000001 · BIN2686958",
+    )
+    periodo = c2.selectbox(
+        "Periodo",
+        ["Todo histórico", "Últimos 30 días", "Últimos 90 días",
+         "Último año", "Últimos 3 años"],
+        index=0,
+        key="trz_periodo",
+    )
+    soporte_filtro = c3.selectbox(
+        "Soporte",
+        ["Todos", "Con soporte", "Sin soporte"],
+        index=0,
+        key="trz_soporte",
+    )
+    dias_periodo = {
+        "Últimos 30 días": 30,
+        "Últimos 90 días": 90,
+        "Último año": 365,
+        "Últimos 3 años": 1095,
+    }.get(periodo)
+
     with session_scope() as s:
         q = s.query(Documento)
         if pid:
             q = q.filter(Documento.proveedor_id == pid)
+        if dias_periodo:
+            q = q.filter(
+                Documento.creado_en >= (
+                    dt.datetime.utcnow() - dt.timedelta(days=int(dias_periodo))
+                )
+            )
         if busq.strip():
             like = f"%{busq.strip()}%"
-            q = q.filter((Documento.trz.ilike(like)) | (Documento.referencia.ilike(like)))
-        docs = q.order_by(Documento.creado_en.desc()).limit(500).all()
-        filas = [{"Trazabilidad": d.trz, "Tipo": d.tipo,
-                  "Referencia": d.referencia or "",
-                  "Proveedor": d.proveedor.nombre if d.proveedor else "",
-                  "Fecha documento": d.fecha_documento,
-                  "Antigüedad (días)": d.antiguedad_dias,
-                  "Creado por": d.creado_por or "", "Creado": d.creado_en,
-                  "Soporte": d.archivo.nombre if d.archivo else ""} for d in docs]
+            q = q.filter(
+                (Documento.trz.ilike(like))
+                | (Documento.referencia.ilike(like))
+            )
+        if soporte_filtro == "Con soporte":
+            q = q.filter(Documento.archivo_id.is_not(None))
+        elif soporte_filtro == "Sin soporte":
+            q = q.filter(Documento.archivo_id.is_(None))
+
+        # Trazabilidad histórica: no se recorta a los últimos 500 documentos.
+        docs = q.order_by(Documento.creado_en.desc()).all()
+        filas = [{
+            "Trazabilidad": d.trz,
+            "Tipo": d.tipo,
+            "Referencia": d.referencia or "",
+            "Proveedor": d.proveedor.nombre if d.proveedor else "",
+            "Fecha documento": d.fecha_documento,
+            "Antigüedad (días)": d.antiguedad_dias,
+            "Creado por": d.creado_por or "",
+            "Creado": d.creado_en,
+            "Soporte guardado": "Sí" if d.archivo else "No",
+            "Archivo original": d.archivo.nombre if d.archivo else "",
+        } for d in docs]
+
+        # Los KPI se mantienen acotados; la lista principal sí es histórica.
         ant = antiguedad_documentos(s, pid, limite=1000)
 
     if not filas:
@@ -177,20 +222,58 @@ def _traza(user):
         ui.kpi(c[i], f"{r} días", n, "documentos", color)
 
     st.divider()
+    st.caption(
+        f"**{len(filas):,}** documento(s) encontrados. "
+        "Los soportes originales vinculados al TRZ se conservan para auditoría."
+    )
     df = pd.DataFrame(filas)
-    st.dataframe(df, use_container_width=True, hide_index=True, height=420,
-                 column_config={"Creado": st.column_config.DatetimeColumn(
-                     "Creado", format="DD/MM/YYYY HH:mm")})
-    st.download_button("Exportar a Excel", ui.exportar_excel({"documentos": df}),
-                       "trazabilidad.xlsx", key="exp_trz")
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        height=420,
+        column_config={
+            "Creado": st.column_config.DatetimeColumn(
+                "Creado", format="DD/MM/YYYY HH:mm"),
+            "Fecha documento": st.column_config.DateColumn(
+                "Fecha documento", format="DD/MM/YYYY"),
+        },
+    )
+    st.download_button(
+        "Exportar a Excel",
+        ui.exportar_excel({"documentos": df}),
+        "trazabilidad.xlsx",
+        key="exp_trz",
+    )
 
-    sel = st.selectbox("Descargar soporte del documento", ["—"] + df.Trazabilidad.tolist())
+    sel = st.selectbox(
+        "Consultar / descargar soporte del documento",
+        ["—"] + df.Trazabilidad.tolist(),
+    )
     if sel != "—":
         with session_scope() as s:
             d = s.query(Documento).filter(Documento.trz == sel).first()
             if d and d.archivo:
-                st.download_button(f"Descargar {d.archivo.nombre}",
-                                   leer_archivo(d.archivo),
-                                   file_name=d.archivo.nombre, key="dl_trz")
+                a = d.archivo
+                st.caption(
+                    f"**{a.nombre}** · {a.mime or 'tipo desconocido'} · "
+                    f"{int(a.tamano or 0):,} bytes · "
+                    f"SHA-256: {(a.sha256 or '')[:16]}…"
+                )
+                contenido = leer_archivo(a)
+                if contenido:
+                    st.download_button(
+                        f"Descargar soporte original: {a.nombre}",
+                        contenido,
+                        file_name=a.nombre,
+                        mime=a.mime or "application/octet-stream",
+                        key="dl_trz",
+                    )
+                else:
+                    st.error(
+                        "El documento conserva la referencia del soporte, "
+                        "pero no fue posible recuperar el archivo."
+                    )
             else:
                 st.caption("Ese documento no tiene soporte adjunto.")
+
