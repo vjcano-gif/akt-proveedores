@@ -28,14 +28,9 @@ PERMISOS = {
         "almacenamiento", "averias", "produccion", "despacho", "inventario",
         "consulta_documentos", "maestro_oc",
     },
-    "INVENTARIOS": {
-        "inicio", "recibo", "novedades", "novedades_ajustar", "almacenamiento",
-        "conteos_programar", "conteos_ejecutar", "foto_erp", "averias",
-        "averias_ajustar", "produccion", "despacho", "inventario",
-        "consulta_documentos", "maestros", "maestro_articulos",
-        "maestro_ubicaciones", "maestro_proveedores", "maestro_usuarios",
-        "maestro_oc", "maestro_bom", "ddmrp", "panel_control",
-    },
+    # Inventarios actúa como administrador operativo de la aplicación.
+    # El comodín evita que un permiso nuevo quede accidentalmente por fuera.
+    "INVENTARIOS": {"*"},
     "PLANEACION": {
         "inicio", "recibo", "novedades", "almacenamiento", "averias",
         "produccion", "produccion_programar", "despacho", "inventario",
@@ -89,7 +84,8 @@ def autenticar(email: str, password: str) -> dict | None:
 def puede(user: dict | None, permiso: str) -> bool:
     if not user:
         return False
-    return permiso in PERMISOS.get(user.get("rol", ""), set())
+    permisos = PERMISOS.get(user.get("rol", ""), set())
+    return "*" in permisos or permiso in permisos
 
 
 def alcance_proveedor(user: dict | None) -> int | None:
