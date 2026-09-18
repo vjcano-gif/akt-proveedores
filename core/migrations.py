@@ -125,7 +125,7 @@ def run_migrations(engine):
                 destinos = conn.execute(text(
                     "SELECT id FROM ubicaciones "
                     "WHERE proveedor_id = :pid AND activo = :activo "
-                    "AND COALESCE(cerrada, 0) = :cerrada "
+                    "AND (cerrada IS NULL OR cerrada = :cerrada) "
                     "AND UPPER(COALESCE(rol, '')) = 'DESTINO' "
                     "ORDER BY id"
                 ), {"pid": pid, "activo": True, "cerrada": False}).fetchall()
@@ -134,7 +134,7 @@ def run_migrations(engine):
                     todas = conn.execute(text(
                         "SELECT id FROM ubicaciones "
                         "WHERE proveedor_id = :pid AND activo = :activo "
-                        "AND COALESCE(cerrada, 0) = :cerrada ORDER BY id"
+                        "AND (cerrada IS NULL OR cerrada = :cerrada) ORDER BY id"
                     ), {"pid": pid, "activo": True, "cerrada": False}).fetchall()
                     candidatos = [r[0] for r in todas]
                 if len(candidatos) == 1:
