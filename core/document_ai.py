@@ -1583,9 +1583,14 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
             actual["fuente"] = fuente_nueva
-            for campo in ("serial", "lote", "ubicacion_desde", "ubicacion_hasta"):
-                if ln.get(campo):
-                    actual[campo] = ln.get(campo)
+
+        # Serial/lote/DESDE/HASTA son metadatos complementarios y pueden venir
+        # mejor de la geometría aun cuando la cantidad válida provenga del texto.
+        # Se completan solo si faltan; nunca degradan una cantidad ya validada.
+        for campo in ("serial", "lote", "ubicacion_desde", "ubicacion_hasta"):
+            if ln.get(campo) and not actual.get(campo):
+                actual[campo] = ln.get(campo)
+
         if ln.get("descripcion"):
             actual["descripcion"] = ln["descripcion"]
 
