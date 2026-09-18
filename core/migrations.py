@@ -91,6 +91,46 @@ def run_migrations(engine):
         _add_column(engine, "archivos", "storage_path", "storage_path VARCHAR(500)")
         _add_column(engine, "archivos", "sha256", "sha256 VARCHAR(64)")
 
+    if "proveedores" in tables:
+        _add_column(engine, "proveedores", "ubicacion_destino",
+                    "ubicacion_destino VARCHAR(80)")
+        # Backfill conservador: solo asigna automáticamente cuando no hay
+        # ambigüedad. Si existe exactamente un DESTINO activo, usa ese; si no,
+        # solo usa una ubicación cuando es la única activa del proveedor.
+        if "ubicaciones" in tables:
+            with engine.begin() as conn:
+                provs = conn.execute(text("""
+                    SELECT id
+                      FROM proveedores
+                     WHERE ubicacion_destino IS NULL OR ubicacion_destino = ''
+                """)).fetchall()
+                for (pid,) in provs:
+                    locs = conn.execute(text("""
+                        SELECT codigo, UPPER(COALESCE(rol,'')) AS rol
+                          FROM ubicaciones
+                         WHERE proveedor_id = :pid
+                           AND activo = :activo
+                           AND cerrada = :cerrada
+                         ORDER BY id
+                    """), {
+                        "pid": pid,
+                        "activo": True,
+                        "cerrada": False,
+                    }).fetchall()
+                    destinos = [codigo for codigo, rol in locs if rol == "DESTINO"]
+                    elegido = None
+                    if len(destinos) == 1:
+                        elegido = destinos[0]
+                    elif len(locs) == 1:
+                        elegido = locs[0][0]
+                    if elegido:
+                        conn.execute(text("""
+                            UPDATE proveedores
+                               SET ubicacion_destino = :codigo
+                             WHERE id = :pid
+                        """), {"codigo": elegido, "pid": pid})
+
+
     if "recibos" in tables:
         _add_column(engine, "recibos", "proveedor_origen_id",
                     "proveedor_origen_id INTEGER")
@@ -118,4 +158,9 @@ def run_migrations(engine):
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_recibo_lineas_oc "
                 "ON recibo_lineas (orden_compra_id)"
+            ))
+        if "proveedores" in tables:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_destino "
+                "ON proveedores (ubicacion_destino)"
             ))

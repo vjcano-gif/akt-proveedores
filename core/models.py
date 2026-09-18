@@ -35,6 +35,8 @@ class Proveedor(Base):
     nit = Column(String(40))
     # Acuerdo comercial: margen de tolerancia de avería (%)
     tolerancia_averia_pct = Column(Float, default=1.0)
+    # Ubicación WMS principal de recepción. Todo proveedor operativo debe tener una.
+    ubicacion_destino = Column(String(80), index=True)
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, default=now)
 

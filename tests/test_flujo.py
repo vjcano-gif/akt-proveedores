@@ -12,7 +12,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdte
 from core.db import init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
-                              _texto_rapid_ordenado)  # noqa: E402
+                              lineas_bin_desde_texto, _texto_rapid_ordenado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -39,7 +39,8 @@ print("\n=== PREPARACIÓN ===")
 init_db()
 with session_scope() as s:
     p = Proveedor(codigo="VDR0013714", nombre="Transformador Principal",
-                  tolerancia_averia_pct=1.0, activo=True)
+                  tolerancia_averia_pct=1.0,
+                  ubicacion_destino="UB-PROV-01", activo=True)
     origen = Proveedor(codigo="VDRORIGEN", nombre="Proveedor Origen", activo=True)
     alt = Proveedor(codigo="VDRALT", nombre="Transformador Alterno", activo=True)
     s.add_all([p, origen, alt]); s.flush()
@@ -82,6 +83,28 @@ with session_scope() as s:
                           cantidad=qty, estado="ABIERTA", fecha=dt.date.today()))
     s.flush()
     OCS = {o.numero: o.id for o in s.query(OrdenCompra).all()}
+
+print("\n=== 0B. UBICACIÓN PRINCIPAL DEL PROVEEDOR ===")
+with session_scope() as s:
+    esperar_error(
+        "Recibo rechaza ubicación distinta a la principal",
+        lambda: sv.crear_recibo(
+            s, proveedor_id=PID, origen="REGISTRO", usuario="test",
+            ubicacion_destino="UB-PROC-01",
+            lineas=[sv.LineaRecibo("CP-A", "Carenaje", 1, 1,
+                                   ubicacion_hasta="UB-PROC-01")]),
+        "Debe ser UB-PROV-01")
+
+print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
+with session_scope() as s:
+    r0 = sv.crear_recibo(
+        s, proveedor_id=PID, origen="BIN_A_BIN", referencia="BIN-CERO",
+        usuario="test", ubicacion_destino="UB-PROV-01",
+        lineas=[sv.LineaRecibo(
+            "CP-C", "Soporte", cantidad_documento=10, cantidad_fisica=0,
+            ubicacion_hasta="UB-PROV-01")])
+    check("Cantidad física cero no se reemplaza por documento",
+          float(r0.lineas[0].cantidad_fisica) == 0.0)
 
 print("\n=== 1. BIN -> MATCH -> INVENTARIO ===")
 with session_scope() as s:
@@ -368,6 +391,53 @@ check("Tabla asocia cantidades 8 y 5",
       and cantidades.get("7700149385725") == 5.0, str(cantidades))
 check("OCR no presume cantidad física",
       all(float(x["cantidad_fisica"]) == 0 for x in lineas_tabla))
+
+sample_bin_real = """
+Proveedor Código Descripción Cantidad Serial
+CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 NONE
+CHONGQING-012 7700149386173 Cubierta Tras 200DS+ Mp 179 NONE
+CHONGQING-012 7700149385725 Cubta Der Tanq Gas 200DS+ Mp 179 NONE
+CHONGQING-012 7700149385718 Cubta Izq Tanq Gas 200DS+ Mp 179 NONE
+CHONGQING-012 7700149386081 Guardabarro Del Frontal Mp 179 NONE
+SANYANG IN-001 7700149603447 Cubierta manubrio JetEvo Mp 60 NONE
+SANYANG IN-001 7700149603980 Cubta Frontal Der JetEvo Mp 60 NONE
+"""
+catalogo_bin = {
+    "7700149386142": "Carenaje Farola 200DS+ Mp",
+    "7700149386173": "Cubierta Tras 200DS+ Mp",
+    "7700149385725": "Cubta Der Tanq Gas 200DS+ Mp",
+    "7700149385718": "Cubta Izq Tanq Gas 200DS+ Mp",
+    "7700149386081": "Guardabarro Del Frontal Mp",
+    "7700149603447": "Cubierta manubrio JetEvo Mp",
+    "7700149603980": "Cubta Frontal Der JetEvo Mp",
+}
+bin_lines = lineas_bin_desde_texto(sample_bin_real, catalogo_bin, 0.99)
+bin_qty = {x["articulo"]: x["cantidad_documento"] for x in bin_lines}
+check("BIN real recupera todas las referencias de muestra",
+      len(bin_qty) == len(catalogo_bin), str(bin_qty))
+check("BIN real conserva 179 en grupo CHONGQING",
+      all(bin_qty.get(k) == 179.0 for k in list(catalogo_bin)[:5]), str(bin_qty))
+check("BIN real conserva 60 en grupo SANYANG",
+      bin_qty.get("7700149603447") == 60.0
+      and bin_qty.get("7700149603980") == 60.0, str(bin_qty))
+
+# Una lectura heurística errónea (1) debe ser corregida por el parser BIN (179).
+resultado_malo = {
+    "texto": sample_bin_real,
+    "confianza_texto": 0.99,
+    "lineas": [{
+        "articulo": "7700149386173",
+        "descripcion": "Cubierta Tras 200DS+ Mp",
+        "cantidad_documento": 1.0,
+        "cantidad_fisica": 0.0,
+        "fuente": "OCR_HEURISTICO",
+    }],
+}
+corregido = completar_con_catalogo(resultado_malo, catalogo_bin)
+q_corregida = next(
+    x["cantidad_documento"] for x in corregido["lineas"]
+    if x["articulo"] == "7700149386173")
+check("Parser BIN corrige cantidad heurística 1 -> 179", q_corregida == 179.0)
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:

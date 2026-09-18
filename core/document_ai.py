@@ -64,7 +64,7 @@ def _rapid_engine():
     return RapidOCR()
 
 
-def _texto_rapid_ordenado(res) -> tuple[str, list[float]]:
+def _texto_rapid_ordenado(res, txts_override=None) -> tuple[str, list[float]]:
     """Reconstruye filas de una tabla usando las coordenadas detectadas por RapidOCR.
 
     RapidOCR suele detectar cada celda por separado. Si solo concatenamos las
@@ -72,7 +72,8 @@ def _texto_rapid_ordenado(res) -> tuple[str, list[float]]:
     artículo | descripción | cantidad. Aquí agrupamos cajas por coordenada Y y
     ordenamos cada fila de izquierda a derecha.
     """
-    txts = list(getattr(res, "txts", None) or [])
+    txts = list(txts_override if txts_override is not None
+                else (getattr(res, "txts", None) or []))
     raw_scores = list(getattr(res, "scores", None) or [])
     scores = []
     for x in raw_scores:
@@ -142,11 +143,56 @@ def _texto_rapid_ordenado(res) -> tuple[str, list[float]]:
     return "\n".join(lineas).strip(), confs
 
 
+def _refinar_celdas_numericas(img, res):
+    """Relee celdas numéricas cortas con Tesseract ampliado."""
+    txts = list(getattr(res, "txts", None) or [])
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or len(boxes) != len(txts):
+        return txts
+    try:
+        import cv2
+        import pytesseract
+    except Exception:
+        return txts
+
+    refinados = list(txts)
+    h_img, w_img = img.shape[:2]
+    for i, (txt, box) in enumerate(zip(txts, boxes)):
+        raw = str(txt or "").strip()
+        if not re.fullmatch(r"\d{1,6}", raw):
+            continue
+        try:
+            pts = [[int(float(p[0])), int(float(p[1]))] for p in box]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            x1, x2 = max(0, min(xs)-8), min(w_img, max(xs)+8)
+            y1, y2 = max(0, min(ys)-5), min(h_img, max(ys)+5)
+            crop = img[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            scale = 5 if gray.shape[0] < 28 else 3
+            enlarged = cv2.resize(gray, None, fx=scale, fy=scale,
+                                   interpolation=cv2.INTER_CUBIC)
+            enlarged = cv2.copyMakeBorder(
+                enlarged, 20, 20, 30, 30, cv2.BORDER_CONSTANT, value=255)
+            _, bw = cv2.threshold(
+                enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            reread = pytesseract.image_to_string(
+                bw, config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789")
+            reread = re.sub(r"\D", "", reread or "")
+            if reread and len(reread) <= 6 and (len(reread) > len(raw) or reread == raw):
+                refinados[i] = reread
+        except Exception:
+            continue
+    return refinados
+
+
 def _ocr_rapid(img) -> tuple[str, float]:
     """OCR principal conservando estructura espacial de tablas."""
     engine = _rapid_engine()
     res = engine(img)
-    texto, scores = _texto_rapid_ordenado(res)
+    txts_refinados = _refinar_celdas_numericas(img, res)
+    texto, scores = _texto_rapid_ordenado(res, txts_override=txts_refinados)
     confianza = sum(scores) / len(scores) if scores else 0.0
     return texto, confianza
 
@@ -490,35 +536,99 @@ def lineas_desde_catalogo(texto: str, catalogo: dict[str, str],
 
     return list(encontradas.values())
 
+def lineas_bin_desde_texto(texto: str, catalogo: dict[str, str],
+                           confianza_texto: float = 0.8) -> list[dict]:
+    """Parser estricto para filas BIN: Proveedor Código Descripción Cantidad Serial."""
+    if not texto or not catalogo:
+        return []
+    mapa = {str(k).strip().upper(): (str(k).strip(), v or "")
+            for k, v in catalogo.items() if str(k).strip()}
+    out = {}
+    for raw_line in texto.splitlines():
+        linea = " ".join(raw_line.split())
+        if not linea:
+            continue
+        upper = linea.upper()
+        codigo_key, pos = None, -1
+        for key in mapa:
+            p = upper.find(key)
+            if p >= 0 and (codigo_key is None or p < pos):
+                codigo_key, pos = key, p
+        if not codigo_key:
+            continue
+        codigo, descripcion = mapa[codigo_key]
+        despues = linea[pos + len(codigo_key):].strip()
+        m = re.search(
+            r"\s([0-9]{1,9}(?:[.,][0-9]+)?)\s+"
+            r"(?:NONE|N/?A|[A-Z][A-Z0-9._/-]{1,40})\s*$",
+            despues, re.I)
+        if not m:
+            m = re.search(r"\s([0-9]{1,9}(?:[.,][0-9]+)?)\s*$", despues)
+        qty = _num(m.group(1)) if m else None
+        if qty is None or qty <= 0:
+            continue
+        out[codigo] = {
+            "articulo": codigo,
+            "descripcion": descripcion,
+            "cantidad_documento": float(qty),
+            "cantidad_fisica": 0.0,
+            "confianza": round(min(confianza_texto, 0.96), 3),
+            "fuente": "BIN_TABLA",
+        }
+    return list(out.values())
+
+
 def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
-    """Combina líneas heurísticas con códigos confirmados por el maestro."""
+    """Combina OCR con maestro priorizando parsers estructurados sobre heurísticos."""
     if not resultado:
         return resultado
     cf = float(resultado.get("confianza_texto") or 0.0)
+    mapa_upper = {str(k).upper(): (str(k), v or "") for k, v in catalogo.items()}
     existentes = {}
+
     for ln in resultado.get("lineas", []) or []:
         cod = str(ln.get("articulo") or "").strip()
         if not cod:
             continue
         key = cod.upper()
-        if key in {str(k).upper() for k in catalogo}:
-            # Usa la descripción oficial del maestro si existe.
-            oficial = next((v for k, v in catalogo.items()
-                            if str(k).upper() == key), "")
-            if oficial:
-                ln["descripcion"] = oficial
-            ln.setdefault("fuente", "OCR")
-        existentes[key] = ln
+        if key in mapa_upper:
+            oficial_cod, oficial_desc = mapa_upper[key]
+            ln["articulo"] = oficial_cod
+            if oficial_desc:
+                ln["descripcion"] = oficial_desc
+            ln.setdefault("fuente", "OCR_HEURISTICO")
+            existentes[key] = ln
 
-    for ln in lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf):
+    propuestas = lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf)
+    propuestas_bin = lineas_bin_desde_texto(resultado.get("texto", ""), catalogo, cf)
+
+    for ln in propuestas + propuestas_bin:
         key = ln["articulo"].upper()
-        if key not in existentes:
+        actual = existentes.get(key)
+        if actual is None:
             resultado.setdefault("lineas", []).append(ln)
             existentes[key] = ln
-        elif not float(existentes[key].get("cantidad_documento") or 0) and ln["cantidad_documento"]:
-            existentes[key]["cantidad_documento"] = ln["cantidad_documento"]
-            existentes[key]["cantidad_fisica"] = ln["cantidad_fisica"]
-            existentes[key]["fuente"] = "OCR+MAESTRO"
+            continue
+        qty_nueva = float(ln.get("cantidad_documento") or 0)
+        fuente_nueva = str(ln.get("fuente") or "")
+        fuente_actual = str(actual.get("fuente") or "")
+        prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1, "BIN_TABLA": 2}
+        if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
+            actual["cantidad_documento"] = qty_nueva
+            actual["cantidad_fisica"] = 0.0
+            actual["fuente"] = fuente_nueva
+        if ln.get("descripcion"):
+            actual["descripcion"] = ln["descripcion"]
+
+    depuradas, vistos = [], set()
+    for ln in resultado.get("lineas", []) or []:
+        key = str(ln.get("articulo") or "").strip().upper()
+        if not key or key in vistos:
+            continue
+        if key in mapa_upper:
+            depuradas.append(existentes.get(key, ln))
+            vistos.add(key)
+    resultado["lineas"] = depuradas
 
     resultado["requiere_revision"] = (
         cf < 0.85 or not resultado.get("lineas")
@@ -526,7 +636,6 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
                for x in resultado.get("lineas", []))
     )
     return resultado
-
 
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
     texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)

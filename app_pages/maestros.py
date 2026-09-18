@@ -315,54 +315,200 @@ def _ubicaciones(user):
 
 # ----------------------------------------------------------------- proveedores
 def _proveedores(user):
+    st.caption(
+        "Cada proveedor operativo debe tener una ubicación destino principal. "
+        "Esa ubicación se usa automáticamente en Recibo.")
+
     def procesar(df):
         creados = actualizados = 0
+        errores = []
         with session_scope() as s:
+            ubicaciones = {
+                u.codigo: u for u in s.query(Ubicacion).filter(Ubicacion.activo.is_(True)).all()
+            }
             for _, r in df.iterrows():
                 cod = str(r.get("codigo") or "").strip()
                 if not cod:
                     continue
                 p = s.query(Proveedor).filter_by(codigo=cod).first()
                 nuevo = p is None
+
+                ubi_cod = str(r.get("ubicacion_destino") or "").strip().upper()
+                if nuevo and not ubi_cod:
+                    errores.append(
+                        f"{cod}: no se crea; debe indicar ubicacion_destino.")
+                    continue
+                if ubi_cod and ubi_cod not in ubicaciones:
+                    errores.append(
+                        f"{cod}: ubicación {ubi_cod} no existe o está inactiva.")
+                    continue
+                if ubi_cod:
+                    u = ubicaciones[ubi_cod]
+                    if u.cerrada:
+                        errores.append(f"{cod}: ubicación {ubi_cod} está cerrada.")
+                        continue
+                    if u.proveedor_id and p and u.proveedor_id != p.id:
+                        errores.append(
+                            f"{cod}: ubicación {ubi_cod} pertenece a otro proveedor.")
+                        continue
+
                 if nuevo:
                     p = Proveedor(codigo=cod)
                     s.add(p)
+                    s.flush()
+
                 p.nombre = str(r.get("nombre") or p.nombre or cod)[:200]
                 p.nit = str(r.get("nit") or p.nit or "")[:40]
                 try:
-                    p.tolerancia_averia_pct = float(r.get("tolerancia_averia_pct") or
-                                                    p.tolerancia_averia_pct or 1.0)
-                except ValueError:
+                    p.tolerancia_averia_pct = float(
+                        r.get("tolerancia_averia_pct") or
+                        p.tolerancia_averia_pct or 1.0)
+                except (TypeError, ValueError):
                     pass
+                if ubi_cod:
+                    p.ubicacion_destino = ubi_cod
+                    ubicaciones[ubi_cod].proveedor_id = p.id
+                    ubicaciones[ubi_cod].rol = "DESTINO"
                 p.activo = _b(r.get("activo"), True)
                 creados += nuevo
                 actualizados += (not nuevo)
-        return creados, actualizados, []
+        return creados, actualizados, errores
 
-    _cargue("proveedores", procesar)
+    _cargue(
+        "proveedores", procesar,
+        ayuda="ubicacion_destino es obligatoria para proveedores nuevos.")
+
+    with session_scope() as s:
+        ubicaciones_activas = [
+            u.codigo for u in s.query(Ubicacion).filter(
+                Ubicacion.activo.is_(True),
+                Ubicacion.cerrada.is_(False)
+            ).order_by(Ubicacion.codigo).all()
+        ]
+
+    with st.expander("➕ Crear proveedor", expanded=False):
+        c1, c2 = st.columns(2)
+        cod_new = c1.text_input("Código", key="prov_new_cod")
+        nom_new = c2.text_input("Nombre", key="prov_new_nom")
+        c3, c4 = st.columns(2)
+        nit_new = c3.text_input("NIT", key="prov_new_nit")
+        ubi_new = c4.selectbox(
+            "Ubicación destino principal *",
+            [""] + ubicaciones_activas,
+            key="prov_new_ubi")
+        tol_new = st.number_input(
+            "Tolerancia de avería (%)", min_value=0.0, max_value=100.0,
+            value=1.0, step=0.1, key="prov_new_tol")
+
+        if st.button("Crear proveedor", type="primary", key="prov_new_btn"):
+            if not cod_new.strip() or not nom_new.strip() or not ubi_new:
+                ui.err("Código, nombre y ubicación destino son obligatorios.")
+            else:
+                try:
+                    with session_scope() as s:
+                        if s.query(Proveedor).filter_by(codigo=cod_new.strip()).first():
+                            raise ValueError("Ya existe un proveedor con ese código.")
+                        u = s.query(Ubicacion).filter_by(codigo=ubi_new).first()
+                        if not u or not u.activo or u.cerrada:
+                            raise ValueError("La ubicación no está disponible.")
+                        if u.proveedor_id:
+                            raise ValueError("La ubicación ya está asignada a otro proveedor.")
+                        p = Proveedor(
+                            codigo=cod_new.strip(),
+                            nombre=nom_new.strip(),
+                            nit=nit_new.strip(),
+                            tolerancia_averia_pct=float(tol_new),
+                            ubicacion_destino=ubi_new,
+                            activo=True)
+                        s.add(p)
+                        s.flush()
+                        u.proveedor_id = p.id
+                        u.rol = "DESTINO"
+                    ui.limpiar_cache()
+                    ui.ok("Proveedor creado con ubicación destino asignada.")
+                    st.rerun()
+                except Exception as e:
+                    ui.err(str(e))
 
     with session_scope() as s:
         provs = s.query(Proveedor).order_by(Proveedor.nombre).all()
-        filas = [{"id": p.id, "codigo": p.codigo, "nombre": p.nombre, "nit": p.nit or "",
-                  "tolerancia_averia_pct": p.tolerancia_averia_pct, "activo": p.activo}
-                 for p in provs]
-    ed = st.data_editor(pd.DataFrame(filas), use_container_width=True, height=380,
-                        hide_index=True, key="ed_prov", num_rows="fixed",
-                        disabled=["id", "codigo"])
+        filas = [{
+            "id": p.id,
+            "codigo": p.codigo,
+            "nombre": p.nombre,
+            "nit": p.nit or "",
+            "ubicacion_destino": p.ubicacion_destino or "",
+            "tolerancia_averia_pct": p.tolerancia_averia_pct,
+            "activo": p.activo,
+        } for p in provs]
+
+    if not filas:
+        st.info("No hay proveedores.")
+        return
+
+    ed = st.data_editor(
+        pd.DataFrame(filas),
+        use_container_width=True,
+        height=380,
+        hide_index=True,
+        key="ed_prov",
+        num_rows="fixed",
+        disabled=["id", "codigo"],
+        column_config={
+            "ubicacion_destino": st.column_config.SelectboxColumn(
+                "Ubicación destino principal",
+                options=[""] + ubicaciones_activas,
+                required=True),
+            "activo": st.column_config.CheckboxColumn("Activo"),
+        })
+
+    pendientes = [
+        str(r["codigo"]) for _, r in ed.iterrows()
+        if not str(r.get("ubicacion_destino") or "").strip()
+    ]
+    if pendientes:
+        st.warning(
+            "Proveedores sin ubicación destino: "
+            + ", ".join(pendientes[:12])
+            + ("…" if len(pendientes) > 12 else ""))
+
     if st.button("Guardar cambios", type="primary", key="sv_prov"):
-        n = 0
+        n, errores = 0, []
         with session_scope() as s:
+            ubicaciones = {
+                u.codigo: u for u in s.query(Ubicacion).filter(Ubicacion.activo.is_(True)).all()
+            }
             for _, r in ed.iterrows():
                 p = s.get(Proveedor, int(r["id"]))
                 if not p:
                     continue
+                ubi_cod = str(r.get("ubicacion_destino") or "").strip()
+                if not ubi_cod:
+                    errores.append(f"{p.codigo}: debe tener ubicación destino.")
+                    continue
+                u = ubicaciones.get(ubi_cod)
+                if not u or u.cerrada:
+                    errores.append(f"{p.codigo}: ubicación {ubi_cod} no disponible.")
+                    continue
+                if u.proveedor_id and u.proveedor_id != p.id:
+                    errores.append(
+                        f"{p.codigo}: ubicación {ubi_cod} pertenece a otro proveedor.")
+                    continue
+
                 p.nombre = r["nombre"]
                 p.nit = r["nit"]
                 p.tolerancia_averia_pct = float(r["tolerancia_averia_pct"])
+                p.ubicacion_destino = ubi_cod
                 p.activo = bool(r["activo"])
+                u.proveedor_id = p.id
+                u.rol = "DESTINO"
                 n += 1
+
         ui.limpiar_cache()
         ui.ok(f"{n} proveedores actualizados.")
+        for e in errores:
+            st.warning(e, icon="⚠️")
+
 
 
 # ----------------------------------------------------------- órdenes de compra

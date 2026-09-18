@@ -63,6 +63,7 @@ def sembrar(force=False, con_demo=None) -> dict:
                 if not cod or s.query(Proveedor).filter_by(codigo=cod).first():
                     continue
                 s.add(Proveedor(codigo=cod, nombre=(r.get("nombre") or cod).strip(),
+                                ubicacion_destino=(r.get("ubicacion_destino") or "").strip().upper() or None,
                                 tolerancia_averia_pct=float(r.get("tolerancia_averia_pct") or 1.0),
                                 activo=True))
                 n += 1
@@ -100,10 +101,16 @@ def sembrar(force=False, con_demo=None) -> dict:
                 cod = (r.get("codigo") or "").strip().upper()
                 if not cod or s.query(Ubicacion).filter_by(codigo=cod).first():
                     continue
-                s.add(Ubicacion(codigo=cod, un=(r.get("un") or "MOTOS"),
-                                rol=r.get("rol"), cerrada=_b(r.get("cerrada")),
-                                inspeccion=_b(r.get("inspeccion")),
-                                restringida=_b(r.get("restringida")), activo=True))
+                pc = (r.get("proveedor_codigo") or "").strip()
+                prov = s.query(Proveedor).filter_by(codigo=pc).first() if pc else None
+                u = Ubicacion(codigo=cod, un=(r.get("un") or "MOTOS"),
+                              rol=r.get("rol"), proveedor_id=prov.id if prov else None,
+                              cerrada=_b(r.get("cerrada")),
+                              inspeccion=_b(r.get("inspeccion")),
+                              restringida=_b(r.get("restringida")), activo=True)
+                s.add(u)
+                if prov and not prov.ubicacion_destino and str(u.rol or "").upper() == "DESTINO":
+                    prov.ubicacion_destino = cod
                 n += 1
             s.flush()
             res["ubicaciones"] = n
@@ -161,8 +168,14 @@ def sembrar(force=False, con_demo=None) -> dict:
 
                 # Solo en demo se asignan ubicaciones automáticamente.
                 if prov:
-                    for u in s.query(Ubicacion).limit(12).all():
+                    demo_ubs = s.query(Ubicacion).limit(12).all()
+                    for u in demo_ubs:
                         u.proveedor_id = prov.id
+                    if not prov.ubicacion_destino and demo_ubs:
+                        destino = next(
+                            (u for u in demo_ubs if str(u.rol or "").upper() == "DESTINO"),
+                            demo_ubs[0])
+                        prov.ubicacion_destino = destino.codigo
             else:
                 email = str(_setting("BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
                 password = str(_setting("BOOTSTRAP_ADMIN_PASSWORD") or "")
