@@ -108,12 +108,17 @@ def get_engine():
             cur.close()
     else:
         _active_schema = _detectar_schema_postgres(url)
-        kwargs = _postgres_kwargs()
+        base_engine = create_engine(url, **_postgres_kwargs())
         if _active_schema != "public":
-            kwargs["connect_args"] = {
-                "options": f"-csearch_path={_active_schema},public"
-            }
-        _engine = create_engine(url, **kwargs)
+            # Fuerza todas las tablas y FKs del metadata de AKT al schema
+            # dedicado. A diferencia de search_path, esto también hace que
+            # create_all/checkfirst no confunda public.proveedores con la
+            # tabla de AKT.
+            _engine = base_engine.execution_options(
+                schema_translate_map={None: _active_schema}
+            )
+        else:
+            _engine = base_engine
 
     _Session = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return _engine
