@@ -347,6 +347,17 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
     prov = s.get(Proveedor, proveedor_id)
     if not prov or not prov.activo:
         raise ReglaNegocio("Proveedor inexistente o inactivo.")
+
+    ubicacion_principal = str(prov.ubicacion_destino or "").strip().upper()
+    if not ubicacion_principal:
+        raise ReglaNegocio(
+            "El proveedor no tiene ubicación destino principal configurada.")
+    if ubicacion_destino and str(ubicacion_destino).strip().upper() != ubicacion_principal:
+        raise ReglaNegocio(
+            f"Ubicación destino inválida para el proveedor: "
+            f"{ubicacion_destino}. Debe ser {ubicacion_principal}.")
+    ubicacion_destino = ubicacion_principal
+
     if proveedor_origen_id:
         po = s.get(Proveedor, proveedor_origen_id)
         if not po or not po.activo:
