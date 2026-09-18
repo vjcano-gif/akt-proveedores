@@ -281,6 +281,21 @@ with session_scope() as s:
         codigo="MOTOS-WSERE-WSER-VIPI-NTAR", proveedor_id=PID_DOC_REAL,
         activo=True, cerrada=False, restringida=False))
 
+    p_pint = Proveedor(
+        codigo="VDRPINT", nombre="Proveedor PINT prueba",
+        nit="900999779",
+        ubicacion_origen="WSERE PINT 1 1 1",
+        ubicacion_destino="WSERE WINT 1 1 1",
+        tolerancia_averia_pct=1.0, activo=True)
+    s.add(p_pint); s.flush()
+    PID_PINT = p_pint.id
+    s.add(Ubicacion(
+        codigo="WSERE PINT 1 1 1", proveedor_id=None,
+        rol="ORIGEN", activo=True, cerrada=False, restringida=False))
+    s.add(Ubicacion(
+        codigo="WSERE WINT 1 1 1", proveedor_id=PID_PINT,
+        rol="DESTINO", activo=True, cerrada=False, restringida=False))
+
 extr_destino = {
     "ocr_ok": True,
     "confianza_texto": 0.99,
@@ -359,6 +374,40 @@ check("Foto BIN estándar detecta que no corresponde al proveedor seleccionado",
 check("Foto BIN estándar recupera HASTA maestro para validar",
       extr_bin_foto_real.get("bin_hasta_canon") == "MOTOS-WSERE-WSER-VIPI-NTAR",
       str(extr_bin_foto_real))
+
+# Caso del BIN2720232 mostrado en producción: la geometría de la foto pierde
+# DESDE, pero OCR sí contiene "WSERE PINT 1 1 1" en cada fila.
+extr_bin_pint = {
+    "ocr_ok": True,
+    "confianza_texto": 0.98,
+    "texto": (
+        "MOVIMIENTO BIN A BIN\n"
+        "Id de Bin: BIN2720232\n"
+        "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta\n"
+        "CHONGQING-0127700149213509 Cbta Lat Izq Tras 300Rally Mp 98 "
+        "NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1\n"
+        "CHONGQING-0127700149213622 Cbta Tanq Der Decor Rally Mp 98 "
+        "NONE NONE WSERE PINT 1 1 1 WSERE WINT 1 1 1"
+    ),
+    "lineas": [],
+    "bin_desde_valores": [],
+    "bin_hasta_valores": [],
+    "orden_compra": {"valor": None},
+    "nit": {"valor": None},
+}
+extr_bin_pint = _enriquecer_extraccion(extr_bin_pint, PID_PINT)
+check("Foto BIN2720232 recupera DESDE desde OCR",
+      extr_bin_pint.get("bin_desde_canon") == "WSERE PINT 1 1 1",
+      str(extr_bin_pint))
+check("Foto BIN2720232 marca DESDE detectado por texto",
+      extr_bin_pint.get("bin_desde_detectado_por_texto") is True,
+      str(extr_bin_pint))
+check("Foto BIN2720232 conserva HASTA del proveedor",
+      extr_bin_pint.get("bin_hasta_canon") == "WSERE WINT 1 1 1",
+      str(extr_bin_pint))
+check("Foto BIN2720232 corresponde al proveedor seleccionado",
+      extr_bin_pint.get("proveedor_destino_coincide") is True,
+      str(extr_bin_pint))
 
 print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
 with session_scope() as s:
