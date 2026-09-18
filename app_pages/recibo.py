@@ -216,15 +216,40 @@ def _enriquecer_extraccion(extr, proveedor_id):
                 Ubicacion.activo.is_(True),
                 Ubicacion.cerrada.is_(False)).all()
         ]
-        for ln in extr.get("lineas", []) or []:
-            for campo in ("ubicacion_desde", "ubicacion_hasta"):
-                raw = str(ln.get(campo) or "").strip().upper()
-                if not raw:
-                    continue
-                canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
-                ln[f"{campo}_ocr_raw"] = raw
-                ln[f"{campo}_ocr_score"] = round(float(score), 3)
-                ln[campo] = canon
+
+        # DESDE/HASTA son del BIN completo, no de cada artículo.
+        # Canoniza los valores detectados una sola vez a nivel documental.
+        desde_vals = list(extr.get("bin_desde_valores") or [])
+        hasta_vals = list(extr.get("bin_hasta_valores") or [])
+
+        desde_canon = []
+        for raw in desde_vals:
+            canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
+            desde_canon.append({
+                "raw": raw, "valor": canon, "score": round(float(score), 3)
+            })
+        hasta_canon = []
+        for raw in hasta_vals:
+            canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
+            hasta_canon.append({
+                "raw": raw, "valor": canon, "score": round(float(score), 3)
+            })
+
+        desde_unicos = []
+        for x in desde_canon:
+            if x["valor"] and x["valor"] not in desde_unicos:
+                desde_unicos.append(x["valor"])
+        hasta_unicos = []
+        for x in hasta_canon:
+            if x["valor"] and x["valor"] not in hasta_unicos:
+                hasta_unicos.append(x["valor"])
+
+        extr["bin_desde_canon"] = desde_unicos[0] if len(desde_unicos) == 1 else ""
+        extr["bin_hasta_canon"] = hasta_unicos[0] if len(hasta_unicos) == 1 else ""
+        extr["bin_desde_canon_valores"] = desde_unicos
+        extr["bin_hasta_canon_valores"] = hasta_unicos
+        extr["bin_desde_detalle"] = desde_canon
+        extr["bin_hasta_detalle"] = hasta_canon
 
         # Si el documento trae OC, úsela como respaldo para líneas que el OCR
         # no pudo leer completamente. Nunca sobreescribe una cantidad OCR > 0.
