@@ -1,6 +1,7 @@
 """Pruebas end-to-end de integridad del flujo operativo."""
 import datetime as dt
 import io
+import json
 import os
 import sys
 import tempfile
@@ -921,6 +922,81 @@ try:
           ), str(analisis_ia["lineas"]))
 finally:
     dai._mistral_document_ai = _mistral_original
+
+print("\n=== 10A1B. OPENAI GPT-5 NANO VISION (MOCK) ===")
+_openai_original = dai._openai_document_ai
+try:
+    dai._openai_document_ai = lambda nombre, data, mime=None: {
+        "ok": True,
+        "texto": json.dumps({
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": "BIN-NANO-001",
+            "fecha": "18/09/2026",
+            "filas": []
+        }),
+        "tipo_documento": "BIN_A_BIN",
+        "referencia": "BIN-NANO-001",
+        "fecha": "18/09/2026",
+        "modelo": "gpt-5-nano-2025-08-07",
+        "fuente": "OPENAI_GPT5_NANO",
+        "usage_info": {"input_tokens": 1200, "output_tokens": 250},
+        "filas": [
+            {
+                "proveedor": "CHONGQING-012",
+                "codigo": "7700149213509",
+                "descripcion": "Cbta Lat Izq Tras 300Rally Mp",
+                "cantidad": 98,
+                "serial": "NONE", "lote": "NONE",
+                "desde": "WSERE PINT 1 1 1",
+                "hasta": "WSERE WINT 1 1 1",
+            },
+            {
+                "proveedor": "CHONGQING-012",
+                "codigo": "7700149649926",
+                "descripcion": "Cubta Fron Sup Der SR1-A MP",
+                "cantidad": 120,
+                "serial": "NONE", "lote": "NONE",
+                "desde": "WSERE PINT 1 1 1",
+                "hasta": "WSERE WINT 1 1 1",
+            },
+            {
+                "proveedor": "X",
+                "codigo": "9999999999999",
+                "descripcion": "No está en maestro",
+                "cantidad": 777,
+                "serial": "NONE", "lote": "NONE",
+                "desde": "X", "hasta": "Y",
+            },
+        ],
+    }
+
+    analisis_nano = analizar_documento(
+        "foto_bin_nano.jpg", b"BYTES-DE-PRUEBA", "image/jpeg")
+    catalogo_nano = {
+        "7700149213509": "Cbta Lat Izq Tras 300Rally Mp",
+        "7700149649926": "Cubta Fron Sup Der SR1-A MP",
+    }
+    completar_con_catalogo(analisis_nano, catalogo_nano)
+    cantidades_nano = {
+        x["articulo"]: float(x["cantidad_documento"])
+        for x in analisis_nano["lineas"]
+    }
+    check("GPT-5 nano queda como fuente IA principal",
+          analisis_nano.get("ia_fuente") == "OPENAI_GPT5_NANO",
+          str(analisis_nano.get("ia_fuente")))
+    check("GPT-5 nano clasifica BIN automáticamente",
+          analisis_nano.get("origen_sugerido") == "BIN_A_BIN",
+          str(analisis_nano.get("origen_sugerido")))
+    check("GPT-5 nano conserva cantidades 98/120",
+          cantidades_nano == {
+              "7700149213509": 98.0,
+              "7700149649926": 120.0,
+          }, str(cantidades_nano))
+    check("GPT-5 nano descarta código fuera del maestro",
+          "9999999999999" not in cantidades_nano,
+          str(cantidades_nano))
+finally:
+    dai._openai_document_ai = _openai_original
 
 # Tabla BIN completa: valida geometría de Código/Cantidad/DESDE/HASTA.
 def _box(cx, cy, w=100, h=24):
