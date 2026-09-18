@@ -310,7 +310,7 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
 
 
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae Código/Cantidad/Serial/Lote/DESDE/HASTA desde una imagen BIN."""
+    """Extrae filas BIN usando la geometría real de las columnas."""
     try:
         img = _decode_image(data)
         res = _rapid_engine()(img)
@@ -318,6 +318,33 @@ def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
         return _extraer_bin_columnas_resultado(res, txts)
     except Exception:
         return []
+
+
+def resumir_ubicaciones_bin(filas: list[dict]) -> dict:
+    """Resume DESDE/HASTA a nivel de documento.
+
+    En el proceso real todas las referencias del mismo BIN comparten el mismo
+    DESDE y HASTA. Las filas se conservan solo como evidencia de OCR, pero la
+    regla de negocio se valida una sola vez por documento.
+    """
+    def _vals(campo):
+        vals = []
+        for fila in filas or []:
+            v = " ".join(str(fila.get(campo) or "").strip().upper().split())
+            if v and v not in vals:
+                vals.append(v)
+        return vals
+
+    desde = _vals("ubicacion_desde")
+    hasta = _vals("ubicacion_hasta")
+    return {
+        "bin_ubicacion_desde": desde[0] if len(desde) == 1 else "",
+        "bin_ubicacion_hasta": hasta[0] if len(hasta) == 1 else "",
+        "bin_desde_valores": desde,
+        "bin_hasta_valores": hasta,
+        "bin_desde_consistente": len(desde) <= 1,
+        "bin_hasta_consistente": len(hasta) <= 1,
+    }
 
 def _ocr_tesseract(img) -> tuple[str, float]:
     """Fallback gratuito mediante el binario Tesseract del servidor."""
@@ -798,6 +825,8 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
     else:
         out["bin_filas_espaciales"] = []
+
+    out.update(resumir_ubicaciones_bin(out["bin_filas_espaciales"]))
     out["metodo"] = metodo
     out["confianza_texto"] = round(cf, 3)
     out["diagnostico"] = diagnostico

@@ -12,7 +12,8 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdte
 from core.db import init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
-                              lineas_bin_desde_texto, _texto_rapid_ordenado,
+                              lineas_bin_desde_texto, resumir_ubicaciones_bin,
+                              _texto_rapid_ordenado,
                               _extraer_bin_columnas_resultado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
@@ -155,6 +156,8 @@ with session_scope() as s:
     check("BIN nace PENDIENTE_MATCH", r.estado == "PENDIENTE_MATCH")
     check("BIN no afecta inventario antes del match",
           sv.saldo_articulo(s, PID, "CP-A") == 0)
+    alertas_bin = sv.validar_bin_a_bin(s, r, PID)
+    check("DESDE correcto no genera alerta documental", not alertas_bin)
 
 with session_scope() as s:
     res = sv.adjuntar_bin_y_match(
@@ -463,6 +466,27 @@ if filas_bin_geom:
           fg["ubicacion_desde"] == "WSERE-PSER", str(fg))
     check("Parser geométrico conserva HASTA",
           fg["ubicacion_hasta"] == "MOTOS-WSERE-WSER-VIPI-NTAR", str(fg))
+
+    resumen_bin = resumir_ubicaciones_bin([
+        fg,
+        {**fg, "articulo": "7700149386173"},
+        {**fg, "articulo": "7700149385725"},
+    ])
+    check("BIN resume DESDE una vez por documento",
+          resumen_bin["bin_ubicacion_desde"] == "WSERE-PSER", str(resumen_bin))
+    check("BIN resume HASTA una vez por documento",
+          resumen_bin["bin_ubicacion_hasta"] == "MOTOS-WSERE-WSER-VIPI-NTAR",
+          str(resumen_bin))
+    check("BIN con ubicaciones iguales es consistente",
+          resumen_bin["bin_desde_consistente"]
+          and resumen_bin["bin_hasta_consistente"])
+
+    inconsistente = resumir_ubicaciones_bin([
+        fg,
+        {**fg, "articulo": "OTRO", "ubicacion_hasta": "OTRO-HASTA"},
+    ])
+    check("BIN detecta HASTA inconsistente a nivel documento",
+          not inconsistente["bin_hasta_consistente"], str(inconsistente))
 
 sample_bin_real = """
 Proveedor Código Descripción Cantidad Serial Lote Desde Hasta

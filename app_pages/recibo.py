@@ -114,7 +114,6 @@ def _consulta(user):
                 "OC": l.orden_compra.numero if l.orden_compra else "",
                 "Aceptado": l.cantidad_match or 0,
                 "Match": l.estado_match or "",
-                "Desde": l.ubicacion_desde, "Hasta": l.ubicacion_hasta,
                 "Lote": l.lote,
             })
         st.dataframe(pd.DataFrame(detalle), use_container_width=True, hide_index=True)
@@ -216,15 +215,40 @@ def _enriquecer_extraccion(extr, proveedor_id):
                 Ubicacion.activo.is_(True),
                 Ubicacion.cerrada.is_(False)).all()
         ]
-        for ln in extr.get("lineas", []) or []:
-            for campo in ("ubicacion_desde", "ubicacion_hasta"):
-                raw = str(ln.get(campo) or "").strip().upper()
-                if not raw:
-                    continue
-                canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
-                ln[f"{campo}_ocr_raw"] = raw
-                ln[f"{campo}_ocr_score"] = round(float(score), 3)
-                ln[campo] = canon
+
+        # DESDE/HASTA son del BIN completo, no de cada artículo.
+        # Canoniza los valores detectados una sola vez a nivel documental.
+        desde_vals = list(extr.get("bin_desde_valores") or [])
+        hasta_vals = list(extr.get("bin_hasta_valores") or [])
+
+        desde_canon = []
+        for raw in desde_vals:
+            canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
+            desde_canon.append({
+                "raw": raw, "valor": canon, "score": round(float(score), 3)
+            })
+        hasta_canon = []
+        for raw in hasta_vals:
+            canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
+            hasta_canon.append({
+                "raw": raw, "valor": canon, "score": round(float(score), 3)
+            })
+
+        desde_unicos = []
+        for x in desde_canon:
+            if x["valor"] and x["valor"] not in desde_unicos:
+                desde_unicos.append(x["valor"])
+        hasta_unicos = []
+        for x in hasta_canon:
+            if x["valor"] and x["valor"] not in hasta_unicos:
+                hasta_unicos.append(x["valor"])
+
+        extr["bin_desde_canon"] = desde_unicos[0] if len(desde_unicos) == 1 else ""
+        extr["bin_hasta_canon"] = hasta_unicos[0] if len(hasta_unicos) == 1 else ""
+        extr["bin_desde_canon_valores"] = desde_unicos
+        extr["bin_hasta_canon_valores"] = hasta_unicos
+        extr["bin_desde_detalle"] = desde_canon
+        extr["bin_hasta_detalle"] = hasta_canon
 
         # Si el documento trae OC, úsela como respaldo para líneas que el OCR
         # no pudo leer completamente. Nunca sobreescribe una cantidad OCR > 0.
@@ -473,6 +497,37 @@ def _registrar(user):
     ref_sugerida = str(((extr or {}).get("referencia") or {}).get("valor") or "")
     fecha_sugerida = _fecha_ocr(extr)
 
+    desde_doc_vals = list((extr or {}).get("bin_desde_canon_valores") or [])
+    hasta_doc_vals = list((extr or {}).get("bin_hasta_canon_valores") or [])
+    desde_doc = _norm_ubi((extr or {}).get("bin_desde_canon") or "")
+    hasta_doc = _norm_ubi((extr or {}).get("bin_hasta_canon") or "")
+
+    # DESDE/HASTA se validan una sola vez por BIN.
+    alerta_desde_doc = None
+    error_hasta_doc = None
+    if origen == "BIN_A_BIN" and soporte is not None:
+        if len(desde_doc_vals) > 1:
+            alerta_desde_doc = (
+                "El BIN presenta más de un valor DESDE detectado: "
+                + ", ".join(desde_doc_vals[:4]))
+        elif not desde_doc:
+            alerta_desde_doc = "No fue posible leer DESDE en el BIN."
+        elif desde_doc != ubicacion_desde_maestro:
+            alerta_desde_doc = (
+                f"DESDE del BIN: {desde_doc}. Maestro del proveedor: "
+                f"{ubicacion_desde_maestro}.")
+
+        if len(hasta_doc_vals) > 1:
+            error_hasta_doc = (
+                "El BIN presenta más de un valor HASTA detectado: "
+                + ", ".join(hasta_doc_vals[:4]))
+        elif not hasta_doc:
+            error_hasta_doc = "No fue posible leer HASTA en el BIN."
+        elif hasta_doc != ubicacion_hasta_maestro:
+            error_hasta_doc = (
+                f"HASTA del BIN: {hasta_doc}. Maestro del proveedor: "
+                f"{ubicacion_hasta_maestro}.")
+
     c1, c2, c3, c4 = st.columns(4)
     referencia = c1.text_input(
         "Referencia / No. documento",
@@ -484,17 +539,30 @@ def _registrar(user):
         value=fecha_sugerida,
         key=f"rec_fecha_{suffix}")
     c3.text_input(
-        "DESDE esperado",
-        value=ubicacion_desde_maestro,
+        "DESDE BIN",
+        value=desde_doc or "No leído",
         disabled=True,
-        help="Maestro del proveedor. Si el BIN difiere, genera alerta.",
-        key=f"rec_desde_maestro_{suffix}")
+        help=f"Esperado según maestro: {ubicacion_desde_maestro}",
+        key=f"rec_desde_doc_{suffix}")
     ubic_dest = c4.text_input(
-        "HASTA esperado",
-        value=ubicacion_hasta_maestro,
+        "HASTA BIN",
+        value=hasta_doc or "No leído",
         disabled=True,
-        help="Maestro del proveedor. Si el BIN difiere, bloquea el recibo.",
-        key=f"rec_hasta_maestro_{suffix}")
+        help=f"Esperado según maestro: {ubicacion_hasta_maestro}",
+        key=f"rec_hasta_doc_{suffix}")
+
+    if origen == "BIN_A_BIN":
+        st.caption(
+            f"Maestro proveedor → DESDE: **{ubicacion_desde_maestro}** · "
+            f"HASTA: **{ubicacion_hasta_maestro}**")
+        if alerta_desde_doc:
+            st.warning(
+                "DESDE no coincide o no pudo validarse. "
+                "Es una alerta no bloqueante. " + alerta_desde_doc)
+        if error_hasta_doc:
+            st.error(
+                "HASTA no coincide con el maestro del proveedor. "
+                "El recibo queda bloqueado. " + error_hasta_doc)
 
     c1, c2 = st.columns([1, 2])
     reproceso = c1.checkbox(
@@ -514,7 +582,7 @@ def _registrar(user):
 
     lineas_df = None
     recepcion_estado = None
-    bloqueo_hasta = False
+    bloqueo_hasta = bool(error_hasta_doc) if origen == "BIN_A_BIN" else False
     if modo == "Cargue masivo":
         ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
@@ -532,15 +600,15 @@ def _registrar(user):
         base = pd.DataFrame(lineas or [{
             "articulo": "", "descripcion": "", "cantidad_documento": 0.0,
             "cantidad_fisica": 0.0, "lote": "", "serial": "",
-            "ubicacion_desde": "", "ubicacion_hasta": "",
         }])
 
-        for col in ("lote", "serial", "ubicacion_desde", "ubicacion_hasta"):
+        for col in ("lote", "serial"):
             if col not in base.columns:
                 base[col] = ""
 
         base = base.drop(columns=[
             "confianza", "fuente",
+            "ubicacion_desde", "ubicacion_hasta",
             "ubicacion_desde_ocr_raw", "ubicacion_desde_ocr_score",
             "ubicacion_hasta_ocr_raw", "ubicacion_hasta_ocr_score",
         ], errors="ignore")
@@ -556,11 +624,7 @@ def _registrar(user):
         if df_key not in st.session_state:
             st.session_state[df_key] = base.copy()
 
-        # Conserva exactamente DESDE/HASTA leídos del documento.
         stored = st.session_state[df_key].copy()
-        for col in ("ubicacion_desde", "ubicacion_hasta"):
-            if col not in stored.columns:
-                stored[col] = ""
         st.session_state[df_key] = stored
 
         recepcion_estado = st.session_state[estado_key]
@@ -582,13 +646,11 @@ def _registrar(user):
             disabled_cols = ["cantidad_fisica"]
         elif recepcion_estado == "COMPLETO":
             disabled_cols = [
-                "articulo", "descripcion", "cantidad_documento", "cantidad_fisica",
-                "ubicacion_desde", "ubicacion_hasta"
+                "articulo", "descripcion", "cantidad_documento", "cantidad_fisica"
             ]
         elif recepcion_estado == "DISCREPANCIA":
             disabled_cols = [
-                "articulo", "descripcion", "cantidad_documento",
-                "ubicacion_desde", "ubicacion_hasta"
+                "articulo", "descripcion", "cantidad_documento"
             ]
 
         editor_key = (
@@ -607,46 +669,8 @@ def _registrar(user):
                     "Cantidad documento", min_value=0.0, step=1.0),
                 "cantidad_fisica": st.column_config.NumberColumn(
                     "Cantidad física real", min_value=0.0, step=1.0),
-                "ubicacion_desde": st.column_config.TextColumn("DESDE"),
-                "ubicacion_hasta": st.column_config.TextColumn("HASTA"),
             })
         st.session_state[df_key] = lineas_df.copy()
-
-        # Validación del BIN contra el maestro del proveedor.
-        if origen == "BIN_A_BIN":
-            alertas_desde = []
-            errores_hasta = []
-            for _, row in lineas_df.iterrows():
-                art = str(row.get("articulo") or "").strip()
-                if not art:
-                    continue
-                desde_doc = _norm_ubi(row.get("ubicacion_desde"))
-                hasta_doc = _norm_ubi(row.get("ubicacion_hasta"))
-
-                if not desde_doc:
-                    alertas_desde.append(f"{art}: DESDE no leído")
-                elif desde_doc != ubicacion_desde_maestro:
-                    alertas_desde.append(
-                        f"{art}: {desde_doc} ≠ {ubicacion_desde_maestro}")
-
-                if not hasta_doc:
-                    errores_hasta.append(f"{art}: HASTA no leído")
-                elif hasta_doc != ubicacion_hasta_maestro:
-                    errores_hasta.append(
-                        f"{art}: {hasta_doc} ≠ {ubicacion_hasta_maestro}")
-
-            if alertas_desde:
-                st.warning(
-                    "DESDE difiere del maestro (alerta no bloqueante): "
-                    + " | ".join(alertas_desde[:8])
-                    + (" …" if len(alertas_desde) > 8 else ""))
-            if errores_hasta:
-                bloqueo_hasta = True
-                st.error(
-                    "HASTA no coincide con la ubicación asignada al proveedor. "
-                    "El recibo queda bloqueado: "
-                    + " | ".join(errores_hasta[:8])
-                    + (" …" if len(errores_hasta) > 8 else ""))
 
         faltan_qty = _filas_sin_cantidad_documento(lineas_df)
         if faltan_qty:
@@ -725,8 +749,6 @@ def _registrar(user):
         base = pd.DataFrame([{
             "articulo": "", "descripcion": "", "cantidad_documento": 0.0,
             "cantidad_fisica": 0.0, "lote": "", "serial": "",
-            "ubicacion_desde": ubicacion_desde_maestro,
-            "ubicacion_hasta": ubicacion_hasta_maestro,
         }])
         lineas_df = st.data_editor(
             base, num_rows="dynamic", use_container_width=True,
@@ -787,8 +809,10 @@ def _registrar(user):
                 cantidad_fisica=num(row.get("cantidad_fisica")),
                 lote=str(row.get("lote") or ""),
                 serial=str(row.get("serial") or ""),
-                ubicacion_desde=str(row.get("ubicacion_desde") or ""),
-                ubicacion_hasta=str(row.get("ubicacion_hasta") or "")))
+                ubicacion_desde=(desde_doc or ubicacion_desde_maestro)
+                    if origen == "BIN_A_BIN" else "",
+                ubicacion_hasta=(hasta_doc or ubicacion_hasta_maestro)
+                    if origen == "BIN_A_BIN" else ubicacion_hasta_maestro))
         if not lineas:
             ui.err("Ninguna línea tiene artículo.")
             return
@@ -803,7 +827,9 @@ def _registrar(user):
                 r = crear_recibo(
                     s, proveedor_id=pid, origen=origen, lineas=lineas,
                     referencia=referencia or None, usuario=user["email"],
-                    es_reproceso=reproceso, ubicacion_destino=ubicacion_hasta_maestro,
+                    es_reproceso=reproceso,
+                    ubicacion_destino=(hasta_doc if origen == "BIN_A_BIN"
+                                       else ubicacion_hasta_maestro),
                     archivo_id=arch_id, fecha_documento=fecha_doc,
                     observaciones=obs or None, proveedor_origen_id=prov_origen_id,
                     factura_origen=referencia if origen == "FACTURA" else None)
