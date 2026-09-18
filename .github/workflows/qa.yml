@@ -56,5 +56,7 @@ jobs:
           sudo apt-get install -y tesseract-ocr tesseract-ocr-spa libgl1 libglib2.0-0
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Schema isolation PostgreSQL
+        run: python tests/test_schema_isolation.py
       - name: End-to-end PostgreSQL
         run: python tests/test_flujo.py
