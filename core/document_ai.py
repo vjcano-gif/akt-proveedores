@@ -304,7 +304,7 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
             "ubicacion_desde": celdas.get("desde", "").strip().upper(),
             "ubicacion_hasta": celdas.get("hasta", "").strip().upper(),
             "proveedor_bin": celdas.get("proveedor", ""),
-            "fuente": row.get("fuente", "BIN_ESPACIAL"),
+            "fuente": "BIN_ESPACIAL",
         })
     return out
 
@@ -831,7 +831,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "ubicacion_desde": row.get("ubicacion_desde", ""),
             "ubicacion_hasta": row.get("ubicacion_hasta", ""),
             "confianza": round(min(cf, 0.99), 3),
-            "fuente": "BIN_ESPACIAL",
+            "fuente": row.get("fuente", "BIN_ESPACIAL"),
         })
 
     for ln in propuestas + propuestas_bin + propuestas_espaciales:
