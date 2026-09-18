@@ -34,7 +34,10 @@ class Proveedor(Base):
     nombre = Column(String(200), nullable=False)
     nit = Column(String(40))
     # Ubicación operativa por defecto. Todo recibo del proveedor llega aquí.
-    ubicacion_destino_id = Column(Integer, ForeignKey("ubicaciones.id"))
+    ubicacion_destino_id = Column(
+        Integer,
+        ForeignKey("ubicaciones.id", use_alter=True,
+                   name="fk_proveedor_ubicacion_destino"))
     # Acuerdo comercial: margen de tolerancia de avería (%)
     tolerancia_averia_pct = Column(Float, default=1.0)
     activo = Column(Boolean, default=True)
