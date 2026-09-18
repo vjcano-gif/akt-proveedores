@@ -32,12 +32,14 @@ def render(user):
         "Recibo de mercancía",
         "Documento → revisión → match por línea contra OC → inventario disponible/restringido")
     t1, t2, t3 = st.tabs([
-        "📋 Documentos", "➕ Registrar / leer documento", "🔗 Match por línea con OC"
+        "➕ Registrar / leer documento", "📋 Documentos", "🔗 Match por línea con OC"
     ])
+    # Streamlit abre por defecto la primera pestaña: el flujo principal de
+    # Recibo debe iniciar directamente en Registrar / leer documento.
     with t1:
-        _consulta(user)
-    with t2:
         _registrar(user)
+    with t2:
+        _consulta(user)
     with t3:
         _match(user)
 
@@ -643,11 +645,37 @@ def _registrar(user):
             "Maestros → Proveedores.")
         return
 
-    soporte = st.file_uploader(
-        "Documento de entrada (PDF o foto)",
-        type=["pdf", "png", "jpg", "jpeg"],
-        key="rec_soporte",
-        help="Al cargar el archivo se procesa automáticamente y se completan los campos detectados.")
+    modo_documento = st.radio(
+        "Cómo desea ingresar el documento",
+        ["📁 Cargar archivo", "📷 Tomar foto"],
+        horizontal=True,
+        key="rec_modo_documento",
+        help=(
+            "Puede cargar un PDF/imagen existente o tomar una foto directamente "
+            "desde la cámara del dispositivo."
+        ),
+    )
+
+    soporte = None
+    if modo_documento == "📷 Tomar foto":
+        soporte = st.camera_input(
+            "Tomar foto del documento",
+            key="rec_camara",
+            help=(
+                "Procure encuadrar el documento completo, de frente, con buena "
+                "iluminación y sin reflejos."
+            ),
+        )
+    else:
+        soporte = st.file_uploader(
+            "Documento de entrada (PDF o foto)",
+            type=["pdf", "png", "jpg", "jpeg"],
+            key="rec_soporte",
+            help=(
+                "Al cargar el archivo se procesa automáticamente y se completan "
+                "los campos detectados."
+            ),
+        )
 
     extr, digest = _extraer_documento(soporte, pid)
     suffix = digest or "manual"
