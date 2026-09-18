@@ -262,6 +262,72 @@ def _enriquecer_extraccion(extr, proveedor_id):
         extr["proveedor_seleccionado_nombre"] = (
             seleccionado.nombre if seleccionado else "")
 
+        # Fallback específico para DESDE en fotos/OCR.
+        # En imágenes el parser espacial puede reconocer HASTA y perder DESDE,
+        # aunque el texto OCR sí contenga claramente la ubicación de origen.
+        # Primero intenta una coincidencia exacta/normalizada contra el DESDE
+        # configurado del proveedor seleccionado; luego usa una comparación
+        # fuzzy solo en la mitad inicial del tramo posterior a "NONE NONE".
+        texto_compacto_total = _normalizar_codigo_ubicacion(
+            extr.get("texto") or "")
+        origen_bin = _norm_ubi(extr.get("bin_desde_canon") or "")
+        if not origen_bin and seleccionado:
+            origen_maestro = _norm_ubi(seleccionado.ubicacion_origen)
+            norigen = _normalizar_codigo_ubicacion(origen_maestro)
+            variantes_origen = [norigen] if norigen else []
+            if norigen.startswith("MOTOS") and len(norigen) > 10:
+                variantes_origen.append(norigen[5:])
+
+            encontrado_origen = False
+            for nv in variantes_origen:
+                if len(nv) >= 5 and nv in texto_compacto_total:
+                    encontrado_origen = True
+                    break
+
+            if not encontrado_origen and variantes_origen:
+                filas_bin_texto = [
+                    " ".join(x.split())
+                    for x in str(extr.get("texto") or "").splitlines()
+                    if str(x).upper().count("NONE") >= 2
+                ]
+                mejor_origen = 0.0
+                for linea in filas_bin_texto:
+                    partes_none = re.split(
+                        r"\bNONE\b", linea, maxsplit=2, flags=re.I)
+                    resto = partes_none[-1] if len(partes_none) >= 3 else ""
+                    nr = _normalizar_codigo_ubicacion(resto)
+                    if not nr:
+                        continue
+                    for nv in variantes_origen:
+                        if not nv:
+                            continue
+                        pos = nr.find(nv)
+                        if pos >= 0:
+                            frac_inicio = pos / max(1, len(nr))
+                            # DESDE debe aparecer en la primera parte del tramo
+                            # posterior a Serial/Lote, antes de HASTA.
+                            if frac_inicio <= 0.55:
+                                mejor_origen = max(
+                                    mejor_origen, 1.0 + 0.05 * (1.0 - frac_inicio))
+                            continue
+                        m = SequenceMatcher(None, nv, nr).find_longest_match()
+                        cobertura = m.size / max(1, len(nv))
+                        frac_inicio = m.b / max(1, len(nr))
+                        if cobertura >= 0.82 and frac_inicio <= 0.55:
+                            mejor_origen = max(
+                                mejor_origen,
+                                cobertura + 0.05 * (1.0 - frac_inicio))
+                encontrado_origen = mejor_origen >= 0.86
+                if encontrado_origen:
+                    extr["bin_desde_score_texto"] = round(
+                        float(mejor_origen), 3)
+
+            if encontrado_origen and origen_maestro:
+                origen_bin = origen_maestro
+                extr["bin_desde_canon"] = origen_maestro
+                extr["bin_desde_canon_valores"] = [origen_maestro]
+                extr["bin_desde_detectado_por_texto"] = True
+
         destino_bin = _norm_ubi(extr.get("bin_hasta_canon") or "")
         candidatos_destino = {}
         proveedores_activos = s.query(Proveedor).filter(
@@ -465,7 +531,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "bin-destino-v11"
+    extractor_version = "bin-desde-v12"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
