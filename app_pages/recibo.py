@@ -311,6 +311,60 @@ def _enriquecer_extraccion(extr, proveedor_id):
                 extr["bin_hasta_detectado_por_texto"] = True
                 extr["bin_hasta_repeticiones_texto"] = int(repeticiones)
 
+        # 4) Fallback fuzzy orientado a la estructura real de una fila BIN:
+        # después de "NONE NONE" vienen DESDE y al final HASTA. Se compara la
+        # parte posterior de cada fila contra las ubicaciones destino maestras
+        # y se exige alta cobertura + posición hacia el final de la fila.
+        if not destino_bin and not candidatos_destino:
+            filas_texto = [
+                " ".join(x.split()) for x in str(extr.get("texto") or "").splitlines()
+                if str(x).upper().count("NONE") >= 2
+            ]
+            puntajes = {}
+            for p_dest in proveedores_activos:
+                destino_maestro = _norm_ubi(p_dest.ubicacion_destino)
+                nd = _normalizar_codigo_ubicacion(destino_maestro)
+                if len(nd) < 6:
+                    continue
+                mejor = 0.0
+                for linea in filas_texto:
+                    partes_none = re.split(r"\bNONE\b", linea, maxsplit=2, flags=re.I)
+                    resto = partes_none[-1] if len(partes_none) >= 3 else linea
+                    nr = _normalizar_codigo_ubicacion(resto)
+                    if not nr:
+                        continue
+
+                    pos = nr.rfind(nd)
+                    if pos >= 0:
+                        frac_inicio = pos / max(1, len(nr))
+                        # HASTA debe estar en la mitad posterior del remanente.
+                        if frac_inicio >= 0.28:
+                            mejor = max(mejor, 1.0 + 0.05 * frac_inicio)
+                        continue
+
+                    m = SequenceMatcher(None, nd, nr).find_longest_match()
+                    cobertura = m.size / max(1, len(nd))
+                    frac_inicio = m.b / max(1, len(nr))
+                    if cobertura >= 0.78 and frac_inicio >= 0.28:
+                        mejor = max(mejor, cobertura + 0.05 * frac_inicio)
+
+                if mejor > 0:
+                    puntajes[p_dest.id] = (mejor, p_dest, destino_maestro)
+
+            if puntajes:
+                ranking = sorted(
+                    puntajes.values(), key=lambda z: z[0], reverse=True)
+                best_score, best_p, best_destino = ranking[0]
+                second_score = ranking[1][0] if len(ranking) > 1 else 0.0
+                if best_score >= 0.84 and (
+                        best_score - second_score >= 0.035 or best_score >= 1.02):
+                    candidatos_destino[best_p.id] = best_p
+                    destino_bin = best_destino
+                    extr["bin_hasta_canon"] = best_destino
+                    extr["bin_hasta_canon_valores"] = [best_destino]
+                    extr["bin_hasta_detectado_por_texto"] = True
+                    extr["bin_hasta_score_texto"] = round(float(best_score), 3)
+
         detectado = (
             next(iter(candidatos_destino.values()))
             if len(candidatos_destino) == 1 else None
@@ -404,7 +458,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "bin-destino-v9"
+    extractor_version = "bin-destino-v10"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
