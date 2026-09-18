@@ -125,6 +125,44 @@ with session_scope() as s:
     s.flush()
     OCS = {o.numero: o.id for o in s.query(OrdenCompra).all()}
 
+print("\n=== 0A0. PERSISTENCIA HISTÓRICA DE DOCUMENTOS DE RECIBO ===")
+contenido_hist = b"DOCUMENTO-ORIGINAL-HISTORICO"
+with session_scope() as s:
+    arch_hist = sv.guardar_archivo(
+        s, "registro_historico.jpg", contenido_hist,
+        "image/jpeg", "historia@akt.com")
+    rec_hist = sv.crear_recibo(
+        s,
+        proveedor_id=PID,
+        origen="REGISTRO",
+        referencia="REG-HIST-001",
+        usuario="historia@akt.com",
+        archivo_id=arch_hist.id,
+        lineas=[sv.LineaRecibo(
+            "CP-C", "Soporte", cantidad_documento=1,
+            cantidad_fisica=1)],
+    )
+    HIST_RID = rec_hist.id
+    HIST_TRZ = rec_hist.documento.trz
+
+# Se abre una sesión nueva para demostrar que no depende de session_state ni
+# de memoria del proceso: cabecera, vínculo y bytes deben persistir.
+with session_scope() as s:
+    rec_hist_db = s.get(Recibo, HIST_RID)
+    check("Recibo histórico persiste en una nueva sesión",
+          rec_hist_db is not None and rec_hist_db.documento is not None)
+    check("TRZ histórico persiste",
+          rec_hist_db.documento.trz == HIST_TRZ,
+          rec_hist_db.documento.trz if rec_hist_db else "")
+    check("Soporte original queda vinculado al Documento",
+          rec_hist_db.documento.archivo is not None
+          and rec_hist_db.documento.archivo.nombre == "registro_historico.jpg")
+    check("Bytes del soporte histórico pueden recuperarse",
+          sv.leer_archivo(rec_hist_db.documento.archivo) == contenido_hist)
+    check("Soporte histórico conserva SHA-256",
+          bool(rec_hist_db.documento.archivo.sha256)
+          and len(rec_hist_db.documento.archivo.sha256) == 64)
+
 print("\n=== 0AA. SELECTOR DE PROVEEDORES ===")
 df_prov = catalogo_proveedores()
 codigos_activos = set(df_prov["codigo"].tolist())
