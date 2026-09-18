@@ -348,13 +348,17 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
     if not prov or not prov.activo:
         raise ReglaNegocio("Proveedor inexistente o inactivo.")
 
+    ubicacion_origen_esperada = str(prov.ubicacion_origen or "").strip().upper()
     ubicacion_principal = str(prov.ubicacion_destino or "").strip().upper()
     if not ubicacion_principal:
         raise ReglaNegocio(
-            "El proveedor no tiene ubicación destino principal configurada.")
+            "El proveedor no tiene ubicación HASTA configurada.")
+    if origen == "BIN_A_BIN" and not ubicacion_origen_esperada:
+        raise ReglaNegocio(
+            "El proveedor no tiene ubicación DESDE configurada.")
     if ubicacion_destino and str(ubicacion_destino).strip().upper() != ubicacion_principal:
         raise ReglaNegocio(
-            f"Ubicación destino inválida para el proveedor: "
+            f"Ubicación HASTA inválida para el proveedor: "
             f"{ubicacion_destino}. Debe ser {ubicacion_principal}.")
     ubicacion_destino = ubicacion_principal
 
@@ -383,12 +387,26 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
             continue
         qdoc = float(ln.cantidad_documento or 0)
         qfis = float(qdoc if ln.cantidad_fisica is None else ln.cantidad_fisica)
+        desde_doc = str(ln.ubicacion_desde or "").strip().upper()
+        hasta_doc = str(ln.ubicacion_hasta or "").strip().upper()
+
+        if origen == "BIN_A_BIN":
+            if not hasta_doc:
+                raise ReglaNegocio(
+                    f"Línea {cod}: el BIN no tiene valor HASTA legible.")
+            if hasta_doc != ubicacion_principal:
+                raise ReglaNegocio(
+                    f"Línea {cod}: HASTA {hasta_doc} no coincide con la ubicación "
+                    f"asignada al proveedor ({ubicacion_principal}).")
+        else:
+            hasta_doc = hasta_doc or ubicacion_principal
+
         s.add(ReciboLinea(
             recibo_id=r.id, articulo=cod, descripcion=ln.descripcion or "",
             cantidad_documento=qdoc, cantidad_fisica=qfis,
             lote=ln.lote or "", serial=ln.serial or "",
-            ubicacion_desde=(ln.ubicacion_desde or "").upper(),
-            ubicacion_hasta=ubicacion_destino.upper(),
+            ubicacion_desde=desde_doc,
+            ubicacion_hasta=hasta_doc,
             estado_match="PENDIENTE" if origen in ("BIN_A_BIN", "FACTURA") else None))
         creadas += 1
     if not creadas:
@@ -399,28 +417,27 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
 
 
 def validar_bin_a_bin(s, recibo: Recibo, proveedor_id_logueado: int) -> list[str]:
-    """Valida ubicaciones del BIN y reporta alertas sin alterar inventario."""
-    alertas = []
-    ubic_prov = {u.codigo for u in s.query(Ubicacion).filter(
-        Ubicacion.proveedor_id == proveedor_id_logueado,
-        Ubicacion.activo.is_(True)).all()}
-    if not ubic_prov:
-        return ["El proveedor no tiene ubicaciones activas asignadas."]
-    for ln in recibo.lineas:
-        for etiqueta, codigo in (("Desde", ln.ubicacion_desde), ("Hasta", ln.ubicacion_hasta)):
-            if not codigo:
-                continue
-            u = s.query(Ubicacion).filter(Ubicacion.codigo == codigo).first()
-            if not u or not u.activo:
-                alertas.append(f"Línea {ln.articulo}: {etiqueta} {codigo} no existe/está inactiva.")
-            elif u.cerrada:
-                alertas.append(f"Línea {ln.articulo}: {etiqueta} {codigo} está cerrada.")
-        if ln.ubicacion_desde and ln.ubicacion_hasta and            ln.ubicacion_desde not in ubic_prov and ln.ubicacion_hasta not in ubic_prov:
-            alertas.append(
-                f"Línea {ln.articulo}: ni Desde ({ln.ubicacion_desde}) ni "
-                f"Hasta ({ln.ubicacion_hasta}) corresponden al proveedor.")
-    return alertas
+    """Devuelve alertas NO bloqueantes de DESDE.
 
+    HASTA se valida de forma bloqueante en crear_recibo().
+    """
+    alertas = []
+    prov = s.get(Proveedor, proveedor_id_logueado)
+    if not prov:
+        return ["Proveedor inexistente."]
+
+    esperado_desde = str(prov.ubicacion_origen or "").strip().upper()
+    for ln in recibo.lineas:
+        desde = str(ln.ubicacion_desde or "").strip().upper()
+        if not desde:
+            alertas.append(
+                f"Línea {ln.articulo}: no fue posible leer la columna DESDE.")
+            continue
+        if esperado_desde and desde != esperado_desde:
+            alertas.append(
+                f"Línea {ln.articulo}: DESDE {desde} difiere de la ubicación "
+                f"esperada {esperado_desde}.")
+    return alertas
 
 def sellar_recibo(s, recibo_id: int, usuario: str) -> Recibo:
     """Proveedor certifica la factura; el documento pasa a PENDIENTE_MATCH."""

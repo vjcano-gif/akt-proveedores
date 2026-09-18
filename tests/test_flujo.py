@@ -12,7 +12,8 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdte
 from core.db import init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
-                              lineas_bin_desde_texto, _texto_rapid_ordenado)  # noqa: E402
+                              lineas_bin_desde_texto, _texto_rapid_ordenado,
+                              _extraer_bin_columnas_resultado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -57,6 +58,7 @@ init_db()
 with session_scope() as s:
     p = Proveedor(codigo="VDR0013714", nombre="Transformador Principal",
                   tolerancia_averia_pct=1.0,
+                  ubicacion_origen="UB-ORIGEN",
                   ubicacion_destino="UB-PROV-01", activo=True)
     origen = Proveedor(codigo="VDRORIGEN", nombre="Proveedor Origen", activo=True)
     alt = Proveedor(codigo="VDRALT", nombre="Transformador Alterno", activo=True)
@@ -101,16 +103,33 @@ with session_scope() as s:
     s.flush()
     OCS = {o.numero: o.id for o in s.query(OrdenCompra).all()}
 
-print("\n=== 0B. UBICACIÓN PRINCIPAL DEL PROVEEDOR ===")
+print("\n=== 0B. REGLAS DESDE / HASTA DEL BIN ===")
 with session_scope() as s:
     esperar_error(
-        "Recibo rechaza ubicación distinta a la principal",
+        "HASTA distinto al maestro bloquea el BIN",
         lambda: sv.crear_recibo(
-            s, proveedor_id=PID, origen="REGISTRO", usuario="test",
-            ubicacion_destino="UB-PROC-01",
-            lineas=[sv.LineaRecibo("CP-A", "Carenaje", 1, 1,
-                                   ubicacion_hasta="UB-PROC-01")]),
-        "Debe ser UB-PROV-01")
+            s, proveedor_id=PID, origen="BIN_A_BIN", usuario="test",
+            ubicacion_destino="UB-PROV-01",
+            lineas=[sv.LineaRecibo(
+                "CP-A", "Carenaje", 1, 1,
+                ubicacion_desde="UB-ORIGEN",
+                ubicacion_hasta="UB-PROC-01")]),
+        "HASTA")
+
+with session_scope() as s:
+    r_alerta = sv.crear_recibo(
+        s, proveedor_id=PID, origen="BIN_A_BIN",
+        referencia="BIN-DESDE-ALERTA", usuario="test",
+        ubicacion_destino="UB-PROV-01",
+        lineas=[sv.LineaRecibo(
+            "CP-A", "Carenaje", 1, 1,
+            ubicacion_desde="UB-PROC-01",
+            ubicacion_hasta="UB-PROV-01")])
+    alertas = sv.validar_bin_a_bin(s, r_alerta, PID)
+    check("DESDE distinto genera alerta pero no bloquea",
+          bool(alertas) and "DESDE" in alertas[0], str(alertas))
+    check("HASTA correcto permite crear el BIN",
+          r_alerta.estado == "PENDIENTE_MATCH")
 
 print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
 with session_scope() as s:
@@ -119,6 +138,7 @@ with session_scope() as s:
         usuario="test", ubicacion_destino="UB-PROV-01",
         lineas=[sv.LineaRecibo(
             "CP-C", "Soporte", cantidad_documento=10, cantidad_fisica=0,
+            ubicacion_desde="UB-ORIGEN",
             ubicacion_hasta="UB-PROV-01")])
     check("Cantidad física cero no se reemplaza por documento",
           float(r0.lineas[0].cantidad_fisica) == 0.0)
@@ -192,6 +212,7 @@ with session_scope() as s:
         s, proveedor_id=PID, origen="BIN_A_BIN", referencia="BIN-SOB",
         usuario="proveedor@akt.com", ubicacion_destino="UB-PROV-01",
         lineas=[sv.LineaRecibo("CP-B", "Calca", 10, 13,
+                               ubicacion_desde="UB-ORIGEN",
                                ubicacion_hasta="UB-PROV-01")])
     RB3, LIN3 = r.id, r.lineas[0].id
 
@@ -409,15 +430,49 @@ check("Tabla asocia cantidades 8 y 5",
 check("OCR no presume cantidad física",
       all(float(x["cantidad_fisica"]) == 0 for x in lineas_tabla))
 
+# Tabla BIN completa: valida geometría de Código/Cantidad/DESDE/HASTA.
+def _box(cx, cy, w=100, h=24):
+    return [
+        [cx-w/2, cy-h/2], [cx+w/2, cy-h/2],
+        [cx+w/2, cy+h/2], [cx-w/2, cy+h/2],
+    ]
+
+headers_txt = [
+    "Proveedor", "Código", "Descripción", "Cantidad",
+    "Serial", "Lote", "Desde", "Hasta",
+]
+xs = [70, 210, 420, 650, 760, 850, 1010, 1260]
+row_txt = [
+    "CHONGQING-012", "7700149386142", "Carenaje Farola 200DS+ Mp",
+    "179", "NONE", "NONE", "WSERE-PSER",
+    "MOTOS-WSERE-WSER-VIPI-NTAR",
+]
+fake_bin = SimpleNamespace(
+    txts=headers_txt + row_txt,
+    scores=[0.99] * 16,
+    boxes=[_box(x, 30) for x in xs] + [_box(x, 80) for x in xs],
+)
+filas_bin_geom = _extraer_bin_columnas_resultado(fake_bin)
+check("Parser geométrico BIN obtiene una fila", len(filas_bin_geom) == 1,
+      str(filas_bin_geom))
+if filas_bin_geom:
+    fg = filas_bin_geom[0]
+    check("Parser geométrico conserva cantidad 179",
+          fg["cantidad_documento"] == 179.0, str(fg))
+    check("Parser geométrico conserva DESDE",
+          fg["ubicacion_desde"] == "WSERE-PSER", str(fg))
+    check("Parser geométrico conserva HASTA",
+          fg["ubicacion_hasta"] == "MOTOS-WSERE-WSER-VIPI-NTAR", str(fg))
+
 sample_bin_real = """
-Proveedor Código Descripción Cantidad Serial
-CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 NONE
-CHONGQING-012 7700149386173 Cubierta Tras 200DS+ Mp 179 NONE
-CHONGQING-012 7700149385725 Cubta Der Tanq Gas 200DS+ Mp 179 NONE
-CHONGQING-012 7700149385718 Cubta Izq Tanq Gas 200DS+ Mp 179 NONE
-CHONGQING-012 7700149386081 Guardabarro Del Frontal Mp 179 NONE
-SANYANG IN-001 7700149603447 Cubierta manubrio JetEvo Mp 60 NONE
-SANYANG IN-001 7700149603980 Cubta Frontal Der JetEvo Mp 60 NONE
+Proveedor Código Descripción Cantidad Serial Lote Desde Hasta
+CHONGQING-012 7700149386142 Carenaje Farola 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149386173 Cubierta Tras 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149385725 Cubta Der Tanq Gas 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149385718 Cubta Izq Tanq Gas 200DS+ Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+CHONGQING-012 7700149386081 Guardabarro Del Frontal Mp 179 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+SANYANG IN-001 7700149603447 Cubierta manubrio JetEvo Mp 60 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
+SANYANG IN-001 7700149603980 Cubta Frontal Der JetEvo Mp 60 NONE NONE WSERE-PSER MOTOS-WSERE-WSER-VIPI-NTAR
 """
 catalogo_bin = {
     "7700149386142": "Carenaje Farola 200DS+ Mp",
@@ -455,6 +510,32 @@ q_corregida = next(
     x["cantidad_documento"] for x in corregido["lineas"]
     if x["articulo"] == "7700149386173")
 check("Parser BIN corrige cantidad heurística 1 -> 179", q_corregida == 179.0)
+
+resultado_espacial = {
+    "texto": sample_bin_real,
+    "confianza_texto": 0.99,
+    "lineas": [],
+    "bin_filas_espaciales": [{
+        "articulo": "7700149386142",
+        "descripcion_ocr": "Carenaje Farola 200DS+ Mp",
+        "cantidad_documento": 179.0,
+        "cantidad_fisica": 0.0,
+        "serial": "NONE",
+        "lote": "NONE",
+        "ubicacion_desde": "WSERE PSER 1 1 1",
+        "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+        "fuente": "BIN_ESPACIAL",
+    }],
+}
+resultado_espacial = completar_con_catalogo(resultado_espacial, catalogo_bin)
+esp = next(x for x in resultado_espacial["lineas"]
+           if x["articulo"] == "7700149386142")
+check("BIN espacial conserva DESDE",
+      esp["ubicacion_desde"] == "WSERE PSER 1 1 1", str(esp))
+check("BIN espacial conserva HASTA",
+      esp["ubicacion_hasta"] == "WSERE WSER VIPI NTAR TE", str(esp))
+check("BIN espacial conserva cantidad",
+      esp["cantidad_documento"] == 179.0, str(esp))
 
 print("\n=== 10B. OCR REAL SOBRE IMAGEN ===")
 try:

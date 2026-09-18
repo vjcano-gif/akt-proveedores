@@ -112,6 +112,9 @@ def run_migrations(engine, schema=None):
 
     if "proveedores" in tables:
         _add_column(
+            engine, "proveedores", "ubicacion_origen",
+            "ubicacion_origen VARCHAR(80)", schema=schema)
+        _add_column(
             engine, "proveedores", "ubicacion_destino",
             "ubicacion_destino VARCHAR(80)", schema=schema)
 
@@ -120,11 +123,12 @@ def run_migrations(engine, schema=None):
             qubi = _q(engine, schema, "ubicaciones")
             with engine.begin() as conn:
                 provs = conn.execute(text(f"""
-                    SELECT id
+                    SELECT id, ubicacion_origen, ubicacion_destino
                       FROM {qprov}
-                     WHERE ubicacion_destino IS NULL OR ubicacion_destino = ''
+                     WHERE ubicacion_origen IS NULL OR ubicacion_origen = ''
+                        OR ubicacion_destino IS NULL OR ubicacion_destino = ''
                 """)).fetchall()
-                for (pid,) in provs:
+                for pid, origen_actual, destino_actual in provs:
                     locs = conn.execute(text(f"""
                         SELECT codigo, UPPER(COALESCE(rol,'')) AS rol
                           FROM {qubi}
@@ -138,21 +142,33 @@ def run_migrations(engine, schema=None):
                         "cerrada": False,
                     }).fetchall()
 
+                    origenes = [
+                        codigo for codigo, rol in locs if rol == "ORIGEN"
+                    ]
                     destinos = [
                         codigo for codigo, rol in locs if rol == "DESTINO"
                     ]
-                    elegido = None
-                    if len(destinos) == 1:
-                        elegido = destinos[0]
-                    elif len(locs) == 1:
-                        elegido = locs[0][0]
 
-                    if elegido:
+                    origen = origen_actual
+                    destino = destino_actual
+                    if not origen and len(origenes) == 1:
+                        origen = origenes[0]
+                    if not destino and len(destinos) == 1:
+                        destino = destinos[0]
+                    elif not destino and len(locs) == 1:
+                        destino = locs[0][0]
+
+                    if origen or destino:
                         conn.execute(text(f"""
                             UPDATE {qprov}
-                               SET ubicacion_destino = :codigo
+                               SET ubicacion_origen = COALESCE(:origen, ubicacion_origen),
+                                   ubicacion_destino = COALESCE(:destino, ubicacion_destino)
                              WHERE id = :pid
-                        """), {"codigo": elegido, "pid": pid})
+                        """), {
+                            "origen": origen or None,
+                            "destino": destino or None,
+                            "pid": pid,
+                        })
 
     if "recibos" in tables:
         _add_column(
@@ -188,6 +204,10 @@ def run_migrations(engine, schema=None):
                 f"ON {_q(engine, schema, 'recibo_lineas')} (orden_compra_id)"
             ))
         if "proveedores" in tables:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_origen "
+                f"ON {_q(engine, schema, 'proveedores')} (ubicacion_origen)"
+            ))
             conn.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_proveedores_ubicacion_destino "
                 f"ON {_q(engine, schema, 'proveedores')} (ubicacion_destino)"

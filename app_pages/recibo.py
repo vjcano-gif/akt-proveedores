@@ -1,6 +1,8 @@
 """Recibo de mercancía: documento -> revisión -> match por línea con OC -> inventario."""
 import datetime as dt
 import hashlib
+import re
+from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -163,6 +165,41 @@ def _fecha_ocr(extr):
             return hoy_colombia
 
 
+def _normalizar_codigo_ubicacion(v):
+    return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
+
+
+def _canonizar_ubicacion_ocr(valor, codigos):
+    """Mapea OCR ruidoso al código WMS más probable, solo con alta confianza."""
+    raw = str(valor or "").strip().upper()
+    if not raw:
+        return "", 0.0
+    nraw = _normalizar_codigo_ubicacion(raw)
+    if not nraw:
+        return raw, 0.0
+
+    candidatos = []
+    for codigo in codigos:
+        nc = _normalizar_codigo_ubicacion(codigo)
+        if not nc:
+            continue
+        score = SequenceMatcher(None, nraw, nc).ratio()
+        # Premia contenido completo con ruido adicional al final/inicio.
+        if nc in nraw or nraw in nc:
+            score = max(score, min(len(nraw), len(nc)) / max(len(nraw), len(nc)))
+        candidatos.append((score, codigo))
+    if not candidatos:
+        return raw, 0.0
+    candidatos.sort(reverse=True)
+    best_score, best = candidatos[0]
+    second = candidatos[1][0] if len(candidatos) > 1 else 0.0
+
+    # Conservador: evita transformar una lectura ambigua en un código falso.
+    if best_score >= 0.82 and (best_score - second >= 0.04 or best_score >= 0.93):
+        return best, best_score
+    return raw, best_score
+
+
 def _enriquecer_extraccion(extr, proveedor_id):
     """Cruza OCR con maestros y OC para autocompletar líneas con datos reales."""
     if not extr or not extr.get("ocr_ok"):
@@ -172,6 +209,22 @@ def _enriquecer_extraccion(extr, proveedor_id):
         articulos = s.query(Articulo).filter(Articulo.activo.is_(True)).all()
         catalogo = {a.codigo: (a.descripcion or "") for a in articulos}
         completar_con_catalogo(extr, catalogo)
+
+        from core.models import Ubicacion
+        codigos_ubi = [
+            u.codigo for u in s.query(Ubicacion).filter(
+                Ubicacion.activo.is_(True),
+                Ubicacion.cerrada.is_(False)).all()
+        ]
+        for ln in extr.get("lineas", []) or []:
+            for campo in ("ubicacion_desde", "ubicacion_hasta"):
+                raw = str(ln.get(campo) or "").strip().upper()
+                if not raw:
+                    continue
+                canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
+                ln[f"{campo}_ocr_raw"] = raw
+                ln[f"{campo}_ocr_score"] = round(float(score), 3)
+                ln[campo] = canon
 
         # Si el documento trae OC, úsela como respaldo para líneas que el OCR
         # no pudo leer completamente. Nunca sobreescribe una cantidad OCR > 0.
@@ -295,27 +348,37 @@ def _diferencias_recepcion(df):
     return difs
 
 
-def _ubicacion_destino_proveedor(proveedor_id):
-    """Devuelve y valida la ubicación principal configurada del proveedor."""
+def _norm_ubi(v):
+    return " ".join(str(v or "").strip().upper().split())
+
+
+def _ubicaciones_proveedor(proveedor_id):
+    """Valida las dos ubicaciones maestras usadas por el BIN."""
     with session_scope() as s:
         p = s.get(Proveedor, proveedor_id)
         if not p:
-            return None, "Proveedor inexistente."
-        codigo = str(p.ubicacion_destino or "").strip().upper()
-        if not codigo:
-            return None, (
-                "El proveedor no tiene ubicación destino principal. "
-                "Configúrela en Maestros → Proveedores.")
-        from core.models import Ubicacion
-        u = s.query(Ubicacion).filter(Ubicacion.codigo == codigo).first()
-        if not u or not u.activo:
-            return None, f"La ubicación {codigo} no existe o está inactiva."
-        if u.cerrada:
-            return None, f"La ubicación {codigo} está cerrada."
-        if u.proveedor_id and u.proveedor_id != proveedor_id:
-            return None, f"La ubicación {codigo} está asignada a otro proveedor."
-        return codigo, None
+            return None, None, "Proveedor inexistente."
 
+        desde = _norm_ubi(p.ubicacion_origen)
+        hasta = _norm_ubi(p.ubicacion_destino)
+        if not desde or not hasta:
+            return desde or None, hasta or None, (
+                "El proveedor debe tener configuradas las ubicaciones DESDE y HASTA "
+                "en Maestros → Proveedores.")
+
+        from core.models import Ubicacion
+        u_desde = s.query(Ubicacion).filter(Ubicacion.codigo == desde).first()
+        u_hasta = s.query(Ubicacion).filter(Ubicacion.codigo == hasta).first()
+
+        if not u_desde or not u_desde.activo or u_desde.cerrada:
+            return desde, hasta, f"La ubicación DESDE {desde} no está disponible."
+        if not u_hasta or not u_hasta.activo or u_hasta.cerrada:
+            return desde, hasta, f"La ubicación HASTA {hasta} no está disponible."
+        if u_hasta.proveedor_id and u_hasta.proveedor_id != proveedor_id:
+            return desde, hasta, (
+                f"La ubicación HASTA {hasta} está asignada a otro proveedor.")
+
+        return desde, hasta, None
 
 def _registrar(user):
     if not puede(user, "recibo_registrar"):
@@ -326,12 +389,13 @@ def _registrar(user):
     if not pid:
         return
 
-    ubicacion_proveedor, error_ubicacion = _ubicacion_destino_proveedor(pid)
+    ubicacion_desde_maestro, ubicacion_hasta_maestro, error_ubicacion = (
+        _ubicaciones_proveedor(pid))
     if error_ubicacion:
         st.error(error_ubicacion)
         st.info(
-            "Para registrar recibos, cada proveedor debe tener una ubicación destino "
-            "principal definida desde su maestro.")
+            "Antes de recibir un BIN, configure DESDE y HASTA en "
+            "Maestros → Proveedores.")
         return
 
     soporte = st.file_uploader(
@@ -409,13 +473,7 @@ def _registrar(user):
     ref_sugerida = str(((extr or {}).get("referencia") or {}).get("valor") or "")
     fecha_sugerida = _fecha_ocr(extr)
 
-    ubicaciones_validas = ui.catalogo_ubicaciones(pid)
-    ubi_ocr = str(
-        (((extr or {}).get("ubicacion_destino") or {}).get("valor") or "")
-    ).strip().upper()
-    ubicacion_mismatch = bool(ubi_ocr and ubi_ocr != ubicacion_proveedor)
-
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     referencia = c1.text_input(
         "Referencia / No. documento",
         value=ref_sugerida,
@@ -425,27 +483,18 @@ def _registrar(user):
         "Fecha del documento",
         value=fecha_sugerida,
         key=f"rec_fecha_{suffix}")
-    ubic_dest = c3.text_input(
-        "Ubicación destino",
-        value=ubicacion_proveedor,
+    c3.text_input(
+        "DESDE esperado",
+        value=ubicacion_desde_maestro,
         disabled=True,
-        help="Ubicación principal asignada al proveedor en Maestros.",
-        key=f"rec_dest_{suffix}")
-
-    if ubi_ocr:
-        if ubicacion_mismatch:
-            st.error(
-                f"El documento indica destino **{ubi_ocr}**, pero el proveedor tiene "
-                f"asignada **{ubicacion_proveedor}**. No se permitirá crear el recibo "
-                "hasta corregir la asignación o validar el documento.")
-        else:
-            st.caption(
-                f"Ubicación del documento validada contra el proveedor: "
-                f"**{ubicacion_proveedor}**.")
-    else:
-        st.caption(
-            f"Destino asignado automáticamente por proveedor: "
-            f"**{ubicacion_proveedor}**.")
+        help="Maestro del proveedor. Si el BIN difiere, genera alerta.",
+        key=f"rec_desde_maestro_{suffix}")
+    ubic_dest = c4.text_input(
+        "HASTA esperado",
+        value=ubicacion_hasta_maestro,
+        disabled=True,
+        help="Maestro del proveedor. Si el BIN difiere, bloquea el recibo.",
+        key=f"rec_hasta_maestro_{suffix}")
 
     c1, c2 = st.columns([1, 2])
     reproceso = c1.checkbox(
@@ -465,6 +514,7 @@ def _registrar(user):
 
     lineas_df = None
     recepcion_estado = None
+    bloqueo_hasta = False
     if modo == "Cargue masivo":
         ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
@@ -479,29 +529,21 @@ def _registrar(user):
                 "El OCR leyó el documento, pero no pudo identificar todas las líneas. "
                 "Agregue o corrija las referencias en la tabla antes de confirmar la recepción.")
 
-        ubi_desde_ocr = str(
-            (((extr or {}).get("ubicacion_origen") or {}).get("valor") or "")
-        ).strip().upper()
-        ubi_desde = next(
-            (u for u in ubicaciones_validas if str(u).upper() == ubi_desde_ocr), "")
-
         base = pd.DataFrame(lineas or [{
             "articulo": "", "descripcion": "", "cantidad_documento": 0.0,
             "cantidad_fisica": 0.0, "lote": "", "serial": "",
-            "ubicacion_desde": ubi_desde, "ubicacion_hasta": ubic_dest,
+            "ubicacion_desde": "", "ubicacion_hasta": "",
         }])
 
-        for col, default in (
-            ("lote", ""), ("serial", ""),
-            ("ubicacion_desde", ubi_desde),
-            ("ubicacion_hasta", ubic_dest),
-        ):
+        for col in ("lote", "serial", "ubicacion_desde", "ubicacion_hasta"):
             if col not in base.columns:
-                base[col] = default
-            elif default:
-                base[col] = base[col].replace("", default)
+                base[col] = ""
 
-        base = base.drop(columns=["confianza", "fuente"], errors="ignore")
+        base = base.drop(columns=[
+            "confianza", "fuente",
+            "ubicacion_desde_ocr_raw", "ubicacion_desde_ocr_score",
+            "ubicacion_hasta_ocr_raw", "ubicacion_hasta_ocr_score",
+        ], errors="ignore")
 
         estado_key = f"rec_estado_{suffix}"
         df_key = f"rec_df_{suffix}"
@@ -514,14 +556,11 @@ def _registrar(user):
         if df_key not in st.session_state:
             st.session_state[df_key] = base.copy()
 
-        # Mantiene la ubicación elegida en filas que aún no tenían destino.
+        # Conserva exactamente DESDE/HASTA leídos del documento.
         stored = st.session_state[df_key].copy()
-        if "ubicacion_hasta" not in stored.columns:
-            stored["ubicacion_hasta"] = ubic_dest
-        elif ubic_dest:
-            stored["ubicacion_hasta"] = stored["ubicacion_hasta"].fillna("")
-            stored.loc[stored["ubicacion_hasta"].astype(str).str.strip() == "",
-                       "ubicacion_hasta"] = ubic_dest
+        for col in ("ubicacion_desde", "ubicacion_hasta"):
+            if col not in stored.columns:
+                stored[col] = ""
         st.session_state[df_key] = stored
 
         recepcion_estado = st.session_state[estado_key]
@@ -540,15 +579,16 @@ def _registrar(user):
 
         disabled_cols = []
         if recepcion_estado == "PENDIENTE":
-            disabled_cols = ["cantidad_fisica", "ubicacion_hasta"]
+            disabled_cols = ["cantidad_fisica"]
         elif recepcion_estado == "COMPLETO":
             disabled_cols = [
                 "articulo", "descripcion", "cantidad_documento", "cantidad_fisica",
-                "ubicacion_hasta"
+                "ubicacion_desde", "ubicacion_hasta"
             ]
         elif recepcion_estado == "DISCREPANCIA":
             disabled_cols = [
-                "articulo", "descripcion", "cantidad_documento", "ubicacion_hasta"
+                "articulo", "descripcion", "cantidad_documento",
+                "ubicacion_desde", "ubicacion_hasta"
             ]
 
         editor_key = (
@@ -567,8 +607,46 @@ def _registrar(user):
                     "Cantidad documento", min_value=0.0, step=1.0),
                 "cantidad_fisica": st.column_config.NumberColumn(
                     "Cantidad física real", min_value=0.0, step=1.0),
+                "ubicacion_desde": st.column_config.TextColumn("DESDE"),
+                "ubicacion_hasta": st.column_config.TextColumn("HASTA"),
             })
         st.session_state[df_key] = lineas_df.copy()
+
+        # Validación del BIN contra el maestro del proveedor.
+        if origen == "BIN_A_BIN":
+            alertas_desde = []
+            errores_hasta = []
+            for _, row in lineas_df.iterrows():
+                art = str(row.get("articulo") or "").strip()
+                if not art:
+                    continue
+                desde_doc = _norm_ubi(row.get("ubicacion_desde"))
+                hasta_doc = _norm_ubi(row.get("ubicacion_hasta"))
+
+                if not desde_doc:
+                    alertas_desde.append(f"{art}: DESDE no leído")
+                elif desde_doc != ubicacion_desde_maestro:
+                    alertas_desde.append(
+                        f"{art}: {desde_doc} ≠ {ubicacion_desde_maestro}")
+
+                if not hasta_doc:
+                    errores_hasta.append(f"{art}: HASTA no leído")
+                elif hasta_doc != ubicacion_hasta_maestro:
+                    errores_hasta.append(
+                        f"{art}: {hasta_doc} ≠ {ubicacion_hasta_maestro}")
+
+            if alertas_desde:
+                st.warning(
+                    "DESDE difiere del maestro (alerta no bloqueante): "
+                    + " | ".join(alertas_desde[:8])
+                    + (" …" if len(alertas_desde) > 8 else ""))
+            if errores_hasta:
+                bloqueo_hasta = True
+                st.error(
+                    "HASTA no coincide con la ubicación asignada al proveedor. "
+                    "El recibo queda bloqueado: "
+                    + " | ".join(errores_hasta[:8])
+                    + (" …" if len(errores_hasta) > 8 else ""))
 
         faltan_qty = _filas_sin_cantidad_documento(lineas_df)
         if faltan_qty:
@@ -583,7 +661,7 @@ def _registrar(user):
             "✓ Marcar recibo satisfactorio y completo",
             type="primary",
             use_container_width=True,
-            disabled=bool(faltan_qty) or lineas_df.empty,
+            disabled=bool(faltan_qty) or lineas_df.empty or bloqueo_hasta,
             key=f"btn_completo_{suffix}",
         ):
             nuevo = lineas_df.copy()
@@ -597,7 +675,7 @@ def _registrar(user):
         if b2.button(
             "⚠ Registrar discrepancias",
             use_container_width=True,
-            disabled=lineas_df.empty,
+            disabled=lineas_df.empty or bloqueo_hasta,
             key=f"btn_disc_{suffix}",
         ):
             nuevo = lineas_df.copy()
@@ -647,12 +725,12 @@ def _registrar(user):
         base = pd.DataFrame([{
             "articulo": "", "descripcion": "", "cantidad_documento": 0.0,
             "cantidad_fisica": 0.0, "lote": "", "serial": "",
-            "ubicacion_desde": "", "ubicacion_hasta": ubic_dest,
+            "ubicacion_desde": ubicacion_desde_maestro,
+            "ubicacion_hasta": ubicacion_hasta_maestro,
         }])
         lineas_df = st.data_editor(
             base, num_rows="dynamic", use_container_width=True,
-            key=f"ed_rec_manual_{suffix}",
-            disabled=["ubicacion_hasta"])
+            key=f"ed_rec_manual_{suffix}")
 
     if lineas_df is not None and not lineas_df.empty:
         st.caption(
@@ -666,10 +744,10 @@ def _registrar(user):
         crear_label = "Crear recibo con discrepancias"
 
     if st.button(crear_label, type="primary", use_container_width=True):
-        if ubicacion_mismatch:
+        if origen == "BIN_A_BIN" and bloqueo_hasta:
             ui.err(
-                "La ubicación destino del documento no coincide con la ubicación "
-                "asignada al proveedor.")
+                "No se puede crear el recibo: HASTA debe coincidir con la "
+                "ubicación HASTA asignada al proveedor.")
             return
         if lineas_df is None or lineas_df.empty:
             ui.err("Debe capturar al menos una línea.")
@@ -710,7 +788,7 @@ def _registrar(user):
                 lote=str(row.get("lote") or ""),
                 serial=str(row.get("serial") or ""),
                 ubicacion_desde=str(row.get("ubicacion_desde") or ""),
-                ubicacion_hasta=ubicacion_proveedor))
+                ubicacion_hasta=str(row.get("ubicacion_hasta") or "")))
         if not lineas:
             ui.err("Ninguna línea tiene artículo.")
             return
@@ -725,15 +803,13 @@ def _registrar(user):
                 r = crear_recibo(
                     s, proveedor_id=pid, origen=origen, lineas=lineas,
                     referencia=referencia or None, usuario=user["email"],
-                    es_reproceso=reproceso, ubicacion_destino=ubicacion_proveedor,
+                    es_reproceso=reproceso, ubicacion_destino=ubicacion_hasta_maestro,
                     archivo_id=arch_id, fecha_documento=fecha_doc,
                     observaciones=obs or None, proveedor_origen_id=prov_origen_id,
                     factura_origen=referencia if origen == "FACTURA" else None)
                 trz, rid = r.documento.trz, r.id
 
                 alertas = validar_bin_a_bin(s, r, pid) if origen == "BIN_A_BIN" else []
-                if alertas:
-                    raise ReglaNegocio(" | ".join(alertas))
 
                 if origen == "REGISTRO":
                     confirmar_recibo_simple(s, rid, user["email"])
@@ -744,6 +820,8 @@ def _registrar(user):
                     msg = "Factura creada en BORRADOR. El proveedor debe sellarla antes del match."
 
             ui.ok(f"{msg} Trazabilidad: **{trz}**")
+            for alerta in alertas:
+                st.warning(alerta)
         except ReglaNegocio as e:
             ui.err(str(e))
 

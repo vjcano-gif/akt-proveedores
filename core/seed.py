@@ -62,10 +62,18 @@ def sembrar(force=False, con_demo=None) -> dict:
                 cod = (r.get("codigo") or "").strip()
                 if not cod or s.query(Proveedor).filter_by(codigo=cod).first():
                     continue
-                s.add(Proveedor(codigo=cod, nombre=(r.get("nombre") or cod).strip(),
-                                ubicacion_destino=(r.get("ubicacion_destino") or "").strip().upper() or None,
-                                tolerancia_averia_pct=float(r.get("tolerancia_averia_pct") or 1.0),
-                                activo=True))
+                s.add(Proveedor(
+                    codigo=cod,
+                    nombre=(r.get("nombre") or cod).strip(),
+                    ubicacion_origen=(
+                        r.get("ubicacion_desde") or r.get("ubicacion_origen") or ""
+                    ).strip().upper() or None,
+                    ubicacion_destino=(
+                        r.get("ubicacion_hasta") or r.get("ubicacion_destino") or ""
+                    ).strip().upper() or None,
+                    tolerancia_averia_pct=float(
+                        r.get("tolerancia_averia_pct") or 1.0),
+                    activo=True))
                 n += 1
             s.flush()
             res["proveedores"] = n
@@ -109,6 +117,8 @@ def sembrar(force=False, con_demo=None) -> dict:
                               inspeccion=_b(r.get("inspeccion")),
                               restringida=_b(r.get("restringida")), activo=True)
                 s.add(u)
+                if prov and not prov.ubicacion_origen and str(u.rol or "").upper() == "ORIGEN":
+                    prov.ubicacion_origen = cod
                 if prov and not prov.ubicacion_destino and str(u.rol or "").upper() == "DESTINO":
                     prov.ubicacion_destino = cod
                 n += 1
