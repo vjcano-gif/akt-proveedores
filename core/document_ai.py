@@ -250,6 +250,13 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
         r"(?:fecha|date)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         r"\b(\d{4}-\d{2}-\d{2})\b",
     ], t)
+    ubicacion_origen = _primero([
+        r"(?:ubicaci[oó]n\s+origen|desde)\s*[:#-]?\s*([A-Z0-9._/-]{2,40})",
+    ], t)
+    ubicacion_destino = _primero([
+        r"(?:ubicaci[oó]n\s+destino|destino|hasta)\s*[:#-]?\s*([A-Z0-9._/-]{2,40})",
+    ], t)
+    reproceso = bool(re.search(r"\b(REPROCESO|GARANT[IÍ]A|RETRABAJO)\b", t, re.I))
 
     lineas = []
     # Acepta líneas OCR con espacios variables. La cantidad debe quedar al final.
@@ -279,6 +286,11 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
         "orden_compra": asdict(Campo(oc, confianza_texto if oc else 0.0, "texto")),
         "nit": asdict(Campo(nit, confianza_texto if nit else 0.0, "texto")),
         "fecha": asdict(Campo(fecha, confianza_texto if fecha else 0.0, "texto")),
+        "ubicacion_origen": asdict(Campo(
+            ubicacion_origen, confianza_texto if ubicacion_origen else 0.0, "texto")),
+        "ubicacion_destino": asdict(Campo(
+            ubicacion_destino, confianza_texto if ubicacion_destino else 0.0, "texto")),
+        "es_reproceso_sugerido": reproceso,
         "lineas": lineas,
         "texto": t,
     }
