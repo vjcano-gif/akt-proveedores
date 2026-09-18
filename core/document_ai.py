@@ -284,6 +284,132 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
     }
 
 
+
+def inferir_origen(texto: str) -> str | None:
+    """Sugiere el tipo documental a partir del texto OCR."""
+    t = (texto or "").upper()
+    if re.search(r"\bBIN(?:\s+A\s+BIN)?\b", t):
+        return "BIN_A_BIN"
+    if re.search(r"\b(FACTURA|FACTURACION|F[VE]-?\d)\b", t):
+        return "FACTURA"
+    return None
+
+
+def _cantidad_probable(resto: str):
+    """Busca una cantidad probable en el resto de una línea de artículo."""
+    if not resto:
+        return None
+
+    # Prioridad alta: valores explícitamente asociados a cantidad/unidades.
+    m = re.search(
+        r"(?:CANT(?:IDAD)?|CTD|QTY|UNID(?:ADES)?|UND)\s*[:#-]?\s*"
+        r"([0-9]+(?:[.,][0-9]+)?)",
+        resto, re.I)
+    if m:
+        return _num(m.group(1))
+
+    # Fallback: números aislados; favorece enteros razonables y evita valores monetarios.
+    candidatos = []
+    for m in re.finditer(r"(?<![A-Z0-9])([0-9]+(?:[.,][0-9]+)?)(?![A-Z0-9])", resto, re.I):
+        raw = m.group(1)
+        val = _num(raw)
+        if val is None or val <= 0:
+            continue
+        contexto = resto[max(0, m.start()-4):m.end()+4]
+        score = 0
+        if val <= 10000:
+            score += 2
+        if float(val).is_integer():
+            score += 1
+        if "$" in contexto:
+            score -= 4
+        if any(x in raw for x in (".", ",")) and val > 1000:
+            score -= 2
+        candidatos.append((score, -m.start(), val))
+
+    if not candidatos:
+        return None
+    candidatos.sort(reverse=True)
+    return candidatos[0][2]
+
+
+def lineas_desde_catalogo(texto: str, catalogo: dict[str, str],
+                          confianza_texto: float = 0.8) -> list[dict]:
+    """Detecta códigos reales del maestro dentro del OCR y propone cantidad."""
+    if not texto or not catalogo:
+        return []
+
+    mapa = {str(k).strip().upper(): (str(k).strip(), v or "")
+            for k, v in catalogo.items() if str(k).strip()}
+    encontradas = {}
+
+    for linea in texto.splitlines():
+        limpio = " ".join(linea.split())
+        if not limpio:
+            continue
+        upper = limpio.upper()
+        tokens = re.findall(r"[A-Z0-9][A-Z0-9._/-]{2,}", upper)
+        for token in tokens:
+            if token not in mapa:
+                continue
+            codigo, descripcion = mapa[token]
+            pos = upper.find(token)
+            resto = limpio[pos + len(token):] if pos >= 0 else ""
+            cantidad = _cantidad_probable(resto)
+            actual = encontradas.get(codigo)
+            propuesta = {
+                "articulo": codigo,
+                "descripcion": descripcion,
+                "cantidad_documento": float(cantidad or 0),
+                "cantidad_fisica": float(cantidad or 0),
+                "confianza": round(min(confianza_texto, 0.92), 3),
+                "fuente": "OCR+MAESTRO",
+            }
+            # Conserva la propuesta que sí logró identificar cantidad.
+            if actual is None or (not actual["cantidad_documento"] and cantidad):
+                encontradas[codigo] = propuesta
+
+    return list(encontradas.values())
+
+
+def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
+    """Combina líneas heurísticas con códigos confirmados por el maestro."""
+    if not resultado:
+        return resultado
+    cf = float(resultado.get("confianza_texto") or 0.0)
+    existentes = {}
+    for ln in resultado.get("lineas", []) or []:
+        cod = str(ln.get("articulo") or "").strip()
+        if not cod:
+            continue
+        key = cod.upper()
+        if key in {str(k).upper() for k in catalogo}:
+            # Usa la descripción oficial del maestro si existe.
+            oficial = next((v for k, v in catalogo.items()
+                            if str(k).upper() == key), "")
+            if oficial:
+                ln["descripcion"] = oficial
+            ln.setdefault("fuente", "OCR")
+        existentes[key] = ln
+
+    for ln in lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf):
+        key = ln["articulo"].upper()
+        if key not in existentes:
+            resultado.setdefault("lineas", []).append(ln)
+            existentes[key] = ln
+        elif not float(existentes[key].get("cantidad_documento") or 0) and ln["cantidad_documento"]:
+            existentes[key]["cantidad_documento"] = ln["cantidad_documento"]
+            existentes[key]["cantidad_fisica"] = ln["cantidad_fisica"]
+            existentes[key]["fuente"] = "OCR+MAESTRO"
+
+    resultado["requiere_revision"] = (
+        cf < 0.85 or not resultado.get("lineas")
+        or any(float(x.get("cantidad_documento") or 0) <= 0
+               for x in resultado.get("lineas", []))
+    )
+    return resultado
+
+
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
     texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
     out = estructurar(texto, cf)
@@ -291,5 +417,6 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     out["confianza_texto"] = round(cf, 3)
     out["diagnostico"] = diagnostico
     out["ocr_ok"] = bool(texto.strip())
+    out["origen_sugerido"] = inferir_origen(texto)
     out["requiere_revision"] = cf < 0.85 or not out["lineas"]
     return out
