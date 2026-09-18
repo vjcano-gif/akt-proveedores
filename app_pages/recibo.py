@@ -1,6 +1,7 @@
 """Recibo de mercancía: documento -> revisión -> match por línea con OC -> inventario."""
 import datetime as dt
 import hashlib
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -145,17 +146,21 @@ def _nit_normalizado(valor):
 
 def _fecha_ocr(extr):
     raw = str(((extr or {}).get("fecha") or {}).get("valor") or "").strip()
+    hoy_colombia = dt.datetime.now(ZoneInfo("America/Bogota")).date()
     if not raw:
-        return dt.date.today()
+        return hoy_colombia
     try:
-        ts = pd.to_datetime(raw, dayfirst=True, errors="raise")
+        if len(raw) >= 10 and raw[:4].isdigit() and raw[4] in "-/":
+            ts = pd.to_datetime(raw, yearfirst=True, errors="raise")
+        else:
+            ts = pd.to_datetime(raw, dayfirst=True, errors="raise")
         return ts.date()
     except Exception:
         try:
             ts = pd.to_datetime(raw, errors="raise")
             return ts.date()
         except Exception:
-            return dt.date.today()
+            return hoy_colombia
 
 
 def _enriquecer_extraccion(extr, proveedor_id):
