@@ -647,12 +647,12 @@ def _registrar(user):
 
     modo_documento = st.radio(
         "Cómo desea ingresar el documento",
-        ["📁 Cargar archivo", "📷 Tomar foto"],
+        ["📷 Tomar foto", "📁 Cargar archivo"],
         horizontal=True,
         key="rec_modo_documento",
         help=(
-            "Puede cargar un PDF/imagen existente o tomar una foto directamente "
-            "desde la cámara del dispositivo."
+            "Puede tomar una foto directamente desde la cámara del dispositivo "
+            "o cargar un PDF/imagen existente."
         ),
     )
 
