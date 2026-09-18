@@ -295,6 +295,28 @@ def _diferencias_recepcion(df):
     return difs
 
 
+def _ubicacion_destino_proveedor(proveedor_id):
+    """Devuelve y valida la ubicación principal configurada del proveedor."""
+    with session_scope() as s:
+        p = s.get(Proveedor, proveedor_id)
+        if not p:
+            return None, "Proveedor inexistente."
+        codigo = str(p.ubicacion_destino or "").strip().upper()
+        if not codigo:
+            return None, (
+                "El proveedor no tiene ubicación destino principal. "
+                "Configúrela en Maestros → Proveedores.")
+        from core.models import Ubicacion
+        u = s.query(Ubicacion).filter(Ubicacion.codigo == codigo).first()
+        if not u or not u.activo:
+            return None, f"La ubicación {codigo} no existe o está inactiva."
+        if u.cerrada:
+            return None, f"La ubicación {codigo} está cerrada."
+        if u.proveedor_id and u.proveedor_id != proveedor_id:
+            return None, f"La ubicación {codigo} está asignada a otro proveedor."
+        return codigo, None
+
+
 def _registrar(user):
     if not puede(user, "recibo_registrar"):
         st.warning("Su rol no registra recibos.")
@@ -302,6 +324,14 @@ def _registrar(user):
 
     pid = ui.selector_proveedor(user, key="rec_prov")
     if not pid:
+        return
+
+    ubicacion_proveedor, error_ubicacion = _ubicacion_destino_proveedor(pid)
+    if error_ubicacion:
+        st.error(error_ubicacion)
+        st.info(
+            "Para registrar recibos, cada proveedor debe tener una ubicación destino "
+            "principal definida desde su maestro.")
         return
 
     soporte = st.file_uploader(
@@ -380,13 +410,10 @@ def _registrar(user):
     fecha_sugerida = _fecha_ocr(extr)
 
     ubicaciones_validas = ui.catalogo_ubicaciones(pid)
-    ubicaciones = [""] + ubicaciones_validas
     ubi_ocr = str(
         (((extr or {}).get("ubicacion_destino") or {}).get("valor") or "")
     ).strip().upper()
-    ubi_default = next(
-        (u for u in ubicaciones_validas if str(u).upper() == ubi_ocr), "")
-    idx_ubi = ubicaciones.index(ubi_default) if ubi_default in ubicaciones else 0
+    ubicacion_mismatch = bool(ubi_ocr and ubi_ocr != ubicacion_proveedor)
 
     c1, c2, c3 = st.columns(3)
     referencia = c1.text_input(
@@ -398,11 +425,27 @@ def _registrar(user):
         "Fecha del documento",
         value=fecha_sugerida,
         key=f"rec_fecha_{suffix}")
-    ubic_dest = c3.selectbox(
+    ubic_dest = c3.text_input(
         "Ubicación destino",
-        ubicaciones,
-        index=idx_ubi,
+        value=ubicacion_proveedor,
+        disabled=True,
+        help="Ubicación principal asignada al proveedor en Maestros.",
         key=f"rec_dest_{suffix}")
+
+    if ubi_ocr:
+        if ubicacion_mismatch:
+            st.error(
+                f"El documento indica destino **{ubi_ocr}**, pero el proveedor tiene "
+                f"asignada **{ubicacion_proveedor}**. No se permitirá crear el recibo "
+                "hasta corregir la asignación o validar el documento.")
+        else:
+            st.caption(
+                f"Ubicación del documento validada contra el proveedor: "
+                f"**{ubicacion_proveedor}**.")
+    else:
+        st.caption(
+            f"Destino asignado automáticamente por proveedor: "
+            f"**{ubicacion_proveedor}**.")
 
     c1, c2 = st.columns([1, 2])
     reproceso = c1.checkbox(
@@ -497,13 +540,16 @@ def _registrar(user):
 
         disabled_cols = []
         if recepcion_estado == "PENDIENTE":
-            disabled_cols = ["cantidad_fisica"]
+            disabled_cols = ["cantidad_fisica", "ubicacion_hasta"]
         elif recepcion_estado == "COMPLETO":
             disabled_cols = [
-                "articulo", "descripcion", "cantidad_documento", "cantidad_fisica"
+                "articulo", "descripcion", "cantidad_documento", "cantidad_fisica",
+                "ubicacion_hasta"
             ]
         elif recepcion_estado == "DISCREPANCIA":
-            disabled_cols = ["articulo", "descripcion", "cantidad_documento"]
+            disabled_cols = [
+                "articulo", "descripcion", "cantidad_documento", "ubicacion_hasta"
+            ]
 
         editor_key = (
             f"ed_rec_ai_{suffix}_{st.session_state[version_key]}"
@@ -605,7 +651,8 @@ def _registrar(user):
         }])
         lineas_df = st.data_editor(
             base, num_rows="dynamic", use_container_width=True,
-            key=f"ed_rec_manual_{suffix}")
+            key=f"ed_rec_manual_{suffix}",
+            disabled=["ubicacion_hasta"])
 
     if lineas_df is not None and not lineas_df.empty:
         st.caption(
@@ -619,6 +666,11 @@ def _registrar(user):
         crear_label = "Crear recibo con discrepancias"
 
     if st.button(crear_label, type="primary", use_container_width=True):
+        if ubicacion_mismatch:
+            ui.err(
+                "La ubicación destino del documento no coincide con la ubicación "
+                "asignada al proveedor.")
+            return
         if lineas_df is None or lineas_df.empty:
             ui.err("Debe capturar al menos una línea.")
             return
@@ -658,7 +710,7 @@ def _registrar(user):
                 lote=str(row.get("lote") or ""),
                 serial=str(row.get("serial") or ""),
                 ubicacion_desde=str(row.get("ubicacion_desde") or ""),
-                ubicacion_hasta=str(row.get("ubicacion_hasta") or ubic_dest or "")))
+                ubicacion_hasta=ubicacion_proveedor))
         if not lineas:
             ui.err("Ninguna línea tiene artículo.")
             return
@@ -673,7 +725,7 @@ def _registrar(user):
                 r = crear_recibo(
                     s, proveedor_id=pid, origen=origen, lineas=lineas,
                     referencia=referencia or None, usuario=user["email"],
-                    es_reproceso=reproceso, ubicacion_destino=ubic_dest,
+                    es_reproceso=reproceso, ubicacion_destino=ubicacion_proveedor,
                     archivo_id=arch_id, fecha_documento=fecha_doc,
                     observaciones=obs or None, proveedor_origen_id=prov_origen_id,
                     factura_origen=referencia if origen == "FACTURA" else None)
