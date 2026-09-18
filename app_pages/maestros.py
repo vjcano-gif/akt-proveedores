@@ -12,8 +12,8 @@ from core.db import session_scope
 from core.models import (Articulo, Bom, Inventario, OrdenCompra, Proveedor,
                          Ubicacion, Usuario)
 from core.services import (
-    campos_faltantes_proveedor, dependencias_proveedor,
-    eliminar_proveedor_seguro,
+    asegurar_ubicacion_ingresada, campos_faltantes_proveedor,
+    dependencias_proveedor, eliminar_proveedor_seguro,
 )
 
 
