@@ -59,6 +59,51 @@ def proveedor_listo_para_activar(**kwargs) -> bool:
     return not campos_faltantes_proveedor(**kwargs)
 
 
+def asegurar_ubicacion_ingresada(s, codigo: str, *, rol: str | None = None,
+                                 proveedor_id: int | None = None) -> Ubicacion:
+    """Acepta DESDE/HASTA escritos manualmente y los incorpora al maestro.
+
+    Si la ubicación ya existe debe estar activa y abierta. Si es nueva, se crea
+    automáticamente. Para HASTA se puede asignar al proveedor.
+    """
+    cod = str(codigo or "").strip().upper()
+    if not cod:
+        raise ReglaNegocio("La ubicación no puede estar vacía.")
+
+    u = s.query(Ubicacion).filter(Ubicacion.codigo == cod).first()
+    if u is None:
+        u = Ubicacion(
+            codigo=cod,
+            un="MOTOS",
+            rol=(rol or None),
+            proveedor_id=(proveedor_id if (rol or "").upper() == "DESTINO" else None),
+            cerrada=False,
+            inspeccion=False,
+            restringida=False,
+            activo=True,
+        )
+        s.add(u)
+        s.flush()
+        return u
+
+    if not u.activo:
+        raise ReglaNegocio(f"La ubicación {cod} existe pero está inactiva.")
+    if u.cerrada:
+        raise ReglaNegocio(f"La ubicación {cod} existe pero está cerrada.")
+
+    if (rol or "").upper() == "DESTINO":
+        if u.proveedor_id and proveedor_id and u.proveedor_id != proveedor_id:
+            raise ReglaNegocio(
+                f"La ubicación HASTA {cod} ya está asignada a otro proveedor.")
+        if proveedor_id:
+            u.proveedor_id = proveedor_id
+        u.rol = "DESTINO"
+    elif not u.rol and rol:
+        u.rol = str(rol).upper()
+
+    return u
+
+
 _PROV_DEP_LABELS = {
     "usuarios": "usuarios",
     "ordenes_compra": "órdenes de compra",
