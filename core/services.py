@@ -388,7 +388,7 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
             cantidad_documento=qdoc, cantidad_fisica=qfis,
             lote=ln.lote or "", serial=ln.serial or "",
             ubicacion_desde=(ln.ubicacion_desde or "").upper(),
-            ubicacion_hasta=(ln.ubicacion_hasta or ubicacion_destino or "").upper(),
+            ubicacion_hasta=ubicacion_destino.upper(),
             estado_match="PENDIENTE" if origen in ("BIN_A_BIN", "FACTURA") else None))
         creadas += 1
     if not creadas:
