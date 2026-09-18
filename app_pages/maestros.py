@@ -296,13 +296,28 @@ def _ubicaciones(user):
                             "Proveedor asignado", options=opciones)})
     if st.button("Guardar cambios", type="primary", key="sv_ubi"):
         inv = {v: k for k, v in provs.items()}
-        n = 0
+        n, errores = 0, []
         with session_scope() as s:
             for _, r in ed.iterrows():
                 u = s.get(Ubicacion, int(r["id"]))
                 if not u:
                     continue
-                u.proveedor_id = inv.get(r["proveedor"])
+                nuevo_pid = inv.get(r["proveedor"])
+                usa_como_destino = s.query(Proveedor).filter(
+                    Proveedor.ubicacion_destino_id == u.id).first()
+                if usa_como_destino:
+                    if nuevo_pid != usa_como_destino.id:
+                        errores.append(
+                            f"{u.codigo}: es la ubicación destino de "
+                            f"{usa_como_destino.nombre}; cámbiela primero en "
+                            "Maestros → Proveedores.")
+                        continue
+                    if bool(r["cerrada"]) or not bool(r["activo"]):
+                        errores.append(
+                            f"{u.codigo}: no puede cerrarse/desactivarse porque es "
+                            f"la ubicación destino de {usa_como_destino.nombre}.")
+                        continue
+                u.proveedor_id = nuevo_pid
                 u.cerrada = bool(r["cerrada"])
                 u.inspeccion = bool(r["inspeccion"])
                 u.restringida = bool(r["restringida"])
@@ -310,7 +325,10 @@ def _ubicaciones(user):
                 u.rol = r["rol"]
                 n += 1
         ui.limpiar_cache()
-        ui.ok(f"{n} ubicaciones actualizadas.")
+        if n:
+            ui.ok(f"{n} ubicaciones actualizadas.")
+        for e in errores:
+            st.warning(e, icon="⚠️")
 
 
 # ----------------------------------------------------------------- proveedores
