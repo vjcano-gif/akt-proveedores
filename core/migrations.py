@@ -101,19 +101,25 @@ def run_migrations(engine):
                 if engine.dialect.name == "postgresql":
                     conn.execute(text("""
                         UPDATE proveedores p
-                           SET ubicacion_destino = u.codigo
-                          FROM LATERAL (
-                               SELECT codigo
-                                 FROM ubicaciones
-                                WHERE proveedor_id = p.id
-                                  AND activo = TRUE
-                                  AND cerrada = FALSE
-                                ORDER BY CASE WHEN UPPER(COALESCE(rol,'')) = 'DESTINO'
+                           SET ubicacion_destino = (
+                               SELECT u.codigo
+                                 FROM ubicaciones u
+                                WHERE u.proveedor_id = p.id
+                                  AND u.activo = TRUE
+                                  AND u.cerrada = FALSE
+                                ORDER BY CASE WHEN UPPER(COALESCE(u.rol,'')) = 'DESTINO'
                                               THEN 0 ELSE 1 END,
-                                         id
+                                         u.id
                                 LIMIT 1
-                          ) u
+                           )
                          WHERE (p.ubicacion_destino IS NULL OR p.ubicacion_destino = '')
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM ubicaciones u2
+                                WHERE u2.proveedor_id = p.id
+                                  AND u2.activo = TRUE
+                                  AND u2.cerrada = FALSE
+                           )
                     """))
                 else:
                     conn.execute(text("""
