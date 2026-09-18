@@ -1258,6 +1258,17 @@ def _registrar(user):
                     msg = "Factura creada en BORRADOR. El proveedor debe sellarla antes del match."
 
             ui.ok(f"{msg} Trazabilidad: **{trz}**")
+            if arch_id:
+                st.info(
+                    "El soporte original quedó **archivado y vinculado a esta "
+                    "trazabilidad**. Puede consultarlo o descargarlo después en "
+                    "**Recibo → Documentos** o **Inventario → Trazabilidad**."
+                )
+            else:
+                st.caption(
+                    "Registro creado sin soporte adjunto. La cabecera, líneas, "
+                    "cantidades, usuario y trazabilidad sí quedan guardados en el histórico."
+                )
             for alerta in alertas:
                 st.warning(alerta)
         except ReglaNegocio as e:
