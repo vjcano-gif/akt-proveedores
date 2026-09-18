@@ -627,7 +627,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "camera1080-qty-v13"
+    extractor_version = "bin-photo-strict-v14"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -741,46 +741,48 @@ def _registrar(user):
 
     modo_documento = st.radio(
         "Cómo desea ingresar el documento",
-        ["📷 Tomar foto", "📁 Cargar archivo"],
+        [
+            "📸 Foto máxima calidad",
+            "📷 Cámara rápida 1080p",
+            "📁 Cargar PDF / imagen",
+        ],
         horizontal=True,
         key="rec_modo_documento",
         help=(
-            "Puede tomar una foto directamente desde la cámara del dispositivo "
-            "o cargar un PDF/imagen existente."
+            "Para documentos con texto pequeño use «Foto máxima calidad»: "
+            "en el celular toque el selector y elija Cámara para conservar la "
+            "resolución original que entregue la cámara nativa."
         ),
     )
 
     soporte = None
-    if modo_documento == "📷 Tomar foto":
+    if modo_documento == "📸 Foto máxima calidad":
+        st.caption(
+            "**Recomendado para BIN.** En celular, toque el selector de imagen "
+            "y elija **Cámara**. Esta ruta no impone el límite de 1080p del "
+            "widget de cámara integrado y conserva el archivo que entregue el "
+            "sistema operativo."
+        )
+        soporte = st.file_uploader(
+            "Tomar / seleccionar foto en calidad original",
+            type=["png", "jpg", "jpeg"],
+            key="rec_foto_full",
+            help=(
+                "Use la cámara nativa del celular y evite capturas de pantalla. "
+                "Mantenga el documento completo, recto y con buena luz."
+            ),
+        )
+    elif modo_documento == "📷 Cámara rápida 1080p":
         soporte = st.camera_input(
             "Tomar foto del documento",
             key="rec_camara",
             resolution="1080p",
             width="stretch",
             help=(
-                "La cámara solicita 1080p, la máxima resolución admitida por "
-                "Streamlit. Procure encuadrar el documento completo, de frente, "
-                "con buena iluminación y sin reflejos."
+                "Streamlit permite solicitar hasta 1080p en este widget. "
+                "Para más detalle use «Foto máxima calidad»."
             ),
         )
-        if soporte is not None:
-            try:
-                from PIL import Image
-                import io
-                _img = Image.open(io.BytesIO(soporte.getvalue()))
-                st.caption(
-                    f"Foto capturada: **{_img.width} × {_img.height} px**. "
-                    "Se procesará con OCR reforzado para cantidades."
-                )
-                if min(_img.width, _img.height) < 900:
-                    st.warning(
-                        "La cámara del navegador entregó una imagen menor a 900 px "
-                        "en su lado corto. Para documentos con texto pequeño puede "
-                        "ser más confiable usar «Cargar archivo» con una foto tomada "
-                        "desde la cámara nativa del celular."
-                    )
-            except Exception:
-                pass
     else:
         soporte = st.file_uploader(
             "Documento de entrada (PDF o foto)",
@@ -791,6 +793,24 @@ def _registrar(user):
                 "los campos detectados."
             ),
         )
+
+    if soporte is not None and str(getattr(soporte, "type", "") or "").startswith("image/"):
+        try:
+            from PIL import Image
+            import io
+            _img = Image.open(io.BytesIO(soporte.getvalue()))
+            st.caption(
+                f"Imagen recibida: **{_img.width} × {_img.height} px** "
+                f"({(_img.width * _img.height) / 1_000_000:.1f} MP)."
+            )
+            if min(_img.width, _img.height) < 700:
+                st.warning(
+                    "La imagen tiene poco detalle vertical para una tabla extensa. "
+                    "El sistema intentará leerla, pero para cantidades y códigos "
+                    "es preferible una foto original de mayor resolución."
+                )
+        except Exception:
+            pass
 
     extr, digest = _extraer_documento(soporte, pid)
     suffix = digest or "manual"
