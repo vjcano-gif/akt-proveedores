@@ -12,7 +12,7 @@ from core import ui
 from core.auth import alcance_proveedor, puede
 from core.db import session_scope
 from core.document_ai import analizar_documento, completar_con_catalogo
-from core.models import Articulo, OrdenCompra, Proveedor, Recibo
+from core.models import Articulo, Documento, OrdenCompra, Proveedor, Recibo
 from core.services import (
     LineaRecibo, ReglaNegocio, confirmar_recibo_simple, crear_recibo,
     guardar_archivo, leer_archivo, match_recibo_lineas,
@@ -45,37 +45,84 @@ def render(user):
 
 
 def _consulta(user):
+    """Histórico permanente de recibos y sus soportes originales."""
     pid = alcance_proveedor(user)
-    c1, c2, c3 = st.columns(3)
-    estado = c1.multiselect(
-        "Estado", ["BORRADOR", "PENDIENTE_MATCH", "NOVEDAD", "CERRADA"], default=[])
-    origen = c2.multiselect("Origen", list(ORIGENES), default=[])
-    dias = c3.number_input("Últimos N días", 1, 3650, 365)
+
+    c1, c2, c3, c4 = st.columns([1.5, 1.2, 1.2, 1.1])
+    busq = c1.text_input(
+        "Buscar",
+        placeholder="TRZ · BIN · factura · referencia",
+        key="rec_hist_busq",
+    )
+    estado = c2.multiselect(
+        "Estado",
+        ["BORRADOR", "PENDIENTE_MATCH", "NOVEDAD", "CERRADA"],
+        default=[],
+        key="rec_hist_estado",
+    )
+    origen = c3.multiselect(
+        "Origen", list(ORIGENES), default=[], key="rec_hist_origen")
+    periodo = c4.selectbox(
+        "Periodo",
+        ["Todo histórico", "Últimos 30 días", "Últimos 90 días",
+         "Último año", "Últimos 3 años"],
+        index=0,
+        key="rec_hist_periodo",
+    )
+
+    dias_periodo = {
+        "Últimos 30 días": 30,
+        "Últimos 90 días": 90,
+        "Último año": 365,
+        "Últimos 3 años": 1095,
+    }.get(periodo)
 
     with session_scope() as s:
-        q = s.query(Recibo).filter(
-            Recibo.creado_en >= dt.datetime.utcnow() - dt.timedelta(days=int(dias)))
+        q = s.query(Recibo).join(Documento, Recibo.documento_id == Documento.id)
+
         if pid:
             q = q.filter(Recibo.proveedor_id == pid)
+        if dias_periodo:
+            q = q.filter(
+                Recibo.creado_en >= (
+                    dt.datetime.utcnow() - dt.timedelta(days=int(dias_periodo))
+                )
+            )
         if estado:
             q = q.filter(Recibo.estado.in_(estado))
         if origen:
             q = q.filter(Recibo.origen.in_(origen))
-        recibos = q.order_by(Recibo.creado_en.desc()).limit(500).all()
+        if busq.strip():
+            like = f"%{busq.strip()}%"
+            q = q.filter(
+                (Documento.trz.ilike(like))
+                | (Documento.referencia.ilike(like))
+            )
+
+        # Sin límite artificial: "Todo histórico" debe mostrar toda la
+        # trazabilidad disponible en la base, no solo los últimos 500 registros.
+        recibos = q.order_by(Recibo.creado_en.desc()).all()
 
         filas = []
         for r in recibos:
+            doc = r.documento
+            arch = doc.archivo if doc else None
             filas.append({
-                "Trazabilidad": r.documento.trz if r.documento else "",
-                "Origen": r.origen,
-                "Referencia": r.documento.referencia if r.documento else "",
+                "Trazabilidad": doc.trz if doc else "",
+                "Origen": ORIGENES.get(r.origen, r.origen),
+                "Referencia": doc.referencia if doc else "",
                 "Transformador": r.proveedor.nombre if r.proveedor else "",
-                "Proveedor origen": r.proveedor_origen.nombre if r.proveedor_origen else "",
+                "Proveedor origen": (
+                    r.proveedor_origen.nombre if r.proveedor_origen else ""),
                 "Estado": r.estado,
                 "Líneas": len(r.lineas),
-                "Cantidad física": sum(float(l.cantidad_fisica or 0) for l in r.lineas),
-                "Reproceso": "Sí" if r.es_reproceso else "",
-                "Fecha": r.creado_en,
+                "Cantidad física": sum(
+                    float(l.cantidad_fisica or 0) for l in r.lineas),
+                "Soporte guardado": "Sí" if arch else "No",
+                "Archivo original": arch.nombre if arch else "",
+                "Registrado por": doc.creado_por if doc else "",
+                "Fecha documento": doc.fecha_documento if doc else None,
+                "Fecha registro": r.creado_en,
                 "_id": r.id,
             })
 
@@ -83,64 +130,111 @@ def _consulta(user):
         st.info("No hay recibos con ese filtro.")
         return
 
-    df = pd.DataFrame(filas)
-    st.dataframe(
-        df.drop(columns=["_id"]), use_container_width=True, hide_index=True,
-        column_config={"Fecha": st.column_config.DatetimeColumn("Fecha", format="DD/MM/YYYY HH:mm")})
-    st.download_button(
-        "Exportar a Excel", ui.exportar_excel({"recibos": df.drop(columns=["_id"])}),
-        "recibos.xlsx", key="exp_rec")
+    st.caption(
+        f"**{len(filas):,}** registro(s) históricos. "
+        "Los PDF/fotos adjuntos quedan vinculados al TRZ para trazabilidad."
+    )
 
-    sel = st.selectbox("Ver detalle", ["—"] + [x["Trazabilidad"] for x in filas])
+    df = pd.DataFrame(filas)
+    visible = df.drop(columns=["_id"])
+    st.dataframe(
+        visible,
+        use_container_width=True,
+        hide_index=True,
+        height=430,
+        column_config={
+            "Fecha registro": st.column_config.DatetimeColumn(
+                "Fecha registro", format="DD/MM/YYYY HH:mm"),
+            "Fecha documento": st.column_config.DateColumn(
+                "Fecha documento", format="DD/MM/YYYY"),
+        },
+    )
+    st.download_button(
+        "Exportar histórico a Excel",
+        ui.exportar_excel({"recibos_historicos": visible}),
+        "recibos_historicos.xlsx",
+        key="exp_rec_hist",
+    )
+
+    sel = st.selectbox(
+        "Ver detalle / soporte",
+        ["—"] + [x["Trazabilidad"] for x in filas],
+        key="rec_hist_detalle",
+    )
     if sel == "—":
         return
+
     rid = next(x["_id"] for x in filas if x["Trazabilidad"] == sel)
 
     with session_scope() as s:
         r = s.get(Recibo, rid)
+        if not r or not r.documento:
+            st.error("No fue posible recuperar el documento histórico.")
+            return
+
+        doc = r.documento
         st.markdown(
-            f"**{r.documento.trz}** · {ORIGENES.get(r.origen, r.origen)} · "
-            + ui.pill(r.estado), unsafe_allow_html=True)
-        c = st.columns(5)
-        c[0].metric("Transformador", r.proveedor.codigo if r.proveedor else "—")
-        c[1].metric("Proveedor origen", r.proveedor_origen.codigo if r.proveedor_origen else "—")
-        c[2].metric("Referencia", r.documento.referencia or "—")
-        c[3].metric("Fecha documento", str(r.documento.fecha_documento))
-        c[4].metric("Antigüedad", f"{r.documento.antiguedad_dias} días")
+            f"**{doc.trz}** · {ORIGENES.get(r.origen, r.origen)} · "
+            + ui.pill(r.estado),
+            unsafe_allow_html=True,
+        )
+
+        cmet = st.columns(6)
+        cmet[0].metric(
+            "Transformador", r.proveedor.codigo if r.proveedor else "—")
+        cmet[1].metric(
+            "Proveedor origen",
+            r.proveedor_origen.codigo if r.proveedor_origen else "—")
+        cmet[2].metric("Referencia", doc.referencia or "—")
+        cmet[3].metric("Fecha documento", str(doc.fecha_documento or "—"))
+        cmet[4].metric("Antigüedad", f"{doc.antiguedad_dias} días")
+        cmet[5].metric("Soporte", "Guardado" if doc.archivo else "Sin adjunto")
 
         detalle = []
         for l in r.lineas:
             detalle.append({
-                "Artículo": l.articulo, "Descripción": l.descripcion,
-                "Cant. documento": l.cantidad_documento, "Cant. física": l.cantidad_fisica,
+                "Artículo": l.articulo,
+                "Descripción": l.descripcion,
+                "Cant. documento": l.cantidad_documento,
+                "Cant. física": l.cantidad_fisica,
                 "OC": l.orden_compra.numero if l.orden_compra else "",
                 "Aceptado": l.cantidad_match or 0,
                 "Match": l.estado_match or "",
                 "Lote": l.lote,
+                "Serial": l.serial,
+                "DESDE": l.ubicacion_desde,
+                "HASTA": l.ubicacion_hasta,
             })
-        st.dataframe(pd.DataFrame(detalle), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(detalle),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        if r.documento.archivo:
-            a = r.documento.archivo
+        st.markdown("##### Evidencia original")
+        if doc.archivo:
+            a = doc.archivo
+            st.caption(
+                f"**{a.nombre}** · {a.mime or 'tipo desconocido'} · "
+                f"{int(a.tamano or 0):,} bytes · "
+                f"subido por {a.subido_por or '—'}"
+            )
             contenido = leer_archivo(a)
             if contenido:
                 st.download_button(
-                    f"Descargar soporte: {a.nombre}", contenido,
-                    file_name=a.nombre, key=f"dl_{rid}")
-
-        if (r.origen == "FACTURA" and r.estado == "BORRADOR"
-                and puede(user, "recibo_sellar")
-                and (not pid or r.proveedor_id == pid)):
-            st.info(
-                "El proveedor de transformación debe certificar la recepción. "
-                "Después el documento pasa a PENDIENTE_MATCH; aún no afecta inventario.")
-            if st.button("Sellar / certificar recepción", type="primary", key=f"sl_{rid}"):
-                try:
-                    sellar_recibo(s, rid, user["email"])
-                    ui.ok("Recepción certificada. Quedó PENDIENTE_MATCH.")
-                    st.rerun()
-                except ReglaNegocio as e:
-                    ui.err(str(e))
+                    f"Descargar soporte original: {a.nombre}",
+                    contenido,
+                    file_name=a.nombre,
+                    mime=a.mime or "application/octet-stream",
+                    key=f"dl_hist_{rid}",
+                )
+            else:
+                st.error(
+                    "El registro conserva la referencia del soporte, pero no "
+                    "fue posible recuperar los bytes del archivo."
+                )
+        else:
+            st.caption("Este registro histórico no tiene soporte adjunto.")
 
 
 def _nit_normalizado(valor):
