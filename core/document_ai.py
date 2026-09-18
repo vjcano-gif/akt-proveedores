@@ -360,61 +360,217 @@ def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
         return []
 
 
-def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
-    """Extrae la tabla BIN de un PDF nativo usando coordenadas de PyMuPDF.
+def _pdf_word_obj(w):
+    """Normaliza una palabra PyMuPDF a una estructura geométrica."""
+    if len(w) < 5:
+        return None
+    x0, y0, x1, y1, txt = w[:5]
+    txt = str(txt or "").strip()
+    if not txt:
+        return None
+    x0, y0, x1, y1 = map(float, (x0, y0, x1, y1))
+    return {
+        "txt": txt,
+        "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+        "cx": (x0 + x1) / 2.0,
+        "cy": (y0 + y1) / 2.0,
+        "w": max(0.5, x1 - x0),
+        "h": max(0.5, y1 - y0),
+    }
 
-    Un PDF con capa de texto no debe pasar por OCR para conservar las columnas:
-    PyMuPDF entrega cada palabra con x0/y0/x1/y1 y esas coordenadas se adaptan
-    al mismo parser geométrico usado para imágenes.
+
+def _dedupe_pdf_words(items: list[dict]) -> list[dict]:
+    """Elimina capas duplicadas del PDF sin colapsar repeticiones reales.
+
+    Algunos reportes ERP imprimen el mismo glifo/texto dos veces con un
+    desplazamiento de 1-3 puntos. Las repeticiones reales (p.ej. 1 1 1)
+    quedan separadas horizontalmente y por tanto se conservan.
+    """
+    out = []
+    for d in sorted(items, key=lambda z: (z["cy"], z["x0"], z["x1"])):
+        norm = " ".join(d["txt"].upper().split())
+        dup = False
+        for k in reversed(out):
+            # Ya estamos en otra línea.
+            if d["cy"] - k["cy"] > max(4.0, 0.8 * max(d["h"], k["h"])):
+                break
+            if norm != " ".join(k["txt"].upper().split()):
+                continue
+
+            dx = abs(d["cx"] - k["cx"])
+            dy = abs(d["cy"] - k["cy"])
+            ix = max(0.0, min(d["x1"], k["x1"]) - max(d["x0"], k["x0"]))
+            iy = max(0.0, min(d["y1"], k["y1"]) - max(d["y0"], k["y0"]))
+            inter = ix * iy
+            amin = min(d["w"] * d["h"], k["w"] * k["h"])
+            overlap = inter / amin if amin > 0 else 0.0
+
+            # Umbral deliberadamente más amplio para caracteres estrechos como 1.
+            if (
+                (dx <= max(3.2, 0.45 * min(d["w"], k["w"]))
+                 and dy <= max(2.4, 0.35 * min(d["h"], k["h"])))
+                or overlap >= 0.42
+            ):
+                dup = True
+                break
+        if not dup:
+            out.append(d)
+    return out
+
+
+def _agrupar_pdf_filas(items: list[dict], min_y: float) -> list[list[dict]]:
+    """Agrupa palabras de la tabla en filas visuales por coordenada Y."""
+    datos = [d for d in items if d["cy"] > min_y]
+    datos.sort(key=lambda d: (d["cy"], d["x0"]))
+    filas: list[dict] = []
+    for d in datos:
+        best = None
+        best_dist = None
+        for f in filas:
+            dist = abs(d["cy"] - f["cy"])
+            tol = max(2.8, 0.42 * max(d["h"], f["h"]))
+            if dist <= tol and (best_dist is None or dist < best_dist):
+                best, best_dist = f, dist
+        if best is None:
+            filas.append({"cy": d["cy"], "h": d["h"], "items": [d]})
+        else:
+            best["items"].append(d)
+            n = len(best["items"])
+            best["cy"] = ((best["cy"] * (n - 1)) + d["cy"]) / n
+            best["h"] = max(best["h"], d["h"])
+    filas.sort(key=lambda f: f["cy"])
+    return [sorted(f["items"], key=lambda d: d["x0"]) for f in filas]
+
+
+def _texto_celda_pdf(items: list[dict]) -> str:
+    items = _dedupe_pdf_words(items)
+    return " ".join(d["txt"] for d in sorted(items, key=lambda z: z["x0"])).strip()
+
+
+def extraer_bin_columnas_pdf(data: bytes) -> list[dict]:
+    """Extrae BIN nativo por regiones geométricas de columna.
+
+    A diferencia del parser genérico palabra-a-palabra, aquí los encabezados
+    definen regiones amplias. Esto soporta cantidades alineadas a la derecha y
+    PDFs con capas de texto duplicadas.
     """
     import fitz
-    from types import SimpleNamespace
 
     if not data:
         return []
-
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception:
         return []
 
+    aliases = {
+        "proveedor": {"PROVEEDOR"},
+        "codigo": {"CODIGO"},
+        "descripcion": {"DESCRIPCION"},
+        "cantidad": {"CANTIDAD"},
+        "serial": {"SERIAL"},
+        "lote": {"LOTE"},
+        "desde": {"DESDE"},
+        "hasta": {"HASTA"},
+    }
+
     out = []
-    for pagina in doc:
+    for page in doc:
         try:
-            words = pagina.get_text("words") or []
+            raw_words = page.get_text("words", sort=True) or []
         except Exception:
             continue
+
+        words = [_pdf_word_obj(w) for w in raw_words]
+        words = [w for w in words if w]
+        words = _dedupe_pdf_words(words)
         if not words:
             continue
 
-        txts, boxes = [], []
+        headers = {}
         for w in words:
-            # PyMuPDF: x0, y0, x1, y1, word, block_no, line_no, word_no
-            if len(w) < 5:
-                continue
-            x0, y0, x1, y1, txt = w[:5]
-            txt = str(txt or "").strip()
-            if not txt:
-                continue
-            txts.append(txt)
-            boxes.append([
-                [float(x0), float(y0)],
-                [float(x1), float(y0)],
-                [float(x1), float(y1)],
-                [float(x0), float(y1)],
-            ])
+            n = _norm_cabecera(w["txt"])
+            for key, vals in aliases.items():
+                if n in vals and key not in headers:
+                    headers[key] = w
 
-        if not txts:
+        required = {"codigo", "descripcion", "cantidad", "serial", "lote", "desde", "hasta"}
+        if not required.issubset(headers):
             continue
 
-        pseudo = SimpleNamespace(txts=txts, boxes=boxes, scores=[1.0] * len(txts))
-        filas = _extraer_bin_columnas_resultado(pseudo, txts)
-        for fila in filas:
-            fila["fuente"] = "BIN_PDF_ESPACIAL"
-            out.append(fila)
+        # Las regiones se anclan en el inicio de los encabezados, pero se
+        # expanden hacia la izquierda para tolerar valores centrados/derecha.
+        x_codigo = headers["codigo"]["x0"]
+        x_desc = headers["descripcion"]["x0"]
+        x_qty = headers["cantidad"]["x0"]
+        x_serial = headers["serial"]["x0"]
+        x_lote = headers["lote"]["x0"]
+        x_desde = headers["desde"]["x0"]
+        x_hasta = headers["hasta"]["x0"]
+
+        # Límites escogidos para no depender del ancho del encabezado.
+        # Cantidad recibe margen izquierdo amplio porque suele estar alineada
+        # a la derecha; DESDE/HASTA usan el inicio del encabezado siguiente.
+        bounds = {
+            "proveedor": (0.0, x_codigo - 6.0),
+            "codigo": (x_codigo - 18.0, x_desc - 8.0),
+            "descripcion": (x_desc - 8.0, x_qty - 28.0),
+            "cantidad": (x_qty - 32.0, x_serial - 8.0),
+            "serial": (x_serial - 8.0, x_lote - 8.0),
+            "lote": (x_lote - 8.0, x_desde - 16.0),
+            "desde": (x_desde - 16.0, x_hasta - 16.0),
+            "hasta": (x_hasta - 16.0, float(page.rect.width) + 1.0),
+        }
+
+        header_y = max(headers[k]["cy"] for k in required)
+        filas = _agrupar_pdf_filas(words, header_y + 2.0)
+
+        for row in filas:
+            cells = {}
+            for key, (left, right) in bounds.items():
+                # Incluye una palabra si su centro cae dentro de la región.
+                cell_words = [w for w in row if left <= w["cx"] < right]
+                cells[key] = _texto_celda_pdf(cell_words)
+
+            codigo = re.sub(r"\s+", "", cells.get("codigo", ""))
+            if not re.fullmatch(r"[A-Z0-9._/-]{5,60}", codigo, re.I):
+                continue
+
+            qty_text = cells.get("cantidad", "")
+            # Cantidad debe ser el único número de la región; si la capa PDF
+            # repite el valor, _dedupe_pdf_words ya lo reduce.
+            nums = re.findall(r"(?<![A-Z0-9])\d+(?:[.,]\d+)?(?![A-Z0-9])", qty_text, re.I)
+            qty = _num(nums[-1]) if nums else _num(qty_text)
+            if qty is None or qty <= 0:
+                # Rescate: busca un token numérico próximo al encabezado Cantidad.
+                candidatos = []
+                for w in row:
+                    if not re.fullmatch(r"\d+(?:[.,]\d+)?", w["txt"]):
+                        continue
+                    if (x_qty - 45.0) <= w["cx"] < (x_serial - 5.0):
+                        val = _num(w["txt"])
+                        if val and val > 0:
+                            candidatos.append((abs(w["cx"] - x_qty), val))
+                if candidatos:
+                    candidatos.sort(key=lambda z: z[0])
+                    qty = candidatos[0][1]
+            if qty is None or qty <= 0:
+                continue
+
+            out.append({
+                "articulo": codigo,
+                "descripcion_ocr": cells.get("descripcion", ""),
+                "cantidad_documento": float(qty),
+                "cantidad_fisica": 0.0,
+                "serial": cells.get("serial", ""),
+                "lote": cells.get("lote", ""),
+                "ubicacion_desde": cells.get("desde", "").strip().upper(),
+                "ubicacion_hasta": cells.get("hasta", "").strip().upper(),
+                "proveedor_bin": cells.get("proveedor", ""),
+                "fuente": "BIN_PDF_CLIP",
+            })
 
     return out
-
 
 def resumir_ubicaciones_bin(filas: list[dict]) -> dict:
     """Resume DESDE/HASTA a nivel de documento.
@@ -886,7 +1042,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         fuente_actual = str(actual.get("fuente") or "")
         prioridad = {"OCR_HEURISTICO": 0, "OCR": 0, "OCR+MAESTRO": 1,
                      "BIN_TABLA": 2, "BIN_ESPACIAL": 3,
-                     "BIN_PDF_ESPACIAL": 4}
+                     "BIN_PDF_ESPACIAL": 4, "BIN_PDF_CLIP": 5}
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
