@@ -204,19 +204,11 @@ def _norm_cabecera(txt: str) -> str:
     return re.sub(r"[^A-Z]", "", s.upper())
 
 
-def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae columnas reales del BIN usando X/Y de RapidOCR.
-
-    Devuelve Código, Cantidad, Serial, Lote, DESDE y HASTA por fila.
-    """
-    try:
-        img = _decode_image(data)
-        res = _rapid_engine()(img)
-        txts = _refinar_celdas_numericas(img, res)
-        boxes = getattr(res, "boxes", None)
-        if boxes is None or len(boxes) != len(txts):
-            return []
-    except Exception:
+def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
+    """Convierte detecciones RapidOCR en filas BIN usando geometría X/Y."""
+    txts = list(txts if txts is not None else (getattr(res, "txts", None) or []))
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or len(boxes) != len(txts):
         return []
 
     dets = []
@@ -257,14 +249,14 @@ def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
     if not requeridas.issubset(headers):
         return []
 
-    # Orden real de columnas según X; usa cabeceras disponibles.
     columnas = sorted(
         [(k, v["cx"]) for k, v in headers.items()],
         key=lambda x: x[1])
     header_y = max(headers[k]["cy"] for k in headers)
-    limites = []
-    for i in range(len(columnas)-1):
-        limites.append((columnas[i][1] + columnas[i+1][1]) / 2)
+    limites = [
+        (columnas[i][1] + columnas[i+1][1]) / 2
+        for i in range(len(columnas)-1)
+    ]
 
     def columna_de_x(x):
         idx = 0
@@ -316,6 +308,16 @@ def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
         })
     return out
 
+
+def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
+    """Extrae Código/Cantidad/Serial/Lote/DESDE/HASTA desde una imagen BIN."""
+    try:
+        img = _decode_image(data)
+        res = _rapid_engine()(img)
+        txts = _refinar_celdas_numericas(img, res)
+        return _extraer_bin_columnas_resultado(res, txts)
+    except Exception:
+        return []
 
 def _ocr_tesseract(img) -> tuple[str, float]:
     """Fallback gratuito mediante el binario Tesseract del servidor."""
