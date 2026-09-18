@@ -454,8 +454,9 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
 
     out = []
     for fila in filas:
+        items_fila = sorted(fila["items"], key=lambda x: x["cx"])
         celdas = {}
-        for d in sorted(fila["items"], key=lambda x: x["cx"]):
+        for d in items_fila:
             col = columna_de_det(d)
             celdas.setdefault(col, []).append(d["txt"])
         celdas = {k: " ".join(v).strip() for k, v in celdas.items()}
@@ -463,7 +464,35 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
         codigo = re.sub(r"\s+", "", celdas.get("codigo", ""))
         if not re.fullmatch(r"[A-Z0-9._/-]{5,60}", codigo, re.I):
             continue
-        qty = _num(celdas.get("cantidad"))
+
+        # Cantidad BIN: prioriza la relación semántica
+        #   <CANTIDAD>  NONE  NONE
+        # sobre la mera frontera geométrica de la columna. En fotos con
+        # perspectiva, una cantidad puede quedar unos píxeles a la izquierda
+        # del encabezado "Cantidad" y terminar clasificada como descripción.
+        qty = None
+        marcadores = {"NONE", "N/A", "NA", "N.A."}
+        for j in range(len(items_fila) - 2):
+            raw_qty = re.sub(r"[^0-9.,-]", "", str(items_fila[j]["txt"] or ""))
+            s1 = str(items_fila[j + 1]["txt"] or "").strip().upper()
+            s2 = str(items_fila[j + 2]["txt"] or "").strip().upper()
+            if not raw_qty or s1 not in marcadores or s2 not in marcadores:
+                continue
+            val = _num(raw_qty)
+            if val is None or val <= 0:
+                continue
+            # Debe caer después del inicio de Cantidad y antes de Serial,
+            # con margen suficiente para inclinación/perspectiva.
+            if items_fila[j]["cx"] < headers["cantidad"]["x0"] - 0.55 * max(
+                    20.0, headers["serial"]["x0"] - headers["cantidad"]["x0"]):
+                continue
+            if items_fila[j]["cx"] >= headers["serial"]["x0"] + 4:
+                continue
+            qty = val
+            break
+
+        if qty is None or qty <= 0:
+            qty = _num(celdas.get("cantidad"))
         if qty is None or qty <= 0:
             continue
 
