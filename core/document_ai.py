@@ -1838,10 +1838,67 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     return resultado
 
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
-    texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
-    out = estructurar(texto, cf)
     name = (nombre or "").lower()
     mime = mime or ""
+
+    # Motor principal opcional: Mistral Document AI. Si MISTRAL_API_KEY no
+    # existe o la API falla, el flujo cae automáticamente al OCR local.
+    ia = _mistral_document_ai(nombre, data, mime)
+    ia_ok = bool(ia and ia.get("ok") and (ia.get("texto") or ia.get("filas")))
+
+    if ia_ok:
+        texto = str(ia.get("texto") or "")
+        cf = 0.97
+        metodo = f"MISTRAL_DOCUMENT_AI/{ia.get('modelo') or 'mistral-ocr-latest'}"
+        diagnostico = ""
+        out = estructurar(texto, cf)
+        out["entrada_ia"] = True
+        out["ia_modelo"] = ia.get("modelo")
+        out["ia_usage_info"] = ia.get("usage_info") or {}
+        out["lineas_ia"] = list(ia.get("filas") or [])
+
+        if ia.get("referencia"):
+            out["referencia"] = asdict(Campo(
+                ia["referencia"], 0.99, "MISTRAL_DOCUMENT_AI"))
+        if ia.get("fecha"):
+            out["fecha"] = asdict(Campo(
+                ia["fecha"], 0.98, "MISTRAL_DOCUMENT_AI"))
+
+        filas_ia_bin = []
+        for row in ia.get("filas") or []:
+            codigo = str(row.get("codigo") or "").strip()
+            qty = _num(row.get("cantidad"))
+            if not codigo:
+                continue
+            filas_ia_bin.append({
+                "articulo": codigo,
+                "descripcion_ocr": str(row.get("descripcion") or "").strip(),
+                "cantidad_documento": float(qty or 0),
+                "cantidad_fisica": 0.0,
+                "serial": str(row.get("serial") or "").strip(),
+                "lote": str(row.get("lote") or "").strip(),
+                "ubicacion_desde": str(row.get("desde") or "").strip(),
+                "ubicacion_hasta": str(row.get("hasta") or "").strip(),
+                "proveedor_bin": str(row.get("proveedor") or "").strip(),
+                "fuente": "MISTRAL_DOCUMENT_AI",
+            })
+        out["bin_filas_espaciales"] = filas_ia_bin
+    else:
+        texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
+        out = estructurar(texto, cf)
+        out["entrada_ia"] = False
+        out["ia_error"] = (ia or {}).get("error") if isinstance(ia, dict) else ""
+
+        es_imagen_local = bool(
+            mime.startswith("image/")
+            or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+        )
+        if es_imagen_local:
+            out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
+        elif mime == "application/pdf" or name.endswith(".pdf"):
+            out["bin_filas_espaciales"] = extraer_bin_columnas_pdf(data)
+        else:
+            out["bin_filas_espaciales"] = []
 
     es_imagen = bool(
         mime.startswith("image/")
@@ -1849,23 +1906,28 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     )
     out["entrada_imagen"] = es_imagen
 
-    if es_imagen:
-        out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
-    elif mime == "application/pdf" or name.endswith(".pdf"):
-        # Para PDF nativo, conserva X/Y de cada palabra; no depende del texto plano.
-        out["bin_filas_espaciales"] = extraer_bin_columnas_pdf(data)
-    else:
-        out["bin_filas_espaciales"] = []
-
-    out.update(resumir_ubicaciones_bin(out["bin_filas_espaciales"]))
+    out.update(resumir_ubicaciones_bin(out.get("bin_filas_espaciales") or []))
     out["metodo"] = metodo
-    out["confianza_texto"] = round(cf, 3)
+    out["confianza_texto"] = round(float(cf), 3)
     out["diagnostico"] = diagnostico
-    out["ocr_ok"] = bool(texto.strip())
-    origen, origen_cf, origen_evidencia = clasificar_origen(
-        texto, out["bin_filas_espaciales"])
+    out["ocr_ok"] = bool(texto.strip() or out.get("lineas_ia"))
+
+    tipo_ia = str((ia or {}).get("tipo_documento") or "").strip().upper() if ia_ok else ""
+    if tipo_ia == "BIN_A_BIN":
+        origen, origen_cf, origen_evidencia = (
+            "BIN_A_BIN", 0.995, "Mistral Document AI")
+    elif tipo_ia == "FACTURA":
+        origen, origen_cf, origen_evidencia = (
+            "FACTURA", 0.995, "Mistral Document AI")
+    else:
+        origen, origen_cf, origen_evidencia = clasificar_origen(
+            texto, out.get("bin_filas_espaciales") or [])
+
     out["origen_sugerido"] = origen
     out["origen_confianza"] = round(float(origen_cf), 3)
     out["origen_evidencia"] = origen_evidencia
-    out["requiere_revision"] = cf < 0.85 or not out["lineas"]
+    out["requiere_revision"] = (
+        float(cf) < 0.85
+        or not (out.get("lineas") or out.get("lineas_ia"))
+    )
     return out
