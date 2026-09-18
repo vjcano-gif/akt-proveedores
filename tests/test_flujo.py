@@ -22,6 +22,7 @@ import core.services as sv  # noqa: E402
 from core.services import campos_faltantes_proveedor, proveedor_listo_para_activar  # noqa: E402
 from core.auth import alcance_proveedor, puede  # noqa: E402
 from core.ui import catalogo_proveedores  # noqa: E402
+from app_pages.recibo import _enriquecer_extraccion  # noqa: E402
 
 OK, FAIL = [], []
 
@@ -255,6 +256,37 @@ with session_scope() as s:
           bool(alertas) and "DESDE" in alertas[0], str(alertas))
     check("HASTA correcto permite crear el BIN",
           r_alerta.estado == "PENDIENTE_MATCH")
+
+print("\n=== 0B2. DETECCIÓN DEL PROVEEDOR DESTINO DEL BIN ===")
+with session_scope() as s:
+    p_doc = Proveedor(
+        codigo="VDRDOCALT", nombre="Proveedor destino documento",
+        nit="900999777", ubicacion_origen="UB-ORIGEN",
+        ubicacion_destino="UB-DOC-ALT", tolerancia_averia_pct=1.0,
+        activo=True)
+    s.add(p_doc); s.flush()
+    PID_DOC_ALT = p_doc.id
+    s.add(Ubicacion(
+        codigo="UB-DOC-ALT", proveedor_id=PID_DOC_ALT,
+        activo=True, cerrada=False, restringida=False))
+
+extr_destino = {
+    "ocr_ok": True,
+    "confianza_texto": 0.99,
+    "texto": "MOVIMIENTO BIN A BIN\nProveedor Código Descripción Cantidad Serial Lote Desde Hasta",
+    "lineas": [],
+    "bin_desde_valores": ["UB-ORIGEN"],
+    "bin_hasta_valores": ["UB-DOC-ALT"],
+    "orden_compra": {"valor": None},
+    "nit": {"valor": None},
+}
+extr_destino = _enriquecer_extraccion(extr_destino, PID)
+check("BIN identifica proveedor destino por HASTA",
+      extr_destino.get("proveedor_destino_detectado_id") == PID_DOC_ALT,
+      str(extr_destino))
+check("BIN alerta cuando el proveedor seleccionado no es el destino",
+      extr_destino.get("proveedor_destino_coincide") is False,
+      str(extr_destino))
 
 print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
 with session_scope() as s:
@@ -495,6 +527,16 @@ check("Extractor identifica referencia", ext["referencia"]["valor"] is not None)
 check("Extractor identifica OC", ext["orden_compra"]["valor"] == "OC-2026-0001")
 check("Extractor propone líneas", len(ext["lineas"]) >= 2)
 check("Extractor infiere FACTURA", inferir_origen(sample) == "FACTURA")
+check("Extractor infiere estándar MOVIMIENTO BIN A BIN",
+      inferir_origen(
+          "MOVIMIENTO BIN A BIN\nId de Bin: BIN2686958\n"
+          "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta"
+      ) == "BIN_A_BIN")
+check("Extractor infiere BIN por estructura tabular aunque falte el título",
+      inferir_origen(
+          "Id de Bin: BIN2686958\n"
+          "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta"
+      ) == "BIN_A_BIN")
 
 sample_catalogo = """
 FACTURA FV-777
