@@ -17,6 +17,7 @@ from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
 import core.services as sv  # noqa: E402
+from core.auth import puede  # noqa: E402
 
 OK, FAIL = [], []
 
@@ -34,6 +35,22 @@ def esperar_error(nombre, fn, fragmento=""):
         ok = fragmento.lower() in str(e).lower() if fragmento else True
         check(nombre, ok, str(e)[:120])
 
+
+print("\n=== 0A. PERMISOS INVENTARIOS ===")
+inv_user = {"rol": "INVENTARIOS"}
+for permiso in (
+    "recibo_registrar", "recibo_sellar", "recibo_adjuntar_bin", "recibo_match_oc",
+    "novedades_registrar", "novedades_ajustar", "conteos_programar",
+    "conteos_ejecutar", "averias_registrar", "averias_ajustar",
+    "produccion_programar", "produccion_ejecutar", "despacho_registrar",
+    "maestros", "maestro_articulos", "maestro_bom", "maestro_ubicaciones",
+    "maestro_proveedores", "maestro_oc", "maestro_usuarios", "ddmrp",
+    "panel_control", "permiso_futuro_que_no_existe_aun",
+):
+    check(f"Inventarios permite {permiso}", puede(inv_user, permiso))
+
+check("Proveedor no hereda comodín",
+      not puede({"rol": "PROVEEDOR"}, "maestro_usuarios"))
 
 print("\n=== PREPARACIÓN ===")
 init_db()
