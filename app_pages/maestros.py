@@ -11,7 +11,10 @@ from core.auth import ROLES, hash_password, puede
 from core.db import session_scope
 from core.models import (Articulo, Bom, Inventario, OrdenCompra, Proveedor,
                          Ubicacion, Usuario)
-from core.services import campos_faltantes_proveedor
+from core.services import (
+    campos_faltantes_proveedor, dependencias_proveedor,
+    eliminar_proveedor_seguro,
+)
 
 
 def render(user):
@@ -792,6 +795,82 @@ def _proveedores(user):
                 f"{activados} activados."
             )
         st.rerun()
+
+    # Eliminación física controlada: solo proveedores inactivos y sin historia.
+    with st.expander("🗑️ Eliminar proveedor", expanded=False):
+        with session_scope() as s:
+            candidatos = s.query(Proveedor).filter(
+                Proveedor.activo.is_(False)
+            ).order_by(Proveedor.nombre).all()
+            opciones_borrar = {
+                f"{p.nombre} ({p.codigo})": p.id for p in candidatos
+            }
+
+        if not opciones_borrar:
+            st.info(
+                "No hay proveedores inactivos disponibles para eliminación. "
+                "Primero inactive el proveedor y guarde el cambio.")
+        else:
+            etiqueta_borrar = st.selectbox(
+                "Proveedor inactivo",
+                list(opciones_borrar),
+                key="prov_del_sel")
+            pid_borrar = opciones_borrar[etiqueta_borrar]
+
+            with session_scope() as s:
+                p_borrar = s.get(Proveedor, pid_borrar)
+                codigo_borrar = p_borrar.codigo if p_borrar else ""
+                nombre_borrar = p_borrar.nombre if p_borrar else ""
+                deps = dependencias_proveedor(s, pid_borrar)
+
+            if deps:
+                st.warning(
+                    "Este proveedor tiene trazabilidad o relaciones y no puede "
+                    "eliminarse físicamente. Debe permanecer inactivo.")
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Relación": d["detalle"],
+                        "Cantidad": d["cantidad"],
+                    } for d in deps]),
+                    hide_index=True,
+                    use_container_width=True)
+            else:
+                st.success(
+                    "El proveedor no tiene historial que impida eliminarlo. "
+                    "Las ubicaciones asociadas quedarán libres.")
+
+            confirmacion = st.text_input(
+                f"Escriba **{codigo_borrar}** para confirmar",
+                key="prov_del_confirm",
+                placeholder=codigo_borrar)
+
+            eliminar_habilitado = (
+                not deps
+                and bool(codigo_borrar)
+                and confirmacion.strip() == codigo_borrar
+            )
+            if st.button(
+                "Eliminar proveedor definitivamente",
+                type="primary",
+                disabled=not eliminar_habilitado,
+                key="prov_del_btn",
+                use_container_width=True,
+            ):
+                try:
+                    with session_scope() as s:
+                        resultado = eliminar_proveedor_seguro(
+                            s, pid_borrar, usuario=user.get("email"))
+                    ui.limpiar_cache()
+                    st.session_state["prov_editor_version"] = (
+                        int(st.session_state.get("prov_editor_version", 0)) + 1
+                    )
+                    st.session_state["prov_guardado_mensaje"] = (
+                        f"Proveedor {resultado['codigo']} eliminado. "
+                        f"{resultado['ubicaciones_liberadas']} ubicación(es) liberadas."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    ui.err(str(e))
 
 
 # ----------------------------------------------------------- órdenes de compra

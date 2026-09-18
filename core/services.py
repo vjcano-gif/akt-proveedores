@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select, text
 
 from core.models import (
-    Archivo, Articulo, Averia, Bom, ConsumoProduccion, ConteoEjecutado,
+    Base, Archivo, Articulo, Averia, Bom, ConsumoProduccion, ConteoEjecutado,
     ConteoProgramado, Despacho, DespachoLinea, Documento, FotoInventarioERP,
     Inventario, MovimientoInventario, Novedad, OrdenCompra, OrdenProduccion,
     ProgramaProduccion, Proveedor, Recibo, ReciboLinea, Auditoria, Consecutivo,
@@ -57,6 +57,102 @@ def campos_faltantes_proveedor(*, codigo=None, nombre=None, nit=None,
 
 def proveedor_listo_para_activar(**kwargs) -> bool:
     return not campos_faltantes_proveedor(**kwargs)
+
+
+_PROV_DEP_LABELS = {
+    "usuarios": "usuarios",
+    "ordenes_compra": "órdenes de compra",
+    "documentos": "documentos/trazabilidad",
+    "recibos": "recibos",
+    "novedades": "novedades",
+    "inventario": "inventario",
+    "movimientos_inventario": "movimientos de inventario",
+    "conteos_programados": "conteos programados",
+    "conteos_ejecutados": "conteos ejecutados",
+    "foto_inventario_erp": "fotos ERP",
+    "averias": "averías",
+    "mps": "programación de producción",
+    "ordenes_produccion": "órdenes de producción",
+    "despachos": "despachos",
+    "ddmrp_parametros": "parámetros DDMRP",
+}
+
+
+def dependencias_proveedor(s, proveedor_id: int) -> list[dict]:
+    """Retorna usos que impiden eliminar físicamente un proveedor."""
+    p = s.get(Proveedor, int(proveedor_id))
+    if not p:
+        return []
+
+    deps = []
+    for table in Base.metadata.tables.values():
+        if table.name in ("proveedores", "ubicaciones"):
+            continue
+        for col in table.columns:
+            apunta = any(
+                fk.column.table.name == "proveedores"
+                and fk.column.name == "id"
+                for fk in col.foreign_keys
+            )
+            if not apunta:
+                continue
+            n = s.execute(
+                select(func.count()).select_from(table).where(col == p.id)
+            ).scalar_one()
+            if n:
+                deps.append({
+                    "tabla": table.name,
+                    "campo": col.name,
+                    "detalle": _PROV_DEP_LABELS.get(table.name, table.name),
+                    "cantidad": int(n),
+                })
+
+    # BOM usa código de proveedor y no FK, pero también es configuración vigente.
+    n_bom = s.query(func.count(Bom.id)).filter(
+        Bom.proveedor_codigo == p.codigo).scalar() or 0
+    if n_bom:
+        deps.append({
+            "tabla": "bom",
+            "campo": "proveedor_codigo",
+            "detalle": "líneas BOM",
+            "cantidad": int(n_bom),
+        })
+    return deps
+
+
+def eliminar_proveedor_seguro(s, proveedor_id: int, usuario=None) -> dict:
+    """Elimina solo proveedores inactivos sin historia ni configuración en uso."""
+    p = s.get(Proveedor, int(proveedor_id))
+    if not p:
+        raise ReglaNegocio("El proveedor no existe.")
+    if p.activo:
+        raise ReglaNegocio(
+            "Primero debe inactivar el proveedor antes de eliminarlo.")
+
+    deps = dependencias_proveedor(s, p.id)
+    if deps:
+        resumen = ", ".join(
+            f"{d['detalle']} ({d['cantidad']})" for d in deps[:8])
+        raise ReglaNegocio(
+            "No se puede eliminar porque conserva trazabilidad o relaciones: "
+            + resumen + ". Manténgalo inactivo.")
+
+    # Las ubicaciones maestras no se borran: simplemente quedan disponibles.
+    liberadas = s.query(Ubicacion).filter(
+        Ubicacion.proveedor_id == p.id).all()
+    for u in liberadas:
+        u.proveedor_id = None
+
+    codigo, nombre, pid = p.codigo, p.nombre, p.id
+    auditar(
+        s, usuario, None, "ELIMINAR", "Proveedor", codigo,
+        f"Proveedor eliminado: {nombre} · id={pid}")
+    s.delete(p)
+    s.flush()
+    return {
+        "id": pid, "codigo": codigo, "nombre": nombre,
+        "ubicaciones_liberadas": len(liberadas),
+    }
 
 
 # =========================================================================
