@@ -1,6 +1,8 @@
 """Recibo de mercancía: documento -> revisión -> match por línea con OC -> inventario."""
 import datetime as dt
 import hashlib
+import re
+from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -163,6 +165,41 @@ def _fecha_ocr(extr):
             return hoy_colombia
 
 
+def _normalizar_codigo_ubicacion(v):
+    return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
+
+
+def _canonizar_ubicacion_ocr(valor, codigos):
+    """Mapea OCR ruidoso al código WMS más probable, solo con alta confianza."""
+    raw = str(valor or "").strip().upper()
+    if not raw:
+        return "", 0.0
+    nraw = _normalizar_codigo_ubicacion(raw)
+    if not nraw:
+        return raw, 0.0
+
+    candidatos = []
+    for codigo in codigos:
+        nc = _normalizar_codigo_ubicacion(codigo)
+        if not nc:
+            continue
+        score = SequenceMatcher(None, nraw, nc).ratio()
+        # Premia contenido completo con ruido adicional al final/inicio.
+        if nc in nraw or nraw in nc:
+            score = max(score, min(len(nraw), len(nc)) / max(len(nraw), len(nc)))
+        candidatos.append((score, codigo))
+    if not candidatos:
+        return raw, 0.0
+    candidatos.sort(reverse=True)
+    best_score, best = candidatos[0]
+    second = candidatos[1][0] if len(candidatos) > 1 else 0.0
+
+    # Conservador: evita transformar una lectura ambigua en un código falso.
+    if best_score >= 0.82 and (best_score - second >= 0.04 or best_score >= 0.93):
+        return best, best_score
+    return raw, best_score
+
+
 def _enriquecer_extraccion(extr, proveedor_id):
     """Cruza OCR con maestros y OC para autocompletar líneas con datos reales."""
     if not extr or not extr.get("ocr_ok"):
@@ -172,6 +209,21 @@ def _enriquecer_extraccion(extr, proveedor_id):
         articulos = s.query(Articulo).filter(Articulo.activo.is_(True)).all()
         catalogo = {a.codigo: (a.descripcion or "") for a in articulos}
         completar_con_catalogo(extr, catalogo)
+
+        from core.models import Ubicacion
+        codigos_ubi = [
+            u.codigo for u in s.query(Ubicacion).filter(
+                Ubicacion.activo.is_(True)).all()
+        ]
+        for ln in extr.get("lineas", []) or []:
+            for campo in ("ubicacion_desde", "ubicacion_hasta"):
+                raw = str(ln.get(campo) or "").strip().upper()
+                if not raw:
+                    continue
+                canon, score = _canonizar_ubicacion_ocr(raw, codigos_ubi)
+                ln[f"{campo}_ocr_raw"] = raw
+                ln[f"{campo}_ocr_score"] = round(float(score), 3)
+                ln[campo] = canon
 
         # Si el documento trae OC, úsela como respaldo para líneas que el OCR
         # no pudo leer completamente. Nunca sobreescribe una cantidad OCR > 0.
