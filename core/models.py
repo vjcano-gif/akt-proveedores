@@ -33,10 +33,15 @@ class Proveedor(Base):
     codigo = Column(String(40), unique=True, nullable=False, index=True)
     nombre = Column(String(200), nullable=False)
     nit = Column(String(40))
+    # Ubicación operativa por defecto. Todo recibo del proveedor llega aquí.
+    ubicacion_destino_id = Column(Integer, ForeignKey("ubicaciones.id"))
     # Acuerdo comercial: margen de tolerancia de avería (%)
     tolerancia_averia_pct = Column(Float, default=1.0)
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, default=now)
+
+    ubicacion_destino = relationship(
+        "Ubicacion", foreign_keys=[ubicacion_destino_id], post_update=True)
 
 
 class Usuario(Base):
