@@ -754,47 +754,47 @@ if filas_bin_geom:
     check("Parser geométrico conserva HASTA",
           fg["ubicacion_hasta"] == "MOTOS-WSERE-WSER-VIPI-NTAR", str(fg))
 
-# Foto BIN: cantidades pueden quedar desplazadas a la izquierda del encabezado
-# por perspectiva. Debe prevalecer el patrón semántico CANTIDAD + NONE + NONE,
-# incluso cuando la geometría pura enviaría la cifra a Descripción.
-headers_skew = [
-    "Proveedor", "Código", "Descripción", "Cantidad", "Serial", "Lote", "Desde", "Hasta",
-]
-xs_skew = [70, 210, 420, 650, 760, 850, 1010, 1260]
-rows_skew = [
-    ("CHONGQING-012", "7700149213509", "Cbta Lat Izq Tras 300Rally Mp", "98"),
-    ("CHONGQING-012", "7700149649926", "Cubta Fron Sup Der SR1-A MP", "120"),
-    ("CHONGQING-012", "7700149649933", "Cubta Int Cent Inf SR1-A MP", "150"),
-    ("CHONGQING-012", "7700149648813", "Cubta Lat inf Der SR1-A MP", "100"),
-    ("CHONGQING-012", "7700149212359", "Guardabarro Del 300Rally Mp", "72"),
-]
-txt_skew = list(headers_skew)
-box_skew = [_box(x, 30) for x in xs_skew]
-for n, (prov, cod, desc, qty) in enumerate(rows_skew):
-    y = 80 + n * 50
-    # Cantidad en x=620: visualmente pertenece a Cantidad, pero queda a la
-    # izquierda del x0 del encabezado 650 por la perspectiva de la foto.
-    vals = [prov, cod, desc, qty, "NONE", "NONE", "WSERE PINT 1 1 1", "WSERE WINT 1 1 1"]
-    xs_row = [70, 210, 420, 620, 760, 850, 1010, 1260]
-    txt_skew.extend(vals)
-    box_skew.extend([_box(x, y) for x in xs_row])
-
-fake_bin_skew = SimpleNamespace(
-    txts=txt_skew,
-    boxes=box_skew,
-    scores=[0.99] * len(txt_skew),
-)
-filas_skew = _extraer_bin_columnas_resultado(fake_bin_skew)
-qty_skew = {x["articulo"]: x["cantidad_documento"] for x in filas_skew}
-esperado_skew = {
-    "7700149213509": 98.0,
-    "7700149649926": 120.0,
-    "7700149649933": 150.0,
-    "7700149648813": 100.0,
-    "7700149212359": 72.0,
-}
-check("Foto BIN desplazada conserva cantidades por patrón NONE/NONE",
-      qty_skew == esperado_skew, str(qty_skew))
+    # Foto BIN: cantidades pueden quedar desplazadas a la izquierda del encabezado
+    # por perspectiva. Debe prevalecer el patrón semántico CANTIDAD + NONE + NONE,
+    # incluso cuando la geometría pura enviaría la cifra a Descripción.
+    headers_skew = [
+        "Proveedor", "Código", "Descripción", "Cantidad", "Serial", "Lote", "Desde", "Hasta",
+    ]
+    xs_skew = [70, 210, 420, 650, 760, 850, 1010, 1260]
+    rows_skew = [
+        ("CHONGQING-012", "7700149213509", "Cbta Lat Izq Tras 300Rally Mp", "98"),
+        ("CHONGQING-012", "7700149649926", "Cubta Fron Sup Der SR1-A MP", "120"),
+        ("CHONGQING-012", "7700149649933", "Cubta Int Cent Inf SR1-A MP", "150"),
+        ("CHONGQING-012", "7700149648813", "Cubta Lat inf Der SR1-A MP", "100"),
+        ("CHONGQING-012", "7700149212359", "Guardabarro Del 300Rally Mp", "72"),
+    ]
+    txt_skew = list(headers_skew)
+    box_skew = [_box(x, 30) for x in xs_skew]
+    for n, (prov, cod, desc, qty) in enumerate(rows_skew):
+        y = 80 + n * 50
+        # Cantidad en x=620: visualmente pertenece a Cantidad, pero queda a la
+        # izquierda del x0 del encabezado 650 por la perspectiva de la foto.
+        vals = [prov, cod, desc, qty, "NONE", "NONE", "WSERE PINT 1 1 1", "WSERE WINT 1 1 1"]
+        xs_row = [70, 210, 420, 620, 760, 850, 1010, 1260]
+        txt_skew.extend(vals)
+        box_skew.extend([_box(x, y) for x in xs_row])
+    
+    fake_bin_skew = SimpleNamespace(
+        txts=txt_skew,
+        boxes=box_skew,
+        scores=[0.99] * len(txt_skew),
+    )
+    filas_skew = _extraer_bin_columnas_resultado(fake_bin_skew)
+    qty_skew = {x["articulo"]: x["cantidad_documento"] for x in filas_skew}
+    esperado_skew = {
+        "7700149213509": 98.0,
+        "7700149649926": 120.0,
+        "7700149649933": 150.0,
+        "7700149648813": 100.0,
+        "7700149212359": 72.0,
+    }
+    check("Foto BIN desplazada conserva cantidades por patrón NONE/NONE",
+          qty_skew == esperado_skew, str(qty_skew))
 
 
     resumen_bin = resumir_ubicaciones_bin([
