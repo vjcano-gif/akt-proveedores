@@ -195,7 +195,7 @@ def _enriquecer_extraccion(extr, proveedor_id):
                         "articulo": oc.articulo,
                         "descripcion": catalogo.get(oc.articulo, ""),
                         "cantidad_documento": max(0.0, float(oc.pendiente or 0)),
-                        "cantidad_fisica": max(0.0, float(oc.pendiente or 0)),
+                        "cantidad_fisica": 0.0,
                         "confianza": 0.75,
                         "fuente": "OC_ABIERTA",
                     }
@@ -204,8 +204,7 @@ def _enriquecer_extraccion(extr, proveedor_id):
                 elif float(existentes[key].get("cantidad_documento") or 0) <= 0:
                     existentes[key]["cantidad_documento"] = max(
                         0.0, float(oc.pendiente or 0))
-                    existentes[key]["cantidad_fisica"] = max(
-                        0.0, float(oc.pendiente or 0))
+                    existentes[key]["cantidad_fisica"] = 0.0
                     existentes[key]["fuente"] = "OC_ABIERTA"
 
         # Sugiere proveedor origen por NIT, solo si existe en el maestro.
@@ -254,6 +253,46 @@ def _extraer_documento(soporte, proveedor_id):
                 }
 
     return st.session_state.get(clave), digest
+
+
+def _filas_sin_cantidad_documento(df):
+    if df is None or df.empty:
+        return []
+    faltan = []
+    for _, row in df.iterrows():
+        articulo = str(row.get("articulo") or "").strip()
+        if not articulo:
+            continue
+        try:
+            qty = float(row.get("cantidad_documento") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0:
+            faltan.append(articulo)
+    return faltan
+
+
+def _diferencias_recepcion(df):
+    if df is None or df.empty:
+        return []
+    difs = []
+    for _, row in df.iterrows():
+        articulo = str(row.get("articulo") or "").strip()
+        if not articulo:
+            continue
+        try:
+            qdoc = float(row.get("cantidad_documento") or 0)
+            qfis = float(row.get("cantidad_fisica") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qfis - qdoc) > 1e-9:
+            difs.append({
+                "Artículo": articulo,
+                "Documento": qdoc,
+                "Recibido": qfis,
+                "Diferencia": qfis - qdoc,
+            })
+    return difs
 
 
 def _registrar(user):
@@ -382,6 +421,7 @@ def _registrar(user):
         key=f"modo_rec_{suffix}")
 
     lineas_df = None
+    recepcion_estado = None
     if modo == "Cargue masivo":
         ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
@@ -393,8 +433,8 @@ def _registrar(user):
         lineas = list((extr or {}).get("lineas") or [])
         if not lineas:
             st.info(
-                "El OCR leyó el documento, pero no pudo identificar líneas de artículo. "
-                "Puede completar la tabla manualmente.")
+                "El OCR leyó el documento, pero no pudo identificar todas las líneas. "
+                "Agregue o corrija las referencias en la tabla antes de confirmar la recepción.")
 
         ubi_desde_ocr = str(
             (((extr or {}).get("ubicacion_origen") or {}).get("valor") or "")
@@ -419,28 +459,143 @@ def _registrar(user):
                 base[col] = base[col].replace("", default)
 
         base = base.drop(columns=["confianza", "fuente"], errors="ignore")
+
+        estado_key = f"rec_estado_{suffix}"
+        df_key = f"rec_df_{suffix}"
+        version_key = f"rec_df_version_{suffix}"
+
+        if estado_key not in st.session_state:
+            st.session_state[estado_key] = "PENDIENTE"
+        if version_key not in st.session_state:
+            st.session_state[version_key] = 0
+        if df_key not in st.session_state:
+            st.session_state[df_key] = base.copy()
+
+        # Mantiene la ubicación elegida en filas que aún no tenían destino.
+        stored = st.session_state[df_key].copy()
+        if "ubicacion_hasta" not in stored.columns:
+            stored["ubicacion_hasta"] = ubic_dest
+        elif ubic_dest:
+            stored["ubicacion_hasta"] = stored["ubicacion_hasta"].fillna("")
+            stored.loc[stored["ubicacion_hasta"].astype(str).str.strip() == "",
+                       "ubicacion_hasta"] = ubic_dest
+        st.session_state[df_key] = stored
+
+        recepcion_estado = st.session_state[estado_key]
+        if recepcion_estado == "COMPLETO":
+            st.success(
+                "Recepción marcada como satisfactoria y completa. "
+                "Cantidad física = cantidad documento en todas las líneas.")
+        elif recepcion_estado == "DISCREPANCIA":
+            st.warning(
+                "Modo discrepancias activo. Modifique únicamente la cantidad física "
+                "de las referencias que llegaron diferentes.")
+        else:
+            st.info(
+                "Primero revise las referencias y cantidades del documento. "
+                "Luego marque recepción completa o recepción con discrepancias.")
+
+        disabled_cols = []
+        if recepcion_estado == "PENDIENTE":
+            disabled_cols = ["cantidad_fisica"]
+        elif recepcion_estado == "COMPLETO":
+            disabled_cols = [
+                "articulo", "descripcion", "cantidad_documento", "cantidad_fisica"
+            ]
+        elif recepcion_estado == "DISCREPANCIA":
+            disabled_cols = ["articulo", "descripcion", "cantidad_documento"]
+
+        editor_key = (
+            f"ed_rec_ai_{suffix}_{st.session_state[version_key]}"
+        )
         lineas_df = st.data_editor(
-            base,
-            num_rows="dynamic",
+            st.session_state[df_key],
+            num_rows="dynamic" if recepcion_estado == "PENDIENTE" else "fixed",
             use_container_width=True,
-            key=f"ed_rec_ai_{suffix}",
+            key=editor_key,
+            disabled=disabled_cols,
             column_config={
                 "articulo": st.column_config.TextColumn("Artículo", required=True),
                 "descripcion": st.column_config.TextColumn("Descripción"),
                 "cantidad_documento": st.column_config.NumberColumn(
-                    "Cantidad documento", min_value=0.0),
+                    "Cantidad documento", min_value=0.0, step=1.0),
                 "cantidad_fisica": st.column_config.NumberColumn(
-                    "Cantidad física", min_value=0.0),
+                    "Cantidad física real", min_value=0.0, step=1.0),
             })
+        st.session_state[df_key] = lineas_df.copy()
+
+        faltan_qty = _filas_sin_cantidad_documento(lineas_df)
+        if faltan_qty:
+            st.error(
+                "Falta cantidad documental para: "
+                + ", ".join(faltan_qty[:12])
+                + ("…" if len(faltan_qty) > 12 else "")
+                + ". Corrija esas cantidades antes de marcar recepción completa.")
+
+        b1, b2, b3 = st.columns([1.3, 1.1, 0.8])
+        if b1.button(
+            "✓ Marcar recibo satisfactorio y completo",
+            type="primary",
+            use_container_width=True,
+            disabled=bool(faltan_qty) or lineas_df.empty,
+            key=f"btn_completo_{suffix}",
+        ):
+            nuevo = lineas_df.copy()
+            nuevo["cantidad_fisica"] = pd.to_numeric(
+                nuevo["cantidad_documento"], errors="coerce").fillna(0.0)
+            st.session_state[df_key] = nuevo
+            st.session_state[estado_key] = "COMPLETO"
+            st.session_state[version_key] += 1
+            st.rerun()
+
+        if b2.button(
+            "⚠ Registrar discrepancias",
+            use_container_width=True,
+            disabled=lineas_df.empty,
+            key=f"btn_disc_{suffix}",
+        ):
+            nuevo = lineas_df.copy()
+            # Parte de una recepción completa para que el usuario solo cambie
+            # las referencias realmente diferentes.
+            nuevo["cantidad_fisica"] = pd.to_numeric(
+                nuevo["cantidad_documento"], errors="coerce").fillna(0.0)
+            st.session_state[df_key] = nuevo
+            st.session_state[estado_key] = "DISCREPANCIA"
+            st.session_state[version_key] += 1
+            st.rerun()
+
+        if b3.button(
+            "Revisar datos",
+            use_container_width=True,
+            disabled=recepcion_estado == "PENDIENTE",
+            key=f"btn_revisar_{suffix}",
+        ):
+            st.session_state[estado_key] = "PENDIENTE"
+            st.session_state[version_key] += 1
+            st.rerun()
+
+        # Recupera el estado después de cualquier edición.
+        recepcion_estado = st.session_state[estado_key]
+        difs = _diferencias_recepcion(lineas_df)
+        if recepcion_estado == "DISCREPANCIA":
+            if difs:
+                st.warning(f"{len(difs)} referencia(s) presentan diferencia física.")
+                st.dataframe(
+                    pd.DataFrame(difs),
+                    use_container_width=True,
+                    hide_index=True)
+            else:
+                st.caption(
+                    "Aún no hay diferencias. Cambie la cantidad física real "
+                    "de la referencia que corresponda.")
 
         detectadas = [
-            x for x in lineas
-            if str(x.get("articulo") or "").strip()
+            x for x in lineas if str(x.get("articulo") or "").strip()
         ]
         if detectadas:
             st.caption(
                 f"{len(detectadas)} línea(s) detectada(s) automáticamente. "
-                "Confirme cantidades antes de crear el recibo.")
+                "Puede agregar referencias faltantes antes de confirmar la recepción.")
 
     else:
         base = pd.DataFrame([{
@@ -457,9 +612,26 @@ def _registrar(user):
             "Los datos autocompletados son una propuesta: el usuario confirma antes "
             "de que el documento afecte el flujo.")
 
-    if st.button("Crear recibo", type="primary", use_container_width=True):
+    crear_label = "Crear recibo"
+    if modo == "Documento leído" and recepcion_estado == "COMPLETO":
+        crear_label = "Crear recibo satisfactorio y completo"
+    elif modo == "Documento leído" and recepcion_estado == "DISCREPANCIA":
+        crear_label = "Crear recibo con discrepancias"
+
+    if st.button(crear_label, type="primary", use_container_width=True):
         if lineas_df is None or lineas_df.empty:
             ui.err("Debe capturar al menos una línea.")
+            return
+        if modo == "Documento leído" and recepcion_estado == "PENDIENTE":
+            ui.err(
+                "Defina primero el resultado de la recepción: "
+                "satisfactoria/completa o con discrepancias.")
+            return
+        faltan_qty = _filas_sin_cantidad_documento(lineas_df)
+        if modo == "Documento leído" and faltan_qty:
+            ui.err(
+                "Hay referencias sin cantidad documental: "
+                + ", ".join(faltan_qty[:12]))
             return
 
         def num(v):
@@ -467,6 +639,11 @@ def _registrar(user):
                 return float(str(v).replace(",", "") or 0)
             except (TypeError, ValueError):
                 return 0.0
+
+        if modo == "Documento leído" and recepcion_estado == "COMPLETO":
+            lineas_df = lineas_df.copy()
+            lineas_df["cantidad_fisica"] = pd.to_numeric(
+                lineas_df["cantidad_documento"], errors="coerce").fillna(0.0)
 
         lineas = []
         for _, row in lineas_df.iterrows():
