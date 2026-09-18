@@ -288,6 +288,36 @@ check("BIN alerta cuando el proveedor seleccionado no es el destino",
       extr_destino.get("proveedor_destino_coincide") is False,
       str(extr_destino))
 
+# Fallback específico para fotos/OCR: aunque el parser espacial no haya podido
+# extraer HASTA, la ubicación destino maestra aparece repetida en el texto.
+extr_destino_ocr = {
+    "ocr_ok": True,
+    "confianza_texto": 0.98,
+    "texto": (
+        "MOVIMIENTO BIN A BIN\n"
+        "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta\n"
+        "SANYANG IN-0017700149603447 Cubierta manubrio 60 NONE NONE "
+        "UB-ORIGEN UB-DOC-ALT\n"
+        "SANYANG IN-0017700149603980 Cubta Frontal 60 NONE NONE "
+        "UB-ORIGEN UB-DOC-ALT"
+    ),
+    "lineas": [],
+    "bin_desde_valores": [],
+    "bin_hasta_valores": [],
+    "orden_compra": {"valor": None},
+    "nit": {"valor": None},
+}
+extr_destino_ocr = _enriquecer_extraccion(extr_destino_ocr, PID)
+check("Foto/OCR identifica proveedor por HASTA aun sin parser espacial",
+      extr_destino_ocr.get("proveedor_destino_detectado_id") == PID_DOC_ALT,
+      str(extr_destino_ocr))
+check("Foto/OCR promueve HASTA detectado desde texto",
+      extr_destino_ocr.get("bin_hasta_canon") == "UB-DOC-ALT",
+      str(extr_destino_ocr))
+check("Foto/OCR bloquea proveedor seleccionado incorrecto",
+      extr_destino_ocr.get("proveedor_destino_coincide") is False,
+      str(extr_destino_ocr))
+
 print("\n=== 0C. CANTIDAD FÍSICA CERO ES VÁLIDA ===")
 with session_scope() as s:
     r0 = sv.crear_recibo(
