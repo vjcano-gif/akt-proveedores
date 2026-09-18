@@ -1691,6 +1691,28 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     propuestas = lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf)
     propuestas_bin = lineas_bin_desde_texto(resultado.get("texto", ""), catalogo, cf)
 
+    propuestas_ia = []
+    for row in resultado.get("lineas_ia", []) or []:
+        key = str(row.get("codigo") or "").strip().upper()
+        if key not in mapa_upper:
+            continue
+        qty = _num(row.get("cantidad"))
+        if qty is None or qty <= 0:
+            continue
+        oficial_cod, oficial_desc = mapa_upper[key]
+        propuestas_ia.append({
+            "articulo": oficial_cod,
+            "descripcion": oficial_desc or str(row.get("descripcion") or ""),
+            "cantidad_documento": float(qty),
+            "cantidad_fisica": 0.0,
+            "serial": str(row.get("serial") or ""),
+            "lote": str(row.get("lote") or ""),
+            "ubicacion_desde": str(row.get("desde") or ""),
+            "ubicacion_hasta": str(row.get("hasta") or ""),
+            "confianza": 0.99,
+            "fuente": "MISTRAL_DOCUMENT_AI",
+        })
+
     es_imagen = bool(resultado.get("entrada_imagen"))
     metodo = str(resultado.get("metodo") or "")
     bin_score, bin_filas_texto = _score_bin_texto(resultado.get("texto", ""))
@@ -1708,7 +1730,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     # "no leída" a inventar un código o una cantidad plausible pero incorrecta.
     # A partir de aquí solo vuelven a entrar filas con:
     #   código EXACTO del maestro + cantidad seguida de NONE/NONE.
-    if es_bin_imagen:
+    if es_bin_imagen or propuestas_ia:
         resultado["lineas"] = []
         existentes = {}
 
@@ -1740,7 +1762,15 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "fuente": row.get("fuente", "BIN_ESPACIAL"),
         })
 
-    if es_bin_imagen:
+    if propuestas_ia:
+        # Cuando Document AI respondió, esta es la única fuente autorizada para
+        # código y cantidad. Todo código se valida EXACTAMENTE contra el maestro
+        # local antes de llegar aquí.
+        fuentes_merge = propuestas_ia
+        resultado["diagnostico_bin"] = (
+            f"Document AI validó {len(propuestas_ia)} fila(s) contra el maestro."
+        )
+    elif es_bin_imagen:
         # Sin filas estructuradas válidas no se autocompletan cantidades desde
         # OCR espacial ni heurístico. Se fuerza revisión en vez de inventar.
         fuentes_merge = (
@@ -1776,6 +1806,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "BIN_PDF_CLIP": 5,
             "BIN_PDF_CODIGO": 6,
             "BIN_TABLA_IMAGEN_VALIDADA": 8,
+            "MISTRAL_DOCUMENT_AI": 20,
         }
         if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
             actual["cantidad_documento"] = qty_nueva
