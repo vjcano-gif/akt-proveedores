@@ -461,16 +461,20 @@ def _proveedores(user):
             value=1.0, step=0.1, key="prov_new_tol")
 
         c5, c6 = st.columns(2)
-        desde_new = c5.selectbox(
+        desde_new = c5.text_input(
             "Ubicación DESDE *",
-            [""] + ubicaciones_activas,
             key="prov_new_desde",
-            help="Valor esperado en la columna DESDE del BIN. Si difiere, alerta.")
-        hasta_new = c6.selectbox(
+            placeholder="Ej. WSERE PSER 1 1 1",
+            help=(
+                "Puede escribir una ubicación nueva. Si no existe, se crea "
+                "automáticamente en el maestro de Ubicaciones."))
+        hasta_new = c6.text_input(
             "Ubicación HASTA *",
-            [""] + ubicaciones_activas,
             key="prov_new_hasta",
-            help="Valor esperado en HASTA. Si difiere, el recibo se bloquea.")
+            placeholder="Ej. TPROC-SERV-IPIN-TART",
+            help=(
+                "Puede escribir una ubicación nueva. Si no existe, se crea "
+                "automáticamente y queda asignada como destino del proveedor."))
 
         if st.button("Crear proveedor", type="primary", key="prov_new_btn"):
             faltan_new = _faltantes_valores(
@@ -484,30 +488,33 @@ def _proveedores(user):
                     with session_scope() as s:
                         if s.query(Proveedor).filter_by(codigo=cod_new.strip()).first():
                             raise ValueError("Ya existe un proveedor con ese código.")
-                        u_desde = s.query(Ubicacion).filter_by(codigo=desde_new).first()
-                        u_hasta = s.query(Ubicacion).filter_by(codigo=hasta_new).first()
-                        if not u_desde or not u_desde.activo or u_desde.cerrada:
-                            raise ValueError("La ubicación DESDE no está disponible.")
-                        if not u_hasta or not u_hasta.activo or u_hasta.cerrada:
-                            raise ValueError("La ubicación HASTA no está disponible.")
-                        if u_hasta.proveedor_id:
-                            raise ValueError("La ubicación HASTA ya está asignada a otro proveedor.")
 
+                        desde_norm = desde_new.strip().upper()
+                        hasta_norm = hasta_new.strip().upper()
+
+                        # Primero crea el proveedor para poder vincular HASTA.
                         p = Proveedor(
                             codigo=cod_new.strip(),
                             nombre=nom_new.strip(),
                             nit=nit_new.strip(),
                             tolerancia_averia_pct=float(tol_new),
-                            ubicacion_origen=desde_new,
-                            ubicacion_destino=hasta_new,
-                            activo=True)
+                            ubicacion_origen=desde_norm,
+                            ubicacion_destino=hasta_norm,
+                            activo=False)
                         s.add(p)
                         s.flush()
-                        u_hasta.proveedor_id = p.id
-                        u_hasta.rol = "DESTINO"
+
+                        asegurar_ubicacion_ingresada(
+                            s, desde_norm, rol="ORIGEN")
+                        asegurar_ubicacion_ingresada(
+                            s, hasta_norm, rol="DESTINO", proveedor_id=p.id)
+
+                        p.activo = True
 
                     ui.limpiar_cache()
-                    ui.ok("Proveedor creado con DESDE y HASTA asignados.")
+                    ui.ok(
+                        "Proveedor creado. DESDE/HASTA quedaron guardados y, "
+                        "si eran nuevos, también se crearon en Ubicaciones.")
                     st.rerun()
                 except Exception as e:
                     ui.err(str(e))
@@ -576,10 +583,12 @@ def _proveedores(user):
         num_rows="fixed",
         disabled=["id", "codigo", "listo_para_activar"],
         column_config={
-            "ubicacion_desde": st.column_config.SelectboxColumn(
-                "Ubicación DESDE", options=[""] + ubicaciones_activas, required=True),
-            "ubicacion_hasta": st.column_config.SelectboxColumn(
-                "Ubicación HASTA", options=[""] + ubicaciones_activas, required=True),
+            "ubicacion_desde": st.column_config.TextColumn(
+                "Ubicación DESDE",
+                help="Puede escribir una ubicación existente o una nueva."),
+            "ubicacion_hasta": st.column_config.TextColumn(
+                "Ubicación HASTA",
+                help="Puede escribir una ubicación existente o una nueva."),
             "listo_para_activar": st.column_config.CheckboxColumn(
                 "Listo para activar",
                 help="Solo puede estar Activo cuando todos los campos obligatorios están completos."),
@@ -643,11 +652,6 @@ def _proveedores(user):
         estados_esperados = {}
 
         with session_scope() as s:
-            ubicaciones = {
-                u.codigo: u for u in s.query(Ubicacion).filter(
-                    Ubicacion.activo.is_(True)).all()
-            }
-
             for i in indices_editados:
                 r = ed.iloc[i]
                 p = s.get(Proveedor, int(r["id"]))
@@ -691,38 +695,28 @@ def _proveedores(user):
                     actualizados += 1
                     continue
 
-                u_desde = ubicaciones.get(desde) if desde else None
-                u_hasta = ubicaciones.get(hasta) if hasta else None
-
-                if activar and (not u_desde or u_desde.cerrada):
-                    p.activo = False
-                    estados_esperados[p.id] = False
-                    errores.append(
-                        f"{p.codigo}: no se activa; DESDE {desde or '(vacío)'} "
-                        "no está disponible.")
-                    actualizados += 1
-                    continue
-                if activar and (not u_hasta or u_hasta.cerrada):
-                    p.activo = False
-                    estados_esperados[p.id] = False
-                    errores.append(
-                        f"{p.codigo}: no se activa; HASTA {hasta or '(vacío)'} "
-                        "no está disponible.")
-                    actualizados += 1
-                    continue
-                if (activar and u_hasta and u_hasta.proveedor_id
-                        and u_hasta.proveedor_id != p.id):
-                    p.activo = False
-                    estados_esperados[p.id] = False
-                    errores.append(
-                        f"{p.codigo}: no se activa; HASTA {hasta} pertenece "
-                        "a otro proveedor.")
+                try:
+                    u_desde = (
+                        asegurar_ubicacion_ingresada(
+                            s, desde, rol="ORIGEN")
+                        if desde else None
+                    )
+                    u_hasta = (
+                        asegurar_ubicacion_ingresada(
+                            s, hasta, rol="DESTINO", proveedor_id=p.id)
+                        if hasta else None
+                    )
+                except Exception as e:
+                    if activar:
+                        p.activo = False
+                        estados_esperados[p.id] = False
+                    errores.append(f"{p.codigo}: {e}")
                     actualizados += 1
                     continue
 
                 anterior = str(p.ubicacion_destino or "").strip().upper()
                 if anterior and anterior != hasta:
-                    u_ant = ubicaciones.get(anterior)
+                    u_ant = s.query(Ubicacion).filter_by(codigo=anterior).first()
                     if u_ant and u_ant.proveedor_id == p.id:
                         u_ant.proveedor_id = None
                         if (u_ant.rol or "").upper() == "DESTINO":
