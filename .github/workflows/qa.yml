@@ -58,5 +58,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: Schema isolation PostgreSQL
         run: python tests/test_schema_isolation.py
+      - name: Legacy schema upgrade PostgreSQL
+        run: python tests/test_schema_upgrade.py
       - name: End-to-end PostgreSQL
         run: python tests/test_flujo.py
