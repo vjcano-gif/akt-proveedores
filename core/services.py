@@ -333,6 +333,32 @@ class LineaRecibo:
     ubicacion_hasta: str = ""
 
 
+
+def ubicacion_destino_proveedor(s, proveedor_id: int) -> Ubicacion:
+    """Retorna la ubicación destino contractual del proveedor.
+
+    Cada proveedor operativo debe tener exactamente una ubicación destino
+    designada. No se infiere durante el recibo para evitar enviar material a
+    una ubicación equivocada.
+    """
+    prov = s.get(Proveedor, proveedor_id)
+    if not prov or not prov.activo:
+        raise ReglaNegocio("Proveedor inexistente o inactivo.")
+    if not prov.ubicacion_destino_id:
+        raise ReglaNegocio(
+            "El proveedor no tiene una ubicación destino designada. "
+            "Asígnela en Maestros → Proveedores antes de registrar recibos.")
+    u = s.get(Ubicacion, prov.ubicacion_destino_id)
+    if not u or not u.activo or u.cerrada:
+        raise ReglaNegocio(
+            "La ubicación destino designada del proveedor no existe, está inactiva "
+            "o se encuentra cerrada.")
+    if u.proveedor_id != proveedor_id:
+        raise ReglaNegocio(
+            "La ubicación destino designada no pertenece al proveedor seleccionado.")
+    return u
+
+
 def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
                  referencia=None, usuario=None, es_reproceso=False,
                  ubicacion_destino="", archivo_id=None, fecha_documento=None,
@@ -347,6 +373,16 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
     prov = s.get(Proveedor, proveedor_id)
     if not prov or not prov.activo:
         raise ReglaNegocio("Proveedor inexistente o inactivo.")
+
+    destino_maestro = ubicacion_destino_proveedor(s, proveedor_id)
+    destino_codigo = destino_maestro.codigo.upper()
+    solicitado = (ubicacion_destino or "").strip().upper()
+    if solicitado and solicitado != destino_codigo:
+        raise ReglaNegocio(
+            f"La ubicación destino del proveedor es {destino_codigo}; "
+            f"no se permite registrar el recibo en {solicitado}.")
+    ubicacion_destino = destino_codigo
+
     if proveedor_origen_id:
         po = s.get(Proveedor, proveedor_origen_id)
         if not po or not po.activo:
@@ -371,13 +407,20 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
         if not cod:
             continue
         qdoc = float(ln.cantidad_documento or 0)
-        qfis = float(ln.cantidad_fisica if ln.cantidad_fisica not in (None, 0) else qdoc)
+        # Cero es una cantidad física válida (faltante total). Solo None significa
+        # "sin informar". Nunca sustituir 0 por la cantidad documental.
+        qfis = float(ln.cantidad_fisica if ln.cantidad_fisica is not None else 0.0)
+        hasta = (ln.ubicacion_hasta or ubicacion_destino or "").upper()
+        if hasta != destino_codigo:
+            raise ReglaNegocio(
+                f"La línea {cod} tiene destino {hasta}, pero el proveedor debe recibir "
+                f"en {destino_codigo}.")
         s.add(ReciboLinea(
             recibo_id=r.id, articulo=cod, descripcion=ln.descripcion or "",
             cantidad_documento=qdoc, cantidad_fisica=qfis,
             lote=ln.lote or "", serial=ln.serial or "",
             ubicacion_desde=(ln.ubicacion_desde or "").upper(),
-            ubicacion_hasta=(ln.ubicacion_hasta or ubicacion_destino or "").upper(),
+            ubicacion_hasta=hasta,
             estado_match="PENDIENTE" if origen in ("BIN_A_BIN", "FACTURA") else None))
         creadas += 1
     if not creadas:
