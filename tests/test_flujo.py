@@ -19,6 +19,7 @@ from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
 import core.services as sv  # noqa: E402
+from core.services import campos_faltantes_proveedor, proveedor_listo_para_activar  # noqa: E402
 from core.auth import alcance_proveedor, puede  # noqa: E402
 from core.ui import catalogo_proveedores  # noqa: E402
 
@@ -38,6 +39,23 @@ def esperar_error(nombre, fn, fragmento=""):
         ok = fragmento.lower() in str(e).lower() if fragmento else True
         check(nombre, ok, str(e)[:120])
 
+
+print("\n=== 00. ACTIVACIÓN DE PROVEEDORES ===")
+faltan = campos_faltantes_proveedor(
+    codigo="VDR-X", nombre="Proveedor X", nit="",
+    ubicacion_origen="UB-ORIGEN", ubicacion_destino="UB-PROV-01",
+    tolerancia_averia_pct=1.0)
+check("Proveedor sin NIT no está listo para activar", "NIT" in faltan)
+check("Proveedor completo sí está listo para activar",
+      proveedor_listo_para_activar(
+          codigo="VDR-X", nombre="Proveedor X", nit="900123456",
+          ubicacion_origen="UB-ORIGEN", ubicacion_destino="UB-PROV-01",
+          tolerancia_averia_pct=1.0))
+check("Proveedor sin HASTA no está listo para activar",
+      not proveedor_listo_para_activar(
+          codigo="VDR-X", nombre="Proveedor X", nit="900123456",
+          ubicacion_origen="UB-ORIGEN", ubicacion_destino="",
+          tolerancia_averia_pct=1.0))
 
 print("\n=== 0A. PERMISOS INVENTARIOS ===")
 inv_user = {"rol": "INVENTARIOS"}
