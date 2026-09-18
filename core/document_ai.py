@@ -64,13 +64,89 @@ def _rapid_engine():
     return RapidOCR()
 
 
+def _texto_rapid_ordenado(res) -> tuple[str, list[float]]:
+    """Reconstruye filas de una tabla usando las coordenadas detectadas por RapidOCR.
+
+    RapidOCR suele detectar cada celda por separado. Si solo concatenamos las
+    detecciones con saltos de línea, se pierde la relación:
+    artículo | descripción | cantidad. Aquí agrupamos cajas por coordenada Y y
+    ordenamos cada fila de izquierda a derecha.
+    """
+    txts = list(getattr(res, "txts", None) or [])
+    raw_scores = list(getattr(res, "scores", None) or [])
+    scores = []
+    for x in raw_scores:
+        try:
+            scores.append(float(x))
+        except (TypeError, ValueError):
+            scores.append(0.0)
+
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or len(boxes) != len(txts):
+        texto = "\n".join(str(t).strip() for t in txts if str(t).strip()).strip()
+        return texto, scores
+
+    detecciones = []
+    for i, (txt, box) in enumerate(zip(txts, boxes)):
+        txt = str(txt or "").strip()
+        if not txt:
+            continue
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in box]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            x = min(xs)
+            cy = (min(ys) + max(ys)) / 2.0
+            h = max(1.0, max(ys) - min(ys))
+        except Exception:
+            # Si una caja particular viene corrupta, conserva el texto.
+            x, cy, h = 0.0, float(i) * 1000.0, 10.0
+        detecciones.append({
+            "texto": txt, "x": x, "cy": cy, "h": h,
+            "score": scores[i] if i < len(scores) else 0.0,
+        })
+
+    if not detecciones:
+        return "", scores
+
+    detecciones.sort(key=lambda d: (d["cy"], d["x"]))
+    filas = []
+    for det in detecciones:
+        mejor = None
+        mejor_dist = None
+        for fila in filas:
+            dist = abs(det["cy"] - fila["cy"])
+            tolerancia = max(10.0, 0.65 * max(det["h"], fila["h"]))
+            if dist <= tolerancia and (mejor_dist is None or dist < mejor_dist):
+                mejor, mejor_dist = fila, dist
+        if mejor is None:
+            filas.append({
+                "cy": det["cy"], "h": det["h"], "items": [det],
+            })
+        else:
+            mejor["items"].append(det)
+            n = len(mejor["items"])
+            mejor["cy"] = ((mejor["cy"] * (n - 1)) + det["cy"]) / n
+            mejor["h"] = max(mejor["h"], det["h"])
+
+    filas.sort(key=lambda f: f["cy"])
+    lineas = []
+    confs = []
+    for fila in filas:
+        items = sorted(fila["items"], key=lambda d: d["x"])
+        linea = " ".join(d["texto"] for d in items if d["texto"]).strip()
+        if linea:
+            lineas.append(linea)
+            confs.extend(d["score"] for d in items if d["score"] >= 0)
+
+    return "\n".join(lineas).strip(), confs
+
+
 def _ocr_rapid(img) -> tuple[str, float]:
-    """OCR principal. Lanza la excepción para permitir diagnóstico y fallback."""
+    """OCR principal conservando estructura espacial de tablas."""
     engine = _rapid_engine()
     res = engine(img)
-    txts = list(getattr(res, "txts", None) or [])
-    scores = [float(x) for x in (getattr(res, "scores", None) or [])]
-    texto = "\n".join(str(t).strip() for t in txts if str(t).strip()).strip()
+    texto, scores = _texto_rapid_ordenado(res)
     confianza = sum(scores) / len(scores) if scores else 0.0
     return texto, confianza
 
@@ -277,7 +353,7 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
             "articulo": cod.strip(),
             "descripcion": desc.strip(),
             "cantidad_documento": n,
-            "cantidad_fisica": n,
+            "cantidad_fisica": 0.0,
             "confianza": round(min(confianza_texto, 0.9), 3),
         })
 
@@ -337,7 +413,9 @@ def _cantidad_probable(resto: str):
             score -= 4
         if any(x in raw for x in (".", ",")) and val > 1000:
             score -= 2
-        candidatos.append((score, -m.start(), val))
+        # Ante empate favorece el número más a la derecha: en tablas de recibo
+        # la cantidad suele estar en la última columna.
+        candidatos.append((score, m.start(), val))
 
     if not candidatos:
         return None
@@ -347,12 +425,18 @@ def _cantidad_probable(resto: str):
 
 def lineas_desde_catalogo(texto: str, catalogo: dict[str, str],
                           confianza_texto: float = 0.8) -> list[dict]:
-    """Detecta códigos reales del maestro dentro del OCR y propone cantidad."""
+    """Detecta todas las referencias del maestro y su cantidad probable.
+
+    También recompone códigos numéricos cuando el OCR inserta espacios entre
+    dígitos, algo frecuente en etiquetas y tablas fotografiadas.
+    """
     if not texto or not catalogo:
         return []
 
-    mapa = {str(k).strip().upper(): (str(k).strip(), v or "")
-            for k, v in catalogo.items() if str(k).strip()}
+    mapa = {
+        str(k).strip().upper(): (str(k).strip(), v or "")
+        for k, v in catalogo.items() if str(k).strip()
+    }
     encontradas = {}
 
     for linea in texto.splitlines():
@@ -360,29 +444,51 @@ def lineas_desde_catalogo(texto: str, catalogo: dict[str, str],
         if not limpio:
             continue
         upper = limpio.upper()
+
+        # Variante compacta para referencias numéricas partidas por espacios.
+        compacto_digitos = re.sub(r"(?<=\d)\s+(?=\d)", "", upper)
+
+        candidatos_linea = set()
         tokens = re.findall(r"[A-Z0-9][A-Z0-9._/-]{2,}", upper)
         for token in tokens:
-            if token not in mapa:
+            if token in mapa:
+                candidatos_linea.add(token)
+
+        # Busca referencias del maestro que no hayan quedado como token completo.
+        # Se limita a códigos presentes literalmente/compactados para evitar fuzzy
+        # matching peligroso sobre inventario.
+        for key in mapa:
+            if key in candidatos_linea:
                 continue
-            codigo, descripcion = mapa[token]
-            pos = upper.find(token)
-            resto = limpio[pos + len(token):] if pos >= 0 else ""
+            if key in upper or (key.isdigit() and key in compacto_digitos):
+                candidatos_linea.add(key)
+
+        for key in candidatos_linea:
+            codigo, descripcion = mapa[key]
+
+            # Busca contexto posterior al código. Si el OCR separó el código
+            # numérico, usa la fila completa; los números embebidos en letras
+            # (ej. 200DS) no cuentan como cantidad por la regex de _cantidad_probable.
+            pos = upper.find(key)
+            resto = limpio[pos + len(key):] if pos >= 0 else limpio
             cantidad = _cantidad_probable(resto)
+
             actual = encontradas.get(codigo)
             propuesta = {
                 "articulo": codigo,
                 "descripcion": descripcion,
                 "cantidad_documento": float(cantidad or 0),
-                "cantidad_fisica": float(cantidad or 0),
+                # Cantidad física comienza en 0: la recepción real la confirma
+                # el usuario con "recibo completo" o modo discrepancias.
+                "cantidad_fisica": 0.0,
                 "confianza": round(min(confianza_texto, 0.92), 3),
                 "fuente": "OCR+MAESTRO",
             }
-            # Conserva la propuesta que sí logró identificar cantidad.
-            if actual is None or (not actual["cantidad_documento"] and cantidad):
+            if actual is None or (
+                    not float(actual.get("cantidad_documento") or 0) and cantidad):
                 encontradas[codigo] = propuesta
 
     return list(encontradas.values())
-
 
 def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     """Combina líneas heurísticas con códigos confirmados por el maestro."""
