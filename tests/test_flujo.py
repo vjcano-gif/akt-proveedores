@@ -471,8 +471,16 @@ with session_scope() as s:
                                ubicacion_hasta="UB-PROV-01")])
     RB1 = r.id
     check("BIN nace PENDIENTE_MATCH", r.estado == "PENDIENTE_MATCH")
-    check("BIN no afecta inventario antes del match",
-          sv.saldo_articulo(s, PID, "CP-A") == 0)
+    n_ing = sv.ingresar_inventario_bin_satisfactorio(
+        s, RB1, "recibo@akt.com")
+    check("Recibo satisfactorio ingresa 1 línea al inventario", n_ing == 1)
+    check("Recibo satisfactorio carga 100 CRUDO/DISPONIBLE antes del match",
+          sv.saldo_articulo(s, PID, "CP-A", "CRUDO", "DISPONIBLE") == 100)
+    n_repite = sv.ingresar_inventario_bin_satisfactorio(
+        s, RB1, "recibo@akt.com")
+    check("Ingreso satisfactorio es idempotente", n_repite == 0)
+    check("Reintento no duplica inventario",
+          sv.saldo_articulo(s, PID, "CP-A", "CRUDO", "DISPONIBLE") == 100)
     alertas_bin = sv.validar_bin_a_bin(s, r, PID)
     check("DESDE correcto no genera alerta documental", not alertas_bin)
 
@@ -481,8 +489,36 @@ with session_scope() as s:
         s, recibo_id=RB1, orden_compra_id=OCS["OC-A-100"],
         usuario="recibo@akt.com")
     check("Match exacto cierra recibo", res["estado"] == "CERRADA")
-    check("Match exacto ingresa 100 disponible",
+    check("Match exacto NO duplica las 100 ya ingresadas",
           sv.saldo_articulo(s, PID, "CP-A", "CRUDO", "DISPONIBLE") == 100)
+
+print("\n=== 1B. BIN SATISFACTORIO CON SOBRANTE -> RESTRINGIDO ===")
+with session_scope() as s:
+    r_pre = sv.crear_recibo(
+        s, proveedor_id=PID, origen="BIN_A_BIN", referencia="BIN-PRE-SOB",
+        usuario="proveedor@akt.com", ubicacion_destino="UB-PROV-01",
+        lineas=[sv.LineaRecibo(
+            "CP-D", "Pieza sobrante", 13, 13,
+            ubicacion_desde="UB-ORIGEN",
+            ubicacion_hasta="UB-PROV-01")])
+    RB_PRE_SOB = r_pre.id
+    LIN_PRE_SOB = r_pre.lineas[0].id
+    sv.ingresar_inventario_bin_satisfactorio(
+        s, RB_PRE_SOB, "recibo@akt.com")
+    check("Preingreso satisfactorio pone 13 disponibles",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "DISPONIBLE") == 13)
+
+with session_scope() as s:
+    res_pre = sv.match_recibo_lineas(
+        s, recibo_id=RB_PRE_SOB,
+        asignaciones={LIN_PRE_SOB: OCS["OC-D-10"]},
+        usuario="recibo@akt.com")
+    check("Match de preingreso detecta sobrante 3",
+          res_pre["lineas"][0]["sobrante"] == 3)
+    check("Preingreso + match deja 10 disponibles sin duplicar",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "DISPONIBLE") == 10)
+    check("Preingreso + match reclasifica 3 a RESTRINGIDO",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "RESTRINGIDO") == 3)
 
 print("\n=== 2. FACTURA MULTILÍNEA / MÚLTIPLES OC ===")
 with session_scope() as s:
