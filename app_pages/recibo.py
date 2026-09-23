@@ -639,7 +639,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "transaction-date-v19"
+    extractor_version = "real-photo-autorotate-v20"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -897,6 +897,26 @@ def _registrar(user):
             st.success(
                 f"Documento procesado automáticamente por {metodo}. "
                 f"Confianza aproximada: {cf}%.")
+
+        if extr.get("entrada_ia"):
+            st.success(
+                "Lectura principal con IA: "
+                f"**{extr.get('ia_fuente') or 'Document AI'}** · "
+                f"modelo **{extr.get('ia_modelo') or '—'}**."
+            )
+        else:
+            ia_error = str(extr.get("ia_error") or "").strip()
+            if ia_error:
+                st.warning(
+                    "GPT-5 nano no pudo utilizarse en esta lectura; se usó "
+                    f"OCR local como respaldo. Detalle: {ia_error}"
+                )
+            else:
+                st.info(
+                    "Esta lectura se procesó con OCR local. Para usar GPT-5 nano "
+                    "como motor principal debe estar configurado OPENAI_API_KEY "
+                    "en los Secrets de Streamlit."
+                )
 
         if diagnostico:
             st.caption(f"Diagnóstico OCR: {diagnostico}")
