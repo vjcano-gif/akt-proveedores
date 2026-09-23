@@ -246,6 +246,18 @@ def _fecha_ocr(extr):
     hoy_colombia = dt.datetime.now(ZoneInfo("America/Bogota")).date()
     if not raw:
         return hoy_colombia
+
+    # Fecha Transacción de BIN suele incluir hora con este formato:
+    # 2026-08-14-07.11.30. El campo de UI es Date, por lo que se conserva
+    # únicamente la parte calendario antes de parsear.
+    m_iso = re.search(r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b", raw)
+    if m_iso:
+        raw = m_iso.group(1)
+    else:
+        m_lat = re.search(r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b", raw)
+        if m_lat:
+            raw = m_lat.group(1)
+
     try:
         if len(raw) >= 10 and raw[:4].isdigit() and raw[4] in "-/":
             ts = pd.to_datetime(raw, yearfirst=True, errors="raise")
