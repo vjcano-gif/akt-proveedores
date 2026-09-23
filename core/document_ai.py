@@ -84,6 +84,13 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
         "El campo cantidad debe tomarse EXCLUSIVAMENTE de la columna Cantidad; "
         "nunca uses números de la descripción, serial, lote, DESDE o HASTA. "
         "Conserva Serial, Lote, DESDE y HASTA tal como aparecen. "
+        "FECHAS: si es BIN_A_BIN pueden aparecer dos fechas distintas. "
+        "fecha_transaccion debe ser EXCLUSIVAMENTE el valor rotulado "
+        "«Fecha Transacción» (por ejemplo 2026-08-14-07.11.30); "
+        "fecha_documento debe ser el valor rotulado simplemente «Fecha» "
+        "(normalmente en el encabezado superior derecho). "
+        "NO sustituyas Fecha Transacción por Fecha. Para el proceso de recibo "
+        "la fecha prioritaria del BIN es Fecha Transacción. "
         "No omitas una fila legible y no agregues filas que no existan."
     )
 
@@ -113,10 +120,14 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
                 "enum": ["BIN_A_BIN", "FACTURA", "OTRO"],
             },
             "referencia": {"type": ["string", "null"]},
-            "fecha": {"type": ["string", "null"]},
+            "fecha_transaccion": {"type": ["string", "null"]},
+            "fecha_documento": {"type": ["string", "null"]},
             "filas": {"type": "array", "items": fila_schema},
         },
-        "required": ["tipo_documento", "referencia", "fecha", "filas"],
+        "required": [
+            "tipo_documento", "referencia",
+            "fecha_transaccion", "fecha_documento", "filas"
+        ],
         "additionalProperties": False,
     }
 
@@ -221,7 +232,15 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
         "tipo_documento": str(
             anot.get("tipo_documento") or "").strip().upper(),
         "referencia": str(anot.get("referencia") or "").strip(),
-        "fecha": str(anot.get("fecha") or "").strip(),
+        "fecha_transaccion": str(
+            anot.get("fecha_transaccion") or "").strip(),
+        "fecha_documento": str(
+            anot.get("fecha_documento") or "").strip(),
+        "fecha": str(
+            anot.get("fecha_transaccion")
+            or anot.get("fecha_documento")
+            or ""
+        ).strip(),
         "filas": filas,
         "modelo": str(raw.get("model") or model),
         "usage_info": usage,
@@ -289,7 +308,11 @@ def _mistral_document_ai(nombre: str, data: bytes, mime: str | None = None) -> d
         "El codigo debe conservar exactamente todos sus dígitos. "
         "La cantidad debe corresponder exclusivamente a la columna Cantidad, "
         "nunca a números incluidos dentro de la descripción ni de Desde/Hasta. "
-        "Devuelve JSON con las claves: tipo_documento, referencia, fecha, filas. "
+        "FECHAS: en BIN_A_BIN extrae por separado fecha_transaccion del rótulo "
+        "«Fecha Transacción» y fecha_documento del rótulo simple «Fecha». "
+        "No confundas ambas; para recibo la prioritaria es fecha_transaccion. "
+        "Devuelve JSON con las claves: tipo_documento, referencia, "
+        "fecha_transaccion, fecha_documento, filas. "
         "filas debe ser una lista de objetos con proveedor, codigo, descripcion, "
         "cantidad, serial, lote, desde, hasta."
     )
@@ -362,7 +385,15 @@ def _mistral_document_ai(nombre: str, data: bytes, mime: str | None = None) -> d
         "texto": texto,
         "tipo_documento": str(anot.get("tipo_documento") or "").strip().upper(),
         "referencia": str(anot.get("referencia") or "").strip(),
-        "fecha": str(anot.get("fecha") or "").strip(),
+        "fecha_transaccion": str(
+            anot.get("fecha_transaccion") or "").strip(),
+        "fecha_documento": str(
+            anot.get("fecha_documento") or "").strip(),
+        "fecha": str(
+            anot.get("fecha_transaccion")
+            or anot.get("fecha_documento")
+            or ""
+        ).strip(),
         "filas": filas,
         "modelo": str(raw.get("model") or "mistral-ocr-latest"),
         "usage_info": raw.get("usage_info") or {},
