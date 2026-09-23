@@ -2394,7 +2394,15 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "OPENAI_GPT5_NANO": 20,
             "DOCUMENT_AI": 20,
         }
-        if qty_nueva > 0 and prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0):
+        qty_actual = float(actual.get("cantidad_documento") or 0)
+        if qty_nueva > 0 and (
+            qty_actual <= 0
+            or prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0)
+        ):
+            # Una fila validada con cantidad 0 significa "código reconocido,
+            # cantidad no leída". En ese caso una cantidad positiva de una
+            # fuente espacial ya validada para EL MISMO código debe poder
+            # completarla aunque su prioridad nominal sea menor.
             actual["cantidad_documento"] = qty_nueva
             actual["cantidad_fisica"] = 0.0
             actual["fuente"] = fuente_nueva
