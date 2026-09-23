@@ -14,6 +14,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, asdict
+from difflib import SequenceMatcher
 from functools import lru_cache
 
 
@@ -2011,6 +2012,161 @@ def lineas_bin_desde_texto(texto: str, catalogo: dict[str, str],
     return list(out.values())
 
 
+def _tokens_desc_bin(s: str) -> list[str]:
+    """Tokens útiles para comparar descripciones OCR contra el maestro."""
+    toks = re.findall(r"[A-Z0-9]+", str(s or "").upper())
+    return [t for t in toks if len(t) >= 2 and t not in {
+        "NONE", "WSERE", "SANYANG", "CHONGQING", "GUANGDONG"
+    }]
+
+
+def _sim_desc_bin(descripcion: str, linea: str) -> float:
+    base = _tokens_desc_bin(descripcion)
+    if not base:
+        return 0.0
+    fila = set(_tokens_desc_bin(linea))
+    return sum(1 for t in base if t in fila) / max(1, len(base))
+
+
+def _sim_codigo_bin(codigo: str, streams: list[str]) -> float:
+    """Similitud robusta ante 1-2 dígitos omitidos/agregados por OCR."""
+    code = re.sub(r"\D", "", str(codigo or ""))
+    if not code:
+        return 0.0
+    best = 0.0
+    for raw in streams:
+        d = re.sub(r"\D", "", str(raw or ""))
+        if not d:
+            continue
+        if code in d:
+            return 1.0
+        best = max(best, SequenceMatcher(None, d, code).ratio())
+        # El proveedor puede venir pegado delante del artículo. Se prueban
+        # ventanas cercanas al largo real del código para no penalizar ese ruido.
+        for L in range(max(8, len(code) - 2), min(len(d), len(code) + 2) + 1):
+            for i in range(0, len(d) - L + 1):
+                best = max(
+                    best,
+                    SequenceMatcher(None, d[i:i + L], code).ratio()
+                )
+    return float(best)
+
+
+def _cantidad_bin_antes_none(linea: str) -> float | None:
+    """Toma el último número aislado antes del primer NONE de una fila BIN."""
+    upper = str(linea or "").upper()
+    pos_none = upper.find("NONE")
+    if pos_none < 0:
+        return None
+    previo = upper[:pos_none]
+    candidatos = re.findall(
+        r"(?<![A-Z0-9])([0-9]{1,7}(?:[.,][0-9]+)?)(?![A-Z0-9])",
+        previo,
+    )
+    for raw in reversed(candidatos):
+        val = _num(raw)
+        if val is not None and val > 0:
+            return float(val)
+    return None
+
+
+def lineas_bin_desde_texto_maestro(
+        texto: str,
+        catalogo: dict[str, str],
+        confianza_texto: float = 0.8) -> list[dict]:
+    """Recupera filas BIN dañadas por OCR usando dos señales independientes.
+
+    Solo acepta una referencia del maestro si:
+    1) el patrón numérico del código es muy parecido (>= 0.90), Y
+    2) la descripción del maestro también coincide con la fila (>= 0.60), Y
+    3) la mejor opción tiene margen suficiente frente a la segunda.
+
+    Esto cubre fotos reales donde:
+      7700149604673 -> 700149604673
+      7700149604161 -> 700149604161
+      7700149604710 -> 700149604710
+    sin permitir un fuzzy-match libre sobre inventario.
+    """
+    if not texto or not catalogo:
+        return []
+
+    mapa = {
+        str(k).strip().upper(): (str(k).strip(), str(v or ""))
+        for k, v in catalogo.items()
+        if str(k).strip()
+    }
+    out = {}
+
+    for raw_line in str(texto).splitlines():
+        linea = " ".join(str(raw_line or "").split())
+        if not linea:
+            continue
+        upper = linea.upper()
+
+        # Una fila BIN real normalmente conserva al menos un NONE aun con ruido.
+        if "NONE" not in upper:
+            continue
+
+        tokens = re.findall(r"[A-Z0-9./-]{8,}", upper)
+        streams = []
+        for tok in tokens:
+            dig = re.sub(r"\D", "", tok)
+            if 10 <= len(dig) <= 20:
+                streams.append(dig)
+        if not streams:
+            continue
+
+        candidatos = []
+        for key, (codigo, descripcion) in mapa.items():
+            if not key.isdigit():
+                continue
+            sc_code = _sim_codigo_bin(key, streams)
+            if sc_code < 0.90:
+                continue
+            sc_desc = _sim_desc_bin(descripcion, linea)
+            if sc_desc < 0.60:
+                continue
+            score = (0.72 * sc_code) + (0.28 * sc_desc)
+            candidatos.append((score, sc_code, sc_desc, key, codigo, descripcion))
+
+        if not candidatos:
+            continue
+
+        candidatos.sort(reverse=True)
+        mejor = candidatos[0]
+        segundo = candidatos[1] if len(candidatos) > 1 else None
+        margen = mejor[0] - (segundo[0] if segundo else 0.0)
+
+        # Exacto dentro del stream: basta margen pequeño. Si hubo un dígito
+        # omitido/agregado, se exige margen claro para no asignar otro artículo.
+        exacto = mejor[1] >= 0.999
+        if (exacto and margen < 0.035) or (not exacto and margen < 0.06):
+            continue
+
+        _, sc_code, sc_desc, key, codigo, descripcion = mejor
+        qty = _cantidad_bin_antes_none(linea)
+
+        propuesta = {
+            "articulo": codigo,
+            "descripcion": descripcion,
+            "cantidad_documento": float(qty or 0),
+            "cantidad_fisica": 0.0,
+            "confianza": round(
+                min(0.99, max(float(confianza_texto), mejor[0])), 3),
+            "fuente": "BIN_MAESTRO_VALIDADO",
+            "codigo_score": round(float(sc_code), 3),
+            "descripcion_score": round(float(sc_desc), 3),
+        }
+        actual = out.get(key)
+        if actual is None or (
+            not float(actual.get("cantidad_documento") or 0)
+            and float(propuesta.get("cantidad_documento") or 0) > 0
+        ):
+            out[key] = propuesta
+
+    return list(out.values())
+
+
 def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     """Combina OCR con maestro priorizando parsers estructurados sobre heurísticos."""
     if not resultado:
@@ -2034,6 +2190,31 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 
     propuestas = lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf)
     propuestas_bin = lineas_bin_desde_texto(resultado.get("texto", ""), catalogo, cf)
+    propuestas_bin_maestro = lineas_bin_desde_texto_maestro(
+        resultado.get("texto", ""), catalogo, cf)
+
+    # El parser estricto manda. El parser validado contra maestro solo completa
+    # referencias que el estricto perdió por errores de OCR en 1-2 dígitos.
+    por_codigo_bin = {
+        str(x.get("articulo") or "").strip().upper(): x
+        for x in propuestas_bin
+        if str(x.get("articulo") or "").strip()
+    }
+    for x in propuestas_bin_maestro:
+        key = str(x.get("articulo") or "").strip().upper()
+        if not key:
+            continue
+        actual = por_codigo_bin.get(key)
+        if actual is None:
+            propuestas_bin.append(x)
+            por_codigo_bin[key] = x
+        elif (
+            not float(actual.get("cantidad_documento") or 0)
+            and float(x.get("cantidad_documento") or 0) > 0
+        ):
+            idx_actual = propuestas_bin.index(actual)
+            propuestas_bin[idx_actual] = x
+            por_codigo_bin[key] = x
     # Códigos que aparecen LITERALMENTE en el OCR, aunque la cantidad de esa
     # fila no se haya podido leer (caso real: 142 leído como "uaz"). Este set
     # sirve únicamente para autorizar un rescate geométrico de la cantidad;
@@ -2208,6 +2389,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "BIN_PDF_CLIP": 5,
             "BIN_PDF_CODIGO": 6,
             "BIN_TABLA_IMAGEN_VALIDADA": 8,
+            "BIN_MAESTRO_VALIDADO": 9,
             "MISTRAL_DOCUMENT_AI": 20,
             "OPENAI_GPT5_NANO": 20,
             "DOCUMENT_AI": 20,
