@@ -15,7 +15,8 @@ from core.document_ai import analizar_documento, completar_con_catalogo
 from core.models import Articulo, Documento, OrdenCompra, Proveedor, Recibo
 from core.services import (
     LineaRecibo, ReglaNegocio, confirmar_recibo_simple, crear_recibo,
-    guardar_archivo, leer_archivo, match_recibo_lineas,
+    guardar_archivo, ingresar_inventario_bin_satisfactorio, leer_archivo,
+    match_recibo_lineas,
     ordenes_compra_abiertas, sellar_recibo, sugerir_oc_por_linea,
     validar_bin_a_bin,
 )
@@ -1317,7 +1318,21 @@ def _registrar(user):
                     confirmar_recibo_simple(s, rid, user["email"])
                     msg = "Registro confirmado e ingresado al inventario."
                 elif origen == "BIN_A_BIN":
-                    msg = "BIN creado PENDIENTE_MATCH. No afecta inventario hasta validar las OC."
+                    if recepcion_estado == "COMPLETO":
+                        n_inv = ingresar_inventario_bin_satisfactorio(
+                            s, rid, user["email"])
+                        msg = (
+                            f"BIN recibido a satisfacción: {n_inv} línea(s) "
+                            "ingresadas al inventario del proveedor como "
+                            "CRUDO / DISPONIBLE. El BIN queda PENDIENTE_MATCH "
+                            "para validar las OC sin duplicar el inventario."
+                        )
+                    else:
+                        msg = (
+                            "BIN creado con discrepancias y PENDIENTE_MATCH. "
+                            "El inventario se definirá al validar las diferencias "
+                            "y las OC."
+                        )
                 else:
                     msg = "Factura creada en BORRADOR. El proveedor debe sellarla antes del match."
 
