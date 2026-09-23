@@ -628,8 +628,7 @@ def _refinar_cantidades_bin(img, res, txts):
         d for d in dets
         if d["cy"] > header_y + 3
         and (x_qty - 0.45 * ancho_col) <= d["cx"] < (x_serial - 1.0)
-        and len(re.sub(r"\s+", "", d["txt"])) <= 8
-        and bool(re.search(r"[0-9OBISZ]", d["txt"], re.I))
+        and 1 <= len(re.sub(r"\s+", "", d["txt"])) <= 8
     ]
 
     for d in candidatos:
@@ -891,9 +890,10 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
 
 
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae filas BIN usando geometría + relectura reforzada de cantidades."""
+    """Extrae filas BIN con orientación automática + geometría de columnas."""
     try:
-        img = _decode_image(data)
+        orientados, _, _, _ = _orientar_bin_bytes(data)
+        img = _decode_image(orientados)
         res = _rapid_engine()(img)
         txts = _refinar_celdas_numericas(img, res)
         txts = _refinar_cantidades_bin(img, res, txts)
@@ -1485,6 +1485,59 @@ def _score_bin_texto(texto: str) -> tuple[int, int]:
     return score, filas
 
 
+@lru_cache(maxsize=8)
+def _orientar_bin_bytes(data: bytes) -> tuple[bytes, int, str, float]:
+    """Corrige automáticamente fotos BIN tomadas de lado.
+
+    El escenario real de recibo incluye fotos verticales del formato impreso,
+    aunque la tabla está apaisada. El OCR espacial necesita la tabla horizontal.
+    Se prueba primero la orientación original con Tesseract. Solo si NO logra
+    estructura BIN suficiente se prueban 90° antihorario, 90° horario y 180°.
+
+    Devuelve:
+      bytes PNG orientados, grados aplicados, texto Tesseract, confianza.
+    Para documentos que no parecen BIN se conserva la orientación original.
+    """
+    import cv2
+
+    img = _decode_image(data)
+
+    candidatos = [
+        (0, img),
+        (90, cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+        (-90, cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)),
+        (180, cv2.rotate(img, cv2.ROTATE_180)),
+    ]
+
+    evaluados = []
+    for grados, candidato in candidatos:
+        try:
+            texto, conf = _ocr_tesseract(candidato)
+        except Exception:
+            texto, conf = "", 0.0
+        score, filas = _score_bin_texto(texto)
+        evaluados.append((score, filas, float(conf or 0.0), grados, candidato, texto))
+
+        # Si la orientación actual ya reconstruyó una tabla real, no hace falta
+        # seguir rotando. Dos filas completas evitan falsos positivos.
+        if grados == 0 and filas >= 2 and score >= 36:
+            break
+
+    # Solo rota si alguna orientación reconoció estructura BIN real.
+    mejores_bin = [x for x in evaluados if x[1] >= 2 and x[0] >= 36]
+    if mejores_bin:
+        best = max(mejores_bin, key=lambda x: (x[0], x[1], x[2]))
+    else:
+        # No parece BIN: no arriesgar rotar facturas u otros documentos.
+        best = next(x for x in evaluados if x[3] == 0)
+
+    _, _, conf, grados, elegido, texto = best
+    ok, encoded = cv2.imencode(".png", elegido)
+    if not ok:
+        return data, 0, texto, conf
+    return encoded.tobytes(), int(grados), texto, conf
+
+
 def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
     """Devuelve texto OCR escogiendo el motor que mejor conserva la tabla.
 
@@ -1495,9 +1548,17 @@ def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
     """
     diagnosticos = []
     try:
-        img = _decode_image(data)
+        orientados, grados, tess_pre_texto, tess_pre_conf = _orientar_bin_bytes(data)
+        img = _decode_image(orientados)
+        if grados:
+            diagnosticos.append(
+                f"Orientación automática BIN: {grados:+d}°")
     except Exception as e:
-        return "", 0.0, "OCR", f"Decodificación: {type(e).__name__}: {e}"
+        try:
+            img = _decode_image(data)
+            grados, tess_pre_texto, tess_pre_conf = 0, "", 0.0
+        except Exception:
+            return "", 0.0, "OCR", f"Decodificación: {type(e).__name__}: {e}"
 
     rapid_texto, rapid_conf, rapid_var = "", 0.0, ""
     try:
@@ -1514,11 +1575,12 @@ def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
     except Exception as e:
         diagnosticos.append(f"RapidOCR: {type(e).__name__}: {e}")
 
-    tess_texto, tess_conf = "", 0.0
+    tess_texto, tess_conf = tess_pre_texto, float(tess_pre_conf or 0.0)
     try:
-        # Para tablas BIN el original suele preservar mejor el espaciado de
-        # columnas que una binarización agresiva. PSM 6 reconstruye cada fila.
-        tess_texto, tess_conf = _ocr_tesseract(img)
+        # La selección de orientación ya ejecutó Tesseract sobre la imagen
+        # elegida. Solo relee si aquella etapa no produjo texto.
+        if not tess_texto:
+            tess_texto, tess_conf = _ocr_tesseract(img)
         if not tess_texto:
             variantes = _preprocesar_para_ocr(img)
             preferida = variantes[1][1] if len(variantes) > 1 else img
