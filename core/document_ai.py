@@ -2101,9 +2101,22 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 
     propuestas_espaciales = []
     for row in resultado.get("bin_filas_espaciales", []) or []:
-        key = str(row.get("articulo") or "").strip().upper()
+        raw_key = re.sub(
+            r"\s+", "", str(row.get("articulo") or "").strip().upper())
+        key = raw_key
+
+        # En fotos reales Proveedor y Código pueden quedar unidos en una sola
+        # detección OCR, igual que ocurría en los PDF diagnosticados por Claude:
+        #   SANYANGIN-0017700149604819
+        # El rescate NO es fuzzy: solo se permite si un único código EXACTO del
+        # maestro aparece literalmente dentro del token contaminado.
         if key not in mapa_upper:
-            continue
+            coincidencias = [k for k in mapa_upper if k and k in raw_key]
+            if len(coincidencias) == 1:
+                key = coincidencias[0]
+            else:
+                continue
+
         oficial_cod, oficial_desc = mapa_upper[key]
         propuestas_espaciales.append({
             "articulo": oficial_cod,
