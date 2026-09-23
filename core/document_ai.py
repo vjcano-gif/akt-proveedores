@@ -2034,6 +2034,15 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 
     propuestas = lineas_desde_catalogo(resultado.get("texto", ""), catalogo, cf)
     propuestas_bin = lineas_bin_desde_texto(resultado.get("texto", ""), catalogo, cf)
+    # Códigos que aparecen LITERALMENTE en el OCR, aunque la cantidad de esa
+    # fila no se haya podido leer (caso real: 142 leído como "uaz"). Este set
+    # sirve únicamente para autorizar un rescate geométrico de la cantidad;
+    # nunca se toma la cantidad heurística de propuestas para un BIN.
+    codigos_texto_presentes = {
+        str(x.get("articulo") or "").strip().upper()
+        for x in propuestas
+        if str(x.get("articulo") or "").strip()
+    }
 
     propuestas_ia = []
     for row in resultado.get("lineas_ia", []) or []:
@@ -2119,17 +2128,49 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             f"{len(propuestas_ia)} fila(s) contra el maestro."
         )
     elif es_bin_imagen:
-        # Sin filas estructuradas válidas no se autocompletan cantidades desde
-        # OCR espacial ni heurístico. Se fuerza revisión en vez de inventar.
-        fuentes_merge = (
-            propuestas_bin + propuestas_espaciales
-            if propuestas_bin else []
-        )
-        if not propuestas_bin:
+        # Un rescate espacial solo puede entrar si el MISMO código apareció
+        # literalmente en el OCR y existe exactamente en el maestro. Así
+        # recuperamos cantidades que el OCR textual deformó (p.ej. 142 -> uaz)
+        # sin permitir que la geometría invente otra referencia válida.
+        espaciales_validadas = [
+            x for x in propuestas_espaciales
+            if str(x.get("articulo") or "").strip().upper()
+            in codigos_texto_presentes
+        ]
+
+        if propuestas_bin:
+            fuentes_merge = propuestas_bin + espaciales_validadas
+            rescatadas = len({
+                str(x.get("articulo") or "").strip().upper()
+                for x in espaciales_validadas
+            } - {
+                str(x.get("articulo") or "").strip().upper()
+                for x in propuestas_bin
+            })
+            if rescatadas:
+                resultado["diagnostico_bin"] = (
+                    f"Se rescataron {rescatadas} fila(s) cuya referencia sí "
+                    "aparecía exactamente en el documento, pero cuya cantidad "
+                    "requirió lectura geométrica reforzada."
+                )
+        elif len(codigos_texto_presentes) >= 2 and espaciales_validadas:
+            # Si el patrón NONE/NONE se deterioró por la foto, todavía puede
+            # recuperarse la tabla cuando hay coincidencia triple:
+            # código literal en OCR + código exacto en maestro + cantidad en
+            # la columna geométrica Cantidad.
+            fuentes_merge = espaciales_validadas
             resultado["diagnostico_bin"] = (
-                "No se pudieron validar filas BIN con el patrón "
-                "Código + Cantidad + NONE + NONE. No se autocompletaron "
-                "códigos ni cantidades para evitar datos incorrectos."
+                "La foto no conservó el patrón textual completo, pero las "
+                "filas se recuperaron por coincidencia exacta de código en OCR "
+                "+ maestro y por posición de la columna Cantidad. Revise antes "
+                "de confirmar la recepción."
+            )
+        else:
+            fuentes_merge = []
+            resultado["diagnostico_bin"] = (
+                "No se pudieron validar filas BIN con seguridad. No se "
+                "autocompletaron códigos ni cantidades para evitar datos "
+                "incorrectos."
             )
     else:
         fuentes_merge = propuestas + propuestas_bin + propuestas_espaciales
@@ -2177,12 +2218,13 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     # si el texto estructurado recuperó varias filas válidas, la lista final
     # se limita a esos códigos exactos del maestro. Una caja espacial con un
     # código distinto (aunque casualmente exista en el maestro) no se añade.
-    if es_imagen and bin_filas_texto >= 2 and propuestas_bin:
+    if es_bin_imagen and (propuestas_bin or codigos_texto_presentes):
         codigos_texto_validos = {
             str(x.get("articulo") or "").strip().upper()
             for x in propuestas_bin
             if str(x.get("articulo") or "").strip()
-        }
+        } | codigos_texto_presentes
+
         resultado["lineas"] = [
             x for x in (resultado.get("lineas") or [])
             if str(x.get("articulo") or "").strip().upper()
