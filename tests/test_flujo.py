@@ -942,6 +942,78 @@ try:
 finally:
     dai._mistral_document_ai = _mistral_original
 
+print("\n=== 10A0B. FOTO REAL BIN2717603 ===")
+texto_bin2717603 = """
+MOVIMIENTO BIN A BIN
+Id de Bin: BIN2717603 Fecha: 18/09/2026
+Fecha Transacción: 2026-09-17-12.33.28
+Proveedor Código Descripción Cantidad Serial Lote Desde Hasta
+SANYANG IN-001 7700149603447 Cubierta manubrio JetEvo Mp 60 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149603980 Cubta Frontal Der JetEvo Mp 240 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604611 Cubta Frontal Izq JetEvo Mp 240 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604543 Cubta Frontal JetEvo Mp 180 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149422758 Cubta Frontal RX Mp 230 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604673 Cubta Lat Piso Der JetEvo Mp 72 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604161 Cubta Lat Piso Izq JetEvo Mp 156 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604819 Cubta Tras Der JetEvo Mp uaz NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604710 Cubta Tras Der int JetEvo Mp 90 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+SANYANG IN-001 7700149604802 Cubta Tras Izq JetEvo Mp 180 NONE NONE WSERE PSER 1 1 1 WSERE WSER VIPI NTAR TE
+"""
+catalogo_bin2717603 = {
+    "7700149603447": "Cubierta manubrio JetEvo Mp",
+    "7700149603980": "Cubta Frontal Der JetEvo Mp",
+    "7700149604611": "Cubta Frontal Izq JetEvo Mp",
+    "7700149604543": "Cubta Frontal JetEvo Mp",
+    "7700149422758": "Cubta Frontal RX Mp",
+    "7700149604673": "Cubta Lat Piso Der JetEvo Mp",
+    "7700149604161": "Cubta Lat Piso Izq JetEvo Mp",
+    "7700149604819": "Cubta Tras Der JetEvo Mp",
+    "7700149604710": "Cubta Tras Der int JetEvo Mp",
+    "7700149604802": "Cubta Tras Izq JetEvo Mp",
+}
+esperado_bin2717603 = {
+    "7700149603447": 60.0,
+    "7700149603980": 240.0,
+    "7700149604611": 240.0,
+    "7700149604543": 180.0,
+    "7700149422758": 230.0,
+    "7700149604673": 72.0,
+    "7700149604161": 156.0,
+    "7700149604819": 142.0,
+    "7700149604710": 90.0,
+    "7700149604802": 180.0,
+}
+resultado_bin2717603 = estructurar(texto_bin2717603, 0.95)
+resultado_bin2717603["confianza_texto"] = 0.95
+resultado_bin2717603["metodo"] = "TESSERACT/BIN_ESTRUCTURADO"
+resultado_bin2717603["entrada_imagen"] = True
+resultado_bin2717603["origen_sugerido"] = "BIN_A_BIN"
+resultado_bin2717603["bin_filas_espaciales"] = [{
+    "articulo": "7700149604819",
+    "descripcion_ocr": "Cubta Tras Der JetEvo Mp",
+    "cantidad_documento": 142.0,
+    "cantidad_fisica": 0.0,
+    "serial": "NONE",
+    "lote": "NONE",
+    "ubicacion_desde": "WSERE PSER 1 1 1",
+    "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+    "fuente": "BIN_ESPACIAL",
+}]
+completar_con_catalogo(resultado_bin2717603, catalogo_bin2717603)
+cantidades_bin2717603 = {
+    x["articulo"]: float(x["cantidad_documento"])
+    for x in resultado_bin2717603["lineas"]
+}
+check("BIN2717603 conserva las 10 referencias",
+      set(cantidades_bin2717603) == set(esperado_bin2717603),
+      str(cantidades_bin2717603))
+check("BIN2717603 rescata 142 aunque OCR textual lea uaz",
+      cantidades_bin2717603 == esperado_bin2717603,
+      str(cantidades_bin2717603))
+check("BIN2717603 usa Fecha Transacción 17/09/2026",
+      resultado_bin2717603["fecha"]["valor"] == "2026-09-17",
+      str(resultado_bin2717603["fecha"]))
+
 print("\n=== 10A0C. FOTO REAL ROTADA / CANTIDAD DEFORMADA ===")
 try:
     import cv2
