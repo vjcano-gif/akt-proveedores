@@ -672,27 +672,134 @@ def sugerir_oc_por_linea(s, recibo_id: int) -> list[dict]:
     return out
 
 
-def _ingresar_linea_match(s, r, ln, esperado, usuario):
+def ingresar_inventario_bin_satisfactorio(
+        s, recibo_id: int, usuario=None) -> int:
+    """Ingresa físicamente un BIN recibido a satisfacción al inventario.
+
+    El recibo conserva estado PENDIENTE_MATCH porque la OC aún debe validarse,
+    pero la existencia física ya queda visible en el inventario del proveedor.
+    El ingreso es idempotente: si el mismo documento ya generó ENTRADAS, no
+    vuelve a cargarlo.
+    """
+    r = s.get(Recibo, recibo_id)
+    if not r:
+        raise ReglaNegocio("Recibo inexistente.")
+    if r.origen != "BIN_A_BIN":
+        raise ReglaNegocio(
+            "El ingreso inmediato por recepción satisfactoria aplica a BIN A BIN.")
+
+    existentes = float(
+        s.query(func.coalesce(func.sum(MovimientoInventario.cantidad), 0.0))
+        .filter(
+            MovimientoInventario.documento_id == r.documento_id,
+            MovimientoInventario.tipo == "ENTRADA",
+            MovimientoInventario.cantidad > 0,
+        ).scalar() or 0.0
+    )
+    if existentes > TOL:
+        return 0
+
+    n = 0
+    for ln in r.lineas:
+        cant = float(ln.cantidad_fisica or 0)
+        if cant <= TOL:
+            continue
+        ubic = ln.ubicacion_hasta or r.ubicacion_destino or ""
+        mover_inventario(
+            s,
+            proveedor_id=r.proveedor_id,
+            articulo=ln.articulo,
+            cantidad=cant,
+            tipo="ENTRADA",
+            ubicacion=ubic,
+            estado="CRUDO",
+            condicion="DISPONIBLE",
+            documento_id=r.documento_id,
+            referencia=r.documento.trz,
+            usuario=usuario,
+        )
+        ln.condicion = "DISPONIBLE"
+        n += 1
+
+    s.flush()
+    auditar(
+        s, usuario, None, "INGRESO_BIN_SATISFACTORIO", "recibos", r.id,
+        f"{n} línea(s) ingresadas a CRUDO/DISPONIBLE antes del match")
+    return n
+
+
+def _recibo_preingresado(s, r: Recibo) -> bool:
+    """Indica si el stock físico completo del recibo ya fue ingresado."""
+    fisicos = {}
+    for ln in r.lineas:
+        qty = max(0.0, float(ln.cantidad_fisica or 0))
+        fisicos[ln.articulo] = fisicos.get(ln.articulo, 0.0) + qty
+
+    if not fisicos or sum(fisicos.values()) <= TOL:
+        return False
+
+    rows = (
+        s.query(
+            MovimientoInventario.articulo,
+            func.coalesce(func.sum(MovimientoInventario.cantidad), 0.0),
+        )
+        .filter(
+            MovimientoInventario.documento_id == r.documento_id,
+            MovimientoInventario.tipo == "ENTRADA",
+            MovimientoInventario.cantidad > 0,
+        )
+        .group_by(MovimientoInventario.articulo)
+        .all()
+    )
+    ingresado = {art: float(qty or 0.0) for art, qty in rows}
+    return all(ingresado.get(art, 0.0) + TOL >= qty
+               for art, qty in fisicos.items())
+
+
+def _ingresar_linea_match(
+        s, r, ln, esperado, usuario, inventario_preingresado=False):
     recibido = float(ln.cantidad_fisica or 0)
     aceptado = min(recibido, max(0.0, esperado))
     sobrante = max(0.0, recibido - aceptado)
     ubic = ln.ubicacion_hasta or r.ubicacion_destino or ""
 
-    if aceptado > TOL:
-        mover_inventario(
-            s, proveedor_id=r.proveedor_id, articulo=ln.articulo,
-            cantidad=aceptado, tipo="ENTRADA", ubicacion=ubic,
-            estado="CRUDO", condicion="DISPONIBLE",
-            documento_id=r.documento_id, referencia=r.documento.trz,
-            usuario=usuario)
-    if sobrante > TOL:
-        # El sobrante queda segregado hasta que Inventarios defina su aceptación.
-        mover_inventario(
-            s, proveedor_id=r.proveedor_id, articulo=ln.articulo,
-            cantidad=sobrante, tipo="ENTRADA", ubicacion=ubic,
-            estado="CRUDO", condicion="RESTRINGIDO",
-            documento_id=r.documento_id, referencia=r.documento.trz,
-            usuario=usuario)
+    if inventario_preingresado:
+        # El físico ya fue cargado como DISPONIBLE al confirmar recepción
+        # satisfactoria. El match contra OC NO vuelve a sumar inventario.
+        # Solo segrega a RESTRINGIDO la porción que exceda la OC.
+        if sobrante > TOL:
+            reclasificar(
+                s,
+                proveedor_id=r.proveedor_id,
+                articulo=ln.articulo,
+                cantidad=sobrante,
+                ubicacion=ubic,
+                estado="CRUDO",
+                desde="DISPONIBLE",
+                hacia="RESTRINGIDO",
+                documento_id=r.documento_id,
+                referencia=r.documento.trz,
+                usuario=usuario,
+            )
+            ln.condicion = "RESTRINGIDO"
+    else:
+        if aceptado > TOL:
+            mover_inventario(
+                s, proveedor_id=r.proveedor_id, articulo=ln.articulo,
+                cantidad=aceptado, tipo="ENTRADA", ubicacion=ubic,
+                estado="CRUDO", condicion="DISPONIBLE",
+                documento_id=r.documento_id, referencia=r.documento.trz,
+                usuario=usuario)
+        if sobrante > TOL:
+            # El sobrante queda segregado hasta que Inventarios defina su aceptación.
+            mover_inventario(
+                s, proveedor_id=r.proveedor_id, articulo=ln.articulo,
+                cantidad=sobrante, tipo="ENTRADA", ubicacion=ubic,
+                estado="CRUDO", condicion="RESTRINGIDO",
+                documento_id=r.documento_id, referencia=r.documento.trz,
+                usuario=usuario)
+            ln.condicion = "RESTRINGIDO"
+
     ln.cantidad_match = aceptado
     ln.procesada = True
     return aceptado, sobrante
@@ -716,6 +823,7 @@ def match_recibo_lineas(s, *, recibo_id, asignaciones: dict[int, int], usuario,
     if referencia_bin:
         r.documento.referencia = referencia_bin
 
+    inventario_preingresado = _recibo_preingresado(s, r)
     resultados, novedades = [], []
     for ln in r.lineas:
         if ln.procesada:
@@ -741,7 +849,9 @@ def match_recibo_lineas(s, *, recibo_id, asignaciones: dict[int, int], usuario,
 
         esperado = max(0.0, float(oc.pendiente))
         recibido = float(ln.cantidad_fisica or 0)
-        aceptado, sobrante = _ingresar_linea_match(s, r, ln, esperado, usuario)
+        aceptado, sobrante = _ingresar_linea_match(
+            s, r, ln, esperado, usuario,
+            inventario_preingresado=inventario_preingresado)
         faltante = max(0.0, esperado - recibido)
 
         oc.cantidad_recibida = float(oc.cantidad_recibida or 0) + aceptado
