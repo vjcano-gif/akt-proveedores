@@ -942,6 +942,74 @@ try:
 finally:
     dai._mistral_document_ai = _mistral_original
 
+print("\n=== 10A0C. FOTO REAL ROTADA / CANTIDAD DEFORMADA ===")
+try:
+    import cv2
+    import numpy as np
+    import pytesseract
+
+    # Simula una foto tomada verticalmente de un BIN cuya tabla real es
+    # horizontal. La selección debe rotarla antes del parser geométrico.
+    img_portrait = np.full((900, 600, 3), 255, dtype=np.uint8)
+    ok_png, buf_png = cv2.imencode(".png", img_portrait)
+    foto_rotada_bytes = buf_png.tobytes() if ok_png else b""
+
+    ocr_original = dai._ocr_tesseract
+    try:
+        texto_bin_orientado = (
+            "MOVIMIENTO BIN A BIN\n"
+            "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta\n"
+            "SANYANG 7700149603447 Pieza A 60 NONE NONE WSERE PSER WSERE WSER\n"
+            "SANYANG 7700149603980 Pieza B 240 NONE NONE WSERE PSER WSERE WSER"
+        )
+
+        def _ocr_por_orientacion(im):
+            h, w = im.shape[:2]
+            if w > h:
+                return texto_bin_orientado, 0.99
+            return "texto lateral ilegible", 0.10
+
+        dai._ocr_tesseract = _ocr_por_orientacion
+        dai._orientar_bin_bytes.cache_clear()
+        _, grados_test, texto_test, _ = dai._orientar_bin_bytes(
+            foto_rotada_bytes)
+        check("Foto BIN lateral se rota automáticamente",
+              abs(grados_test) == 90, str(grados_test))
+        check("Foto rotada recupera estructura BIN",
+              dai._score_bin_texto(texto_test)[1] == 2,
+              texto_test)
+    finally:
+        dai._ocr_tesseract = ocr_original
+        dai._orientar_bin_bytes.cache_clear()
+
+    # Caso observado en foto real: una cantidad como 142 puede ser leída por
+    # OCR general como letras (p.ej. 'uaz'). Al estar geométricamente dentro de
+    # la columna Cantidad debe releerse con whitelist numérica.
+    fake_qty = SimpleNamespace(
+        txts=["Cantidad", "Serial", "Lote", "uaz", "NONE", "NONE"],
+        scores=[0.99] * 6,
+        boxes=[
+            [[100, 20], [180, 20], [180, 45], [100, 45]],
+            [[220, 20], [280, 20], [280, 45], [220, 45]],
+            [[320, 20], [370, 20], [370, 45], [320, 45]],
+            [[120, 80], [175, 80], [175, 108], [120, 108]],
+            [[225, 80], [280, 80], [280, 108], [225, 108]],
+            [[325, 80], [380, 80], [380, 108], [325, 108]],
+        ],
+    )
+    qty_img = np.full((160, 440, 3), 255, dtype=np.uint8)
+    tess_img_original = pytesseract.image_to_string
+    try:
+        pytesseract.image_to_string = lambda *args, **kwargs: "142"
+        refinadas = dai._refinar_cantidades_bin(
+            qty_img, fake_qty, list(fake_qty.txts))
+        check("Cantidad deformada uaz se relee como 142",
+              refinadas[3] == "142", str(refinadas))
+    finally:
+        pytesseract.image_to_string = tess_img_original
+except Exception as e:
+    check("Prueba foto rotada/cantidad deformada disponible", False, str(e))
+
 print("\n=== 10A1B. OPENAI GPT-5 NANO VISION (MOCK) ===")
 _openai_original = dai._openai_document_ai
 try:
