@@ -1644,6 +1644,32 @@ def _num(s):
         return None
 
 
+def _extraer_fecha_transaccion(texto: str) -> str | None:
+    """Extrae la fecha operativa del rótulo 'Fecha Transacción'.
+
+    En MOVIMIENTO BIN A BIN esta fecha es distinta de la 'Fecha' de emisión
+    que aparece en el encabezado. Para recibo debe prevalecer la transacción.
+    Admite ejemplos como:
+      Fecha Transacción: 2026-08-14-07.11.30
+      Fecha Transaccion: 14/08/2026 07:11:30
+    Devuelve únicamente la parte calendario.
+    """
+    t = str(texto or "")
+    patrones = [
+        r"fecha\s+transacci[oó]n\s*[:#-]?\s*"
+        r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})"
+        r"(?:[- T]\d{1,2}[.:]\d{1,2}(?:[.:]\d{1,2})?)?",
+        r"fecha\s+transacci[oó]n\s*[:#-]?\s*"
+        r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})"
+        r"(?:[ T-]\d{1,2}[.:]\d{1,2}(?:[.:]\d{1,2})?)?",
+    ]
+    for patron in patrones:
+        m = re.search(patron, t, re.I)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
 def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
     """Extrae campos comunes sin inventar valores."""
     t = texto or ""
@@ -1655,10 +1681,16 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
         r"(?:orden\s+de\s+compra|oc|pedido)\s*(?:no\.?|nro\.?|#|:)?\s*([A-Z0-9._/-]{4,})"
     ], t)
     nit = _primero([r"(?:NIT|N\.I\.T\.)\s*[:#-]?\s*([0-9.-]{6,})"], t)
-    fecha = _primero([
-        r"(?:fecha|date)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-        r"\b(\d{4}-\d{2}-\d{2})\b",
+    fecha_transaccion = _extraer_fecha_transaccion(t)
+    fecha_documento = _primero([
+        r"(?:^|\n)\s*(?:fecha|date)\s*[:#-]?\s*"
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"(?:^|\n)\s*(?:fecha|date)\s*[:#-]?\s*"
+        r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})",
     ], t)
+    # En BIN a BIN, Fecha Transacción es la fecha operativa que debe viajar
+    # al recibo. La fecha simple del encabezado solo es respaldo.
+    fecha = fecha_transaccion or fecha_documento
     # DESDE/HASTA de un BIN son columnas tabulares; no se extraen aquí
     # porque tomar "la palabra siguiente" al encabezado produce falsos positivos.
     ubicacion_origen = _primero([
@@ -1696,7 +1728,21 @@ def estructurar(texto: str, confianza_texto: float = 0.8) -> dict:
         "referencia": asdict(Campo(ref, confianza_texto if ref else 0.0, "texto")),
         "orden_compra": asdict(Campo(oc, confianza_texto if oc else 0.0, "texto")),
         "nit": asdict(Campo(nit, confianza_texto if nit else 0.0, "texto")),
-        "fecha": asdict(Campo(fecha, confianza_texto if fecha else 0.0, "texto")),
+        "fecha": asdict(Campo(
+            fecha,
+            confianza_texto if fecha else 0.0,
+            "Fecha Transacción" if fecha_transaccion else "Fecha documento",
+        )),
+        "fecha_transaccion": asdict(Campo(
+            fecha_transaccion,
+            confianza_texto if fecha_transaccion else 0.0,
+            "Fecha Transacción",
+        )),
+        "fecha_documento_origen": asdict(Campo(
+            fecha_documento,
+            confianza_texto if fecha_documento else 0.0,
+            "Fecha documento",
+        )),
         "ubicacion_origen": asdict(Campo(
             ubicacion_origen, confianza_texto if ubicacion_origen else 0.0, "texto")),
         "ubicacion_destino": asdict(Campo(
