@@ -699,6 +699,25 @@ check("Extractor infiere BIN por estructura tabular aunque falte el título",
           "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta"
       ) == "BIN_A_BIN")
 
+sample_fechas_bin = """
+MOVIMIENTO BIN A BIN
+Id de Bin: BIN2654425
+Fecha: 18/09/2026
+Fecha Transacción: 2026-08-14-07.11.30
+Proveedor Código Descripción Cantidad Serial Lote Desde Hasta
+CHONGQING-012 7700149453691 Base Silla 200DS+ Mp 80 NONE NONE WSERE PUMO 1 1 1 WSERE WUMO 1 1 1
+"""
+ext_fechas_bin = estructurar(sample_fechas_bin, 0.99)
+check("BIN prioriza Fecha Transacción sobre Fecha de encabezado",
+      ext_fechas_bin["fecha"]["valor"] == "2026-08-14",
+      str(ext_fechas_bin["fecha"]))
+check("BIN conserva Fecha Transacción como campo auditable",
+      ext_fechas_bin["fecha_transaccion"]["valor"] == "2026-08-14",
+      str(ext_fechas_bin["fecha_transaccion"]))
+check("BIN conserva fecha de encabezado solo como origen secundario",
+      ext_fechas_bin["fecha_documento_origen"]["valor"] == "18/09/2026",
+      str(ext_fechas_bin["fecha_documento_origen"]))
+
 sample_catalogo = """
 FACTURA FV-777
 FECHA 17/09/2026
