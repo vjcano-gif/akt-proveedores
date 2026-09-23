@@ -104,6 +104,7 @@ with session_scope() as s:
         ("CP-A", "Carenaje Crudo", "CRUDO"),
         ("CP-B", "Calca", "CRUDO"),
         ("CP-C", "Soporte", "CRUDO"),
+        ("CP-D", "Pieza sobrante", "CRUDO"),
     ):
         s.add(Articulo(codigo=cod, descripcion=desc, tipo=tipo))
 
@@ -121,6 +122,7 @@ with session_scope() as s:
         ("OC-B-60", "CP-B", 60),
         ("OC-C-10", "CP-C", 10),
         ("OC-B-10", "CP-B", 10),
+        ("OC-D-10", "CP-D", 10),
     ):
         s.add(OrdenCompra(numero=numero, proveedor_id=PID, articulo=art,
                           cantidad=qty, estado="ABIERTA", fecha=dt.date.today()))
