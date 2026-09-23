@@ -8,7 +8,7 @@ import streamlit as st
 from core import ui
 from core.auth import alcance_proveedor
 from core.db import session_scope
-from core.models import Documento, Inventario, MovimientoInventario
+from core.models import Articulo, Documento, Inventario, MovimientoInventario
 from core.services import (SEMAFORO_COLOR, antiguedad_documentos,
                            indicadores_inventario)
 
@@ -16,21 +16,36 @@ ORDEN_SEM = ["CRÍTICO", "ALERTA", "ÓPTIMO", "EXCESO", "SIN MOVIMIENTO"]
 
 
 def render(user):
-    ui.encabezado("Panel de control de inventario",
-                  "Posición · rotación · cobertura · kardex · trazabilidad")
-    t1, t2, t3 = st.tabs(["📊 Posición y rotación", "📒 Kardex", "🔎 Trazabilidad"])
+    ui.encabezado(
+        "Panel de control de inventario",
+        "Inventario por proveedor · disponible/restringido · kardex · trazabilidad")
+    t1, t2, t3, t4 = st.tabs([
+        "📦 Inventario por proveedor",
+        "🚫 Restringido",
+        "📒 Kardex",
+        "🔎 Trazabilidad",
+    ])
     with t1:
         _panel(user)
     with t2:
-        _kardex(user)
+        _restringido(user)
     with t3:
+        _kardex(user)
+    with t4:
         _traza(user)
 
 
 def _panel(user):
-    pid = alcance_proveedor(user)
-    c1, c2 = st.columns([1, 3])
-    dias = c1.selectbox("Ventana de consumo", [30, 60, 90, 180, 365], index=2)
+    c1, c2 = st.columns([2.2, 1.0])
+    with c1:
+        pid = ui.selector_proveedor(
+            user, label="Proveedor", key="inv_panel_proveedor")
+    with c2:
+        dias = st.selectbox(
+            "Ventana de consumo", [30, 60, 90, 180, 365], index=2,
+            key="inv_panel_dias")
+    if not pid:
+        return
 
     with session_scope() as s:
         ind = indicadores_inventario(s, pid, dias)
@@ -77,6 +92,75 @@ def _panel(user):
         fig.update_layout(showlegend=False, height=270, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown("###### Saldos actuales por ubicación")
+    f1, f2, f3 = st.columns([1.4, 1.2, 2.0])
+    condicion_f = f1.selectbox(
+        "Condición",
+        ["TODOS", "DISPONIBLE", "RESTRINGIDO"],
+        key="inv_condicion")
+    estado_f = f2.selectbox(
+        "Estado",
+        ["TODOS", "CRUDO", "PROCESADO"],
+        key="inv_estado")
+    buscar_f = f3.text_input(
+        "Buscar artículo",
+        placeholder="Código o descripción",
+        key="inv_buscar")
+
+    with session_scope() as s:
+        qsaldo = s.query(Inventario).filter(
+            Inventario.proveedor_id == pid,
+            Inventario.cantidad != 0,
+        )
+        if condicion_f != "TODOS":
+            qsaldo = qsaldo.filter(Inventario.condicion == condicion_f)
+        if estado_f != "TODOS":
+            qsaldo = qsaldo.filter(Inventario.estado == estado_f)
+        saldos = qsaldo.order_by(
+            Inventario.condicion.desc(),
+            Inventario.estado,
+            Inventario.articulo,
+            Inventario.ubicacion,
+        ).all()
+        codigos = sorted({x.articulo for x in saldos})
+        desc_map = {
+            a.codigo: (a.descripcion or "")
+            for a in s.query(Articulo).filter(Articulo.codigo.in_(codigos)).all()
+        } if codigos else {}
+
+    detalle_saldo = pd.DataFrame([{
+        "Artículo": x.articulo,
+        "Descripción": desc_map.get(x.articulo, ""),
+        "Ubicación": x.ubicacion or "",
+        "Estado": x.estado,
+        "Condición": x.condicion,
+        "Cantidad": float(x.cantidad or 0),
+        "Actualizado": x.actualizado_en,
+    } for x in saldos])
+    if buscar_f.strip() and not detalle_saldo.empty:
+        needle = buscar_f.strip().lower()
+        detalle_saldo = detalle_saldo[
+            detalle_saldo["Artículo"].astype(str).str.lower().str.contains(
+                needle, regex=False)
+            | detalle_saldo["Descripción"].astype(str).str.lower().str.contains(
+                needle, regex=False)
+        ]
+    if detalle_saldo.empty:
+        st.caption("No hay saldos con esos filtros.")
+    else:
+        st.dataframe(
+            detalle_saldo,
+            use_container_width=True,
+            hide_index=True,
+            height=360,
+            column_config={
+                "Cantidad": st.column_config.NumberColumn(
+                    "Cantidad", format="%.2f"),
+                "Actualizado": st.column_config.DatetimeColumn(
+                    "Actualizado", format="DD/MM/YYYY HH:mm"),
+            },
+        )
+
     st.markdown("###### Rotación vs. cobertura")
     top = df.nlargest(40, "total")
     fig = px.scatter(top, x="cobertura_dias", y="rotacion_anual", size="total",
@@ -108,8 +192,80 @@ def _panel(user):
                        "panel_inventario.xlsx", key="exp_inv")
 
 
+def _restringido(user):
+    pid = ui.selector_proveedor(
+        user, label="Proveedor", key="inv_restr_proveedor")
+    if not pid:
+        return
+
+    with session_scope() as s:
+        rows = s.query(Inventario).filter(
+            Inventario.proveedor_id == pid,
+            Inventario.condicion == "RESTRINGIDO",
+            Inventario.cantidad > 0,
+        ).order_by(
+            Inventario.estado,
+            Inventario.articulo,
+            Inventario.ubicacion,
+        ).all()
+        codigos = sorted({x.articulo for x in rows})
+        desc_map = {
+            a.codigo: (a.descripcion or "")
+            for a in s.query(Articulo).filter(Articulo.codigo.in_(codigos)).all()
+        } if codigos else {}
+
+    total = sum(float(x.cantidad or 0) for x in rows)
+    crudo = sum(float(x.cantidad or 0) for x in rows if x.estado == "CRUDO")
+    procesado = sum(
+        float(x.cantidad or 0) for x in rows if x.estado == "PROCESADO")
+
+    k1, k2, k3 = st.columns(3)
+    ui.kpi(k1, "Restringido total", f"{total:,.0f}", "unidades", "#e02424")
+    ui.kpi(k2, "Crudo restringido", f"{crudo:,.0f}", "materia prima", "#f59e0b")
+    ui.kpi(k3, "Procesado restringido", f"{procesado:,.0f}", "producto", "#9333ea")
+
+    st.caption(
+        "RESTRINGIDO no está disponible para consumo/producción o despacho "
+        "hasta que la novedad sea resuelta o el inventario sea reclasificado."
+    )
+
+    if not rows:
+        st.success("Este proveedor no tiene inventario restringido.")
+        return
+
+    df = pd.DataFrame([{
+        "Artículo": x.articulo,
+        "Descripción": desc_map.get(x.articulo, ""),
+        "Ubicación": x.ubicacion or "",
+        "Estado": x.estado,
+        "Cantidad restringida": float(x.cantidad or 0),
+        "Actualizado": x.actualizado_en,
+    } for x in rows])
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        height=440,
+        column_config={
+            "Cantidad restringida": st.column_config.NumberColumn(
+                "Cantidad restringida", format="%.2f"),
+            "Actualizado": st.column_config.DatetimeColumn(
+                "Actualizado", format="DD/MM/YYYY HH:mm"),
+        },
+    )
+    st.download_button(
+        "Exportar restringido a Excel",
+        ui.exportar_excel({"restringido": df}),
+        "inventario_restringido.xlsx",
+        key="exp_inv_restringido",
+    )
+
+
 def _kardex(user):
-    pid = alcance_proveedor(user)
+    pid = ui.selector_proveedor(
+        user, label="Proveedor", key="inv_kdx_proveedor")
+    if not pid:
+        return
     c1, c2, c3 = st.columns(3)
     art = c1.text_input("Artículo (opcional)", key="kdx_art")
     tipos = c2.multiselect("Tipo de movimiento", [
@@ -145,7 +301,10 @@ def _kardex(user):
 
 
 def _traza(user):
-    pid = alcance_proveedor(user)
+    pid = ui.selector_proveedor(
+        user, label="Proveedor", key="inv_trz_proveedor")
+    if not pid:
+        return
     c1, c2, c3 = st.columns([1.7, 1.0, 1.0])
     busq = c1.text_input(
         "Buscar por ID de trazabilidad o referencia",
