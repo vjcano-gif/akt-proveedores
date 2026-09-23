@@ -627,7 +627,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "openai-gpt5-nano-v18"
+    extractor_version = "transaction-date-v19"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -960,9 +960,19 @@ def _registrar(user):
         value=ref_sugerida,
         placeholder="BIN2686958 · FV-3-8619",
         key=f"rec_ref_{suffix}")
+    fecha_label = (
+        "Fecha de transacción"
+        if origen == "BIN_A_BIN"
+        else "Fecha del documento"
+    )
     fecha_doc = c2.date_input(
-        "Fecha del documento",
+        fecha_label,
         value=fecha_sugerida,
+        help=(
+            "Para BIN A BIN se usa el campo «Fecha Transacción» del documento, "
+            "no la fecha de emisión del encabezado."
+            if origen == "BIN_A_BIN" else None
+        ),
         key=f"rec_fecha_{suffix}")
     c3.text_input(
         "DESDE BIN",
