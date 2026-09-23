@@ -989,7 +989,8 @@ resultado_bin2717603["metodo"] = "TESSERACT/BIN_ESTRUCTURADO"
 resultado_bin2717603["entrada_imagen"] = True
 resultado_bin2717603["origen_sugerido"] = "BIN_A_BIN"
 resultado_bin2717603["bin_filas_espaciales"] = [{
-    "articulo": "7700149604819",
+    # Caso real de foto: Proveedor + Código pueden quedar pegados.
+    "articulo": "SANYANGIN-0017700149604819",
     "descripcion_ocr": "Cubta Tras Der JetEvo Mp",
     "cantidad_documento": 142.0,
     "cantidad_fisica": 0.0,
@@ -1009,6 +1010,9 @@ check("BIN2717603 conserva las 10 referencias",
       str(cantidades_bin2717603))
 check("BIN2717603 rescata 142 aunque OCR textual lea uaz",
       cantidades_bin2717603 == esperado_bin2717603,
+      str(cantidades_bin2717603))
+check("BIN2717603 separa código aunque proveedor venga pegado",
+      cantidades_bin2717603.get("7700149604819") == 142.0,
       str(cantidades_bin2717603))
 check("BIN2717603 usa Fecha Transacción 17/09/2026",
       resultado_bin2717603["fecha"]["valor"] == "2026-09-17",
