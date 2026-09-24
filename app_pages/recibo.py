@@ -1402,7 +1402,7 @@ def _registrar(user):
     # DESDE/HASTA se validan una sola vez por BIN.
     alerta_desde_doc = None
     error_hasta_doc = None
-    if origen == "BIN_A_BIN" and soporte is not None:
+    if origen == "BIN_A_BIN" and hay_soporte:
         if len(desde_doc_vals) > 1:
             alerta_desde_doc = (
                 "El BIN presenta más de un valor DESDE detectado: "
