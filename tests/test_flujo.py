@@ -24,7 +24,8 @@ import core.document_ai as dai  # noqa: E402
 from core.services import campos_faltantes_proveedor, proveedor_listo_para_activar  # noqa: E402
 from core.auth import alcance_proveedor, puede  # noqa: E402
 from core.ui import catalogo_proveedores  # noqa: E402
-from app_pages.recibo import _enriquecer_extraccion  # noqa: E402
+from app_pages.recibo import (_consolidar_extracciones,
+                               _enriquecer_extraccion)  # noqa: E402
 
 OK, FAIL = [], []
 
@@ -979,6 +980,113 @@ try:
           ), str(analisis_ia["lineas"]))
 finally:
     dai._mistral_document_ai = _mistral_original
+
+print("\n=== 10A0A. DOCUMENTO MULTIFOTO / MULTIARCHIVO ===")
+multi_1 = {
+    "_archivo_nombre": "pagina_1.jpg",
+    "texto": "MOVIMIENTO BIN A BIN pagina 1",
+    "origen_sugerido": "BIN_A_BIN",
+    "origen_confianza": 0.99,
+    "referencia": {"valor": "BIN-MULTI-001", "confianza": 0.99},
+    "fecha": {"valor": "2026-09-17", "confianza": 0.99},
+    "bin_desde_canon": "WSERE PSER 1 1 1",
+    "bin_hasta_canon": "WSERE WSER VIPI NTAR TE",
+    "proveedor_destino_coincide": True,
+    "ocr_ok": True,
+    "confianza_texto": 0.96,
+    "metodo": "OPENAI_GPT5_NANO",
+    "entrada_ia": True,
+    "ia_fuente": "OPENAI_GPT5_NANO",
+    "ia_modelo": "gpt-5-nano-2025-08-07",
+    "tiempos_procesamiento": {"total_s": 2.0},
+    "lineas": [
+        {
+            "articulo": "7700149603447",
+            "descripcion": "Cubierta manubrio JetEvo Mp",
+            "cantidad_documento": 60,
+            "cantidad_fisica": 0,
+            "serial": "NONE", "lote": "NONE",
+            "ubicacion_desde": "WSERE PSER 1 1 1",
+            "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+        },
+        {
+            "articulo": "7700149603980",
+            "descripcion": "Cubta Frontal Der JetEvo Mp",
+            "cantidad_documento": 240,
+            "cantidad_fisica": 0,
+            "serial": "NONE", "lote": "NONE",
+            "ubicacion_desde": "WSERE PSER 1 1 1",
+            "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+        },
+    ],
+}
+multi_2 = {
+    "_archivo_nombre": "pagina_2.jpg",
+    "texto": "MOVIMIENTO BIN A BIN pagina 2",
+    "origen_sugerido": "BIN_A_BIN",
+    "origen_confianza": 0.98,
+    "referencia": {"valor": "BIN-MULTI-001", "confianza": 0.98},
+    "fecha": {"valor": "2026-09-17", "confianza": 0.98},
+    "bin_desde_canon": "WSERE PSER 1 1 1",
+    "bin_hasta_canon": "WSERE WSER VIPI NTAR TE",
+    "proveedor_destino_coincide": True,
+    "ocr_ok": True,
+    "confianza_texto": 0.94,
+    "metodo": "OPENAI_GPT5_NANO",
+    "entrada_ia": True,
+    "ia_fuente": "OPENAI_GPT5_NANO",
+    "ia_modelo": "gpt-5-nano-2025-08-07",
+    "tiempos_procesamiento": {"total_s": 3.0},
+    "lineas": [
+        {
+            "articulo": "7700149603447",
+            "descripcion": "Cubierta manubrio JetEvo Mp",
+            "cantidad_documento": 40,
+            "cantidad_fisica": 0,
+            "serial": "NONE", "lote": "NONE",
+            "ubicacion_desde": "WSERE PSER 1 1 1",
+            "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+        },
+        {
+            "articulo": "7700149604611",
+            "descripcion": "Cubta Frontal Izq JetEvo Mp",
+            "cantidad_documento": 180,
+            "cantidad_fisica": 0,
+            "serial": "NONE", "lote": "NONE",
+            "ubicacion_desde": "WSERE PSER 1 1 1",
+            "ubicacion_hasta": "WSERE WSER VIPI NTAR TE",
+        },
+    ],
+}
+multi = _consolidar_extracciones([multi_1, multi_2])
+multi_qty = {
+    x["articulo"]: float(x["cantidad_documento"])
+    for x in multi["lineas"]
+}
+check("Multiarchivo consolida páginas como un solo documento",
+      multi["soportes_count"] == 2)
+check("Multiarchivo suma artículo repetido entre páginas",
+      multi_qty["7700149603447"] == 100.0, str(multi_qty))
+check("Multiarchivo conserva artículos exclusivos de cada página",
+      multi_qty["7700149603980"] == 240.0
+      and multi_qty["7700149604611"] == 180.0, str(multi_qty))
+check("Multiarchivo conserva referencia única por consenso",
+      multi["referencia"]["valor"] == "BIN-MULTI-001",
+      str(multi["referencia"]))
+check("Multiarchivo suma tiempo total de procesamiento",
+      multi["tiempos_procesamiento"]["total_s"] == 5.0,
+      str(multi["tiempos_procesamiento"]))
+check("Multiarchivo sin conflicto no genera alerta",
+      not multi["advertencias_consolidacion"],
+      str(multi["advertencias_consolidacion"]))
+
+multi_conf = _consolidar_extracciones([
+    multi_1,
+    dict(multi_2, referencia={"valor": "BIN-OTRO", "confianza": 0.90}),
+])
+check("Multiarchivo detecta referencia contradictoria",
+      any("referencia" in x for x in multi_conf["advertencias_consolidacion"]),
+      str(multi_conf["advertencias_consolidacion"]))
 
 print("\n=== 10A0B. FOTO REAL BIN2717603 ===")
 texto_bin2717603 = """
