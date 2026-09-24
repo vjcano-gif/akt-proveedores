@@ -818,8 +818,14 @@ def _consolidar_extracciones(extracciones):
 
             serial = limpio(ln.get("serial"))
             lote = limpio(ln.get("lote"))
-            desde = limpio(ln.get("ubicacion_desde"))
-            hasta = limpio(ln.get("ubicacion_hasta"))
+            desde = (
+                limpio(ln.get("ubicacion_desde"))
+                or str(e.get("bin_desde_canon") or "").strip()
+            )
+            hasta = (
+                limpio(ln.get("ubicacion_hasta"))
+                or str(e.get("bin_hasta_canon") or "").strip()
+            )
             llave = (art.upper(), serial.upper(), lote.upper(),
                      desde.upper(), hasta.upper())
             try:
@@ -885,6 +891,7 @@ def _consolidar_extracciones(extracciones):
         out["ia_modelo"] = " + ".join(modelos_ia)
 
     advertencias = []
+    conflictos_bloqueantes = []
     for campo, etiqueta in (
         ("referencia", "referencia"),
         ("fecha", "fecha"),
@@ -901,10 +908,29 @@ def _consolidar_extracciones(extracciones):
                 vals.append(v)
         unicos = sorted(set(vals))
         if len(unicos) > 1:
-            advertencias.append(
+            mensaje = (
                 f"Las páginas no coinciden en {etiqueta}: "
-                + " / ".join(unicos[:4]))
+                + " / ".join(unicos[:4])
+            )
+            advertencias.append(mensaje)
+            if etiqueta in {"referencia", "HASTA"}:
+                conflictos_bloqueantes.append(mensaje)
+
+    origenes_unicos = sorted({
+        str(e.get("origen_sugerido") or "").strip()
+        for e in extracciones
+        if str(e.get("origen_sugerido") or "").strip()
+    })
+    if len(origenes_unicos) > 1:
+        mensaje = (
+            "Los archivos no parecen corresponder al mismo tipo de documento: "
+            + " / ".join(origenes_unicos)
+        )
+        advertencias.append(mensaje)
+        conflictos_bloqueantes.append(mensaje)
+
     out["advertencias_consolidacion"] = advertencias
+    out["conflicto_consolidacion_bloqueante"] = bool(conflictos_bloqueantes)
     out["requiere_revision"] = (
         not out["lineas"]
         or any(float(x.get("cantidad_documento") or 0) <= 0
