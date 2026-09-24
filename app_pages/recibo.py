@@ -1210,13 +1210,42 @@ def _registrar(user):
     hay_soporte = bool(soportes)
     suffix = digest or "manual"
 
+    conflicto_multi = bool(
+        (extr or {}).get("conflicto_consolidacion_bloqueante"))
     if extr and int(extr.get("soportes_count") or 1) > 1:
         st.success(
             f"Documento consolidado: **{int(extr.get('soportes_count') or 0)} "
             "archivo(s)** procesados como una sola recepción."
         )
+        _detalle_archivos = list(extr.get("archivos_procesados") or [])
+        if _detalle_archivos:
+            with st.expander("Resultado por archivo/página", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(_detalle_archivos),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "archivo": "Archivo / página",
+                        "lineas": st.column_config.NumberColumn(
+                            "Líneas detectadas", format="%d"),
+                        "metodo": "Método de lectura",
+                    },
+                )
         for _adv in extr.get("advertencias_consolidacion") or []:
-            st.warning(_adv)
+            if conflicto_multi and (
+                "referencia" in _adv.lower()
+                or "hasta" in _adv.lower()
+                or "tipo de documento" in _adv.lower()
+            ):
+                st.error(_adv)
+            else:
+                st.warning(_adv)
+        if conflicto_multi:
+            st.error(
+                "Los archivos seleccionados no pueden consolidarse todavía: "
+                "hay diferencias que indican que podrían pertenecer a documentos "
+                "distintos. Corrija la selección antes de crear el recibo."
+            )
 
     origenes = list(ORIGENES)
     origen_sugerido = (extr or {}).get("origen_sugerido")
@@ -1462,7 +1491,7 @@ def _registrar(user):
     recepcion_estado = None
     bloqueo_hasta = (
         bool(error_hasta_doc) if origen == "BIN_A_BIN" else False
-    ) or proveedor_doc_mismatch
+    ) or proveedor_doc_mismatch or conflicto_multi
     if modo == "Cargue masivo":
         ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
@@ -1647,6 +1676,13 @@ def _registrar(user):
         crear_label = "Crear recibo con discrepancias"
 
     if st.button(crear_label, type="primary", use_container_width=True):
+        if conflicto_multi:
+            ui.err(
+                "No se puede crear el recibo: los archivos consolidados tienen "
+                "referencia, HASTA o tipo de documento contradictorio. "
+                "Quite el archivo que no pertenece a este documento."
+            )
+            return
         if proveedor_doc_mismatch:
             ui.err(
                 "No se puede crear el recibo: el BIN A BIN detectado pertenece "
