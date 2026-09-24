@@ -8,6 +8,7 @@ Condición:             DISPONIBLE | RESTRINGIDO
 from __future__ import annotations
 
 import datetime as dt
+import re
 import hashlib
 import math
 from dataclasses import dataclass
@@ -504,6 +505,93 @@ class LineaRecibo:
     ubicacion_hasta: str = ""
 
 
+def _normalizar_referencia_recibo(valor) -> str:
+    """Normaliza BIN/factura para detectar duplicados aunque cambie formato."""
+    return re.sub(r"[^A-Z0-9]+", "", str(valor or "").strip().upper())
+
+
+def buscar_recibo_duplicado(
+        s, *, origen, referencia, proveedor_id=None,
+        proveedor_origen_id=None):
+    """Busca un BIN/factura ya registrado usando una clave de negocio segura.
+
+    BIN_A_BIN:
+      el número de BIN se considera único globalmente.
+
+    FACTURA:
+      si se conoce proveedor ORIGEN, número + proveedor origen.
+      si no se conoce, número + proveedor destino/transformador.
+
+    La comparación ignora espacios, guiones, puntos y diferencias de mayúsculas
+    para bloquear variantes accidentales como BIN-2717603 / BIN 2717603.
+    """
+    if origen not in ("BIN_A_BIN", "FACTURA"):
+        return None
+
+    ref_norm = _normalizar_referencia_recibo(referencia)
+    if not ref_norm:
+        return None
+
+    q = (
+        s.query(Recibo)
+        .join(Documento, Recibo.documento_id == Documento.id)
+        .filter(Recibo.origen == origen)
+    )
+
+    if origen == "FACTURA":
+        if proveedor_origen_id:
+            q = q.filter(Recibo.proveedor_origen_id == int(proveedor_origen_id))
+        elif proveedor_id:
+            q = q.filter(Recibo.proveedor_id == int(proveedor_id))
+
+    # Lock cuando el motor lo permite para disminuir carreras entre dos
+    # recepciones simultáneas del mismo documento.
+    try:
+        candidatos = q.order_by(Recibo.id.desc()).with_for_update().all()
+    except Exception:
+        candidatos = q.order_by(Recibo.id.desc()).all()
+
+    for r in candidatos:
+        doc = r.documento
+        if not doc:
+            continue
+        if _normalizar_referencia_recibo(doc.referencia) == ref_norm:
+            return r
+    return None
+
+
+def validar_recibo_no_duplicado(
+        s, *, origen, referencia, proveedor_id=None,
+        proveedor_origen_id=None):
+    """Lanza ReglaNegocio si BIN/factura ya existe en trazabilidad."""
+    if origen not in ("BIN_A_BIN", "FACTURA"):
+        return None
+
+    ref_norm = _normalizar_referencia_recibo(referencia)
+    if not ref_norm:
+        etiqueta = "BIN" if origen == "BIN_A_BIN" else "factura"
+        raise ReglaNegocio(
+            f"Debe indicar el número de {etiqueta} antes de crear el recibo.")
+
+    dup = buscar_recibo_duplicado(
+        s,
+        origen=origen,
+        referencia=referencia,
+        proveedor_id=proveedor_id,
+        proveedor_origen_id=proveedor_origen_id,
+    )
+    if dup:
+        trz = dup.documento.trz if dup.documento else f"recibo #{dup.id}"
+        ref = dup.documento.referencia if dup.documento else referencia
+        estado = dup.estado or "SIN ESTADO"
+        etiqueta = "BIN A BIN" if origen == "BIN_A_BIN" else "factura"
+        raise ReglaNegocio(
+            f"No se permite duplicar este {etiqueta}. La referencia "
+            f"{ref} ya fue registrada en {trz} y está en estado {estado}. "
+            "Consulte la trazabilidad existente en lugar de volver a cargarla.")
+    return None
+
+
 def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
                  referencia=None, usuario=None, es_reproceso=False,
                  ubicacion_destino="", archivo_id=None, fecha_documento=None,
@@ -518,6 +606,17 @@ def crear_recibo(s, *, proveedor_id, origen, lineas: list[LineaRecibo],
     prov = s.get(Proveedor, proveedor_id)
     if not prov or not prov.activo:
         raise ReglaNegocio("Proveedor inexistente o inactivo.")
+
+    # BIN y factura no pueden registrarse dos veces. Esta validación vive en
+    # servicios (no solo en la UI), por lo que también protege integraciones,
+    # scripts y dobles clics durante la creación.
+    validar_recibo_no_duplicado(
+        s,
+        origen=origen,
+        referencia=referencia,
+        proveedor_id=proveedor_id,
+        proveedor_origen_id=proveedor_origen_id,
+    )
 
     ubicacion_origen_esperada = str(prov.ubicacion_origen or "").strip().upper()
     ubicacion_principal = str(prov.ubicacion_destino or "").strip().upper()
