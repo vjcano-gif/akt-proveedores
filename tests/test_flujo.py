@@ -25,7 +25,8 @@ from core.services import campos_faltantes_proveedor, proveedor_listo_para_activ
 from core.auth import alcance_proveedor, puede  # noqa: E402
 from core.ui import catalogo_proveedores  # noqa: E402
 from app_pages.recibo import (_consolidar_extracciones,
-                               _enriquecer_extraccion)  # noqa: E402
+                               _enriquecer_extraccion,
+                               _guardar_soportes_consolidados)  # noqa: E402
 
 OK, FAIL = [], []
 
@@ -1087,6 +1088,34 @@ multi_conf = _consolidar_extracciones([
 check("Multiarchivo detecta referencia contradictoria",
       any("referencia" in x for x in multi_conf["advertencias_consolidacion"]),
       str(multi_conf["advertencias_consolidacion"]))
+
+check("Multiarchivo conflictivo bloquea consolidación",
+      multi_conf["conflicto_consolidacion_bloqueante"] is True,
+      str(multi_conf.get("conflicto_consolidacion_bloqueante")))
+
+# Los originales deben quedar juntos en la trazabilidad, no solo los datos OCR.
+soporte_a = SimpleNamespace(
+    name="pagina_1.jpg", type="image/jpeg",
+    getvalue=lambda: b"FOTO-PAGINA-1")
+soporte_b = SimpleNamespace(
+    name="pagina_2.jpg", type="image/jpeg",
+    getvalue=lambda: b"FOTO-PAGINA-2")
+with session_scope() as s:
+    arch_multi = _guardar_soportes_consolidados(
+        s, [soporte_a, soporte_b], "qa@akt.com", "abc123")
+    zip_bytes = sv.leer_archivo(arch_multi)
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+        nombres_zip = set(zf.namelist())
+        contenido_manifest = zf.read("MANIFIESTO.txt").decode("utf-8")
+    check("Multiarchivo guarda las dos fotos originales en ZIP",
+          any("pagina_1.jpg" in x for x in nombres_zip)
+          and any("pagina_2.jpg" in x for x in nombres_zip),
+          str(sorted(nombres_zip)))
+    check("Multiarchivo conserva manifiesto SHA-256",
+          "sha256=" in contenido_manifest
+          and "pagina_1.jpg" in contenido_manifest
+          and "pagina_2.jpg" in contenido_manifest)
 
 print("\n=== 10A0B. FOTO REAL BIN2717603 ===")
 texto_bin2717603 = """
