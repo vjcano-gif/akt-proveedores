@@ -667,7 +667,23 @@ def _refinar_cantidades_bin(img, res, txts):
         and 1 <= len(re.sub(r"\s+", "", d["txt"])) <= 8
     ]
 
+    # Solo relanza Tesseract sobre celdas sospechosas. Las cantidades que
+    # RapidOCR ya leyó como entero con confianza razonable se conservan; el
+    # texto Tesseract de la fila completa sigue siendo la fuente autoritativa
+    # cuando existe. Esto evita 8 procesos Tesseract por cada fila del BIN.
+    sospechosos = []
     for d in candidatos:
+        original = re.sub(r"\D", "", d["txt"])
+        try:
+            score_rapid = (
+                float(scores[d["i"]]) if d["i"] < len(scores) else 0.0
+            )
+        except Exception:
+            score_rapid = 0.0
+        if not original or score_rapid < 0.72:
+            sospechosos.append(d)
+
+    for d in sospechosos:
         try:
             pad_x = max(10, int(d["w"] * 0.55))
             pad_y = max(7, int(d["h"] * 0.55))
@@ -697,18 +713,20 @@ def _refinar_cantidades_bin(img, res, txts):
                 cv2.THRESH_BINARY, 31, 11)
 
             lecturas = []
-            for variante in (enlarged, contrast, otsu, adaptive):
-                for psm in (7, 8):
-                    raw = pytesseract.image_to_string(
-                        variante,
-                        config=(
-                            f"--oem 3 --psm {psm} "
-                            "-c tessedit_char_whitelist=0123456789"
-                        ),
-                    )
-                    val = re.sub(r"\D", "", raw or "")
-                    if 1 <= len(val) <= 6:
-                        lecturas.append(val)
+            # Dos lecturas son suficientes para rescatar una celda dañada
+            # (p.ej. "uaz" -> 142) y reducen drásticamente la latencia frente
+            # a las 8 combinaciones anteriores.
+            for variante in (contrast, otsu):
+                raw = pytesseract.image_to_string(
+                    variante,
+                    config=(
+                        "--oem 3 --psm 7 "
+                        "-c tessedit_char_whitelist=0123456789"
+                    ),
+                )
+                val = re.sub(r"\D", "", raw or "")
+                if 1 <= len(val) <= 6:
+                    lecturas.append(val)
 
             if not lecturas:
                 continue
