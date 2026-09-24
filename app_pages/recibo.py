@@ -1,7 +1,10 @@
 """Recibo de mercancía: documento -> revisión -> match por línea con OC -> inventario."""
 import datetime as dt
 import hashlib
+import io
 import re
+import zipfile
+from collections import Counter
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
@@ -660,6 +663,324 @@ def _extraer_documento(soporte, proveedor_id):
                 }
 
     return st.session_state.get(clave), digest
+
+
+def _valor_campo(extr, nombre):
+    campo = (extr or {}).get(nombre)
+    if isinstance(campo, dict):
+        return str(campo.get("valor") or "").strip(), float(
+            campo.get("confianza") or 0.0)
+    return str(campo or "").strip(), 0.0
+
+
+def _campo_consenso(extracciones, nombre):
+    candidatos = []
+    for i, extr in enumerate(extracciones):
+        valor, conf = _valor_campo(extr, nombre)
+        if valor:
+            candidatos.append((valor, conf, i))
+    if not candidatos:
+        return {"valor": None, "confianza": 0.0, "fuente": "CONSOLIDADO"}
+
+    def norm(v):
+        return re.sub(r"\s+", " ", str(v).strip().upper())
+
+    grupos = {}
+    for valor, conf, i in candidatos:
+        grupos.setdefault(norm(valor), []).append((valor, conf, i))
+    ganador = max(
+        grupos.values(),
+        key=lambda xs: (len(xs), max(x[1] for x in xs)),
+    )
+    valor, conf, _ = max(ganador, key=lambda x: x[1])
+    return {
+        "valor": valor,
+        "confianza": round(max(x[1] for x in ganador), 3),
+        "fuente": "CONSOLIDADO",
+    }
+
+
+def _consolidar_extracciones(extracciones):
+    """Une varias páginas/fotos/archivos que pertenecen al mismo documento.
+
+    - Deduplica/suma líneas por artículo+serial+lote+ubicaciones.
+    - Conserva metadatos por consenso.
+    - Expone alertas cuando páginas del mismo lote documental discrepan.
+    """
+    extracciones = [x for x in (extracciones or []) if isinstance(x, dict)]
+    if not extracciones:
+        return None
+    if len(extracciones) == 1:
+        único = dict(extracciones[0])
+        único["soportes_count"] = 1
+        único.setdefault("archivos_procesados", [])
+        return único
+
+    out = {
+        "texto": "\n\n".join(
+            f"--- ARCHIVO {i + 1} ---\n{str(e.get('texto') or '').strip()}"
+            for i, e in enumerate(extracciones)
+            if str(e.get("texto") or "").strip()
+        ),
+        "lineas": [],
+        "soportes_count": len(extracciones),
+        "archivos_procesados": [],
+        "entrada_imagen": any(bool(e.get("entrada_imagen")) for e in extracciones),
+        "entrada_ia": any(bool(e.get("entrada_ia")) for e in extracciones),
+        "ocr_ok": any(bool(e.get("ocr_ok")) for e in extracciones),
+    }
+
+    for campo in ("referencia", "fecha", "fecha_transaccion",
+                  "fecha_documento_origen", "nit"):
+        out[campo] = _campo_consenso(extracciones, campo)
+
+    # Origen: prioriza la clase más repetida; en empate, mayor confianza.
+    origenes = []
+    for e in extracciones:
+        o = str(e.get("origen_sugerido") or "").strip()
+        if o:
+            origenes.append((
+                o,
+                float(e.get("origen_confianza") or 0.0),
+                str(e.get("origen_evidencia") or ""),
+            ))
+    if origenes:
+        conteo = Counter(x[0] for x in origenes)
+        ganador = max(
+            conteo,
+            key=lambda o: (
+                conteo[o],
+                max(x[1] for x in origenes if x[0] == o),
+            ),
+        )
+        out["origen_sugerido"] = ganador
+        out["origen_confianza"] = round(
+            max(x[1] for x in origenes if x[0] == ganador), 3)
+        out["origen_evidencia"] = (
+            f"Consolidado de {len(extracciones)} archivo(s)")
+    else:
+        out["origen_sugerido"] = None
+        out["origen_confianza"] = 0.0
+        out["origen_evidencia"] = "Consolidado multiarchivo"
+
+    # Metadatos BIN por consenso simple; páginas sin dato no penalizan.
+    for key in ("bin_desde_canon", "bin_hasta_canon"):
+        vals = [
+            str(e.get(key) or "").strip()
+            for e in extracciones if str(e.get(key) or "").strip()
+        ]
+        if vals:
+            out[key] = Counter(vals).most_common(1)[0][0]
+    out["bin_desde_canon_valores"] = sorted({
+        str(v).strip()
+        for e in extracciones
+        for v in (e.get("bin_desde_canon_valores") or [])
+        if str(v).strip()
+    })
+    out["bin_hasta_canon_valores"] = sorted({
+        str(v).strip()
+        for e in extracciones
+        for v in (e.get("bin_hasta_canon_valores") or [])
+        if str(v).strip()
+    })
+
+    matches = [
+        e.get("proveedor_destino_coincide")
+        for e in extracciones
+        if e.get("proveedor_destino_coincide") is not None
+    ]
+    if False in matches:
+        out["proveedor_destino_coincide"] = False
+    elif True in matches:
+        out["proveedor_destino_coincide"] = True
+
+    # Consolida líneas. La misma referencia en dos páginas suma cantidades,
+    # pero serial/lote distintos permanecen como líneas independientes.
+    acumuladas = {}
+    orden = []
+    vacios = {"", "NONE", "NAN", "NULL"}
+    for num_arch, e in enumerate(extracciones, start=1):
+        nombre_arch = str(e.get("_archivo_nombre") or f"archivo_{num_arch}")
+        lineas_arch = list(e.get("lineas") or [])
+        out["archivos_procesados"].append({
+            "archivo": nombre_arch,
+            "lineas": len(lineas_arch),
+            "metodo": str(e.get("metodo") or ""),
+        })
+        for ln in lineas_arch:
+            art = str(ln.get("articulo") or "").strip()
+            if not art:
+                continue
+
+            def limpio(v):
+                s = str(v or "").strip()
+                return "" if s.upper() in vacios else s
+
+            serial = limpio(ln.get("serial"))
+            lote = limpio(ln.get("lote"))
+            desde = limpio(ln.get("ubicacion_desde"))
+            hasta = limpio(ln.get("ubicacion_hasta"))
+            llave = (art.upper(), serial.upper(), lote.upper(),
+                     desde.upper(), hasta.upper())
+            try:
+                qdoc = float(ln.get("cantidad_documento") or 0)
+            except (TypeError, ValueError):
+                qdoc = 0.0
+            if llave not in acumuladas:
+                item = dict(ln)
+                item["articulo"] = art
+                item["cantidad_documento"] = qdoc
+                item["cantidad_fisica"] = 0.0
+                item["archivo_origen"] = nombre_arch
+                item["fuente"] = (
+                    "CONSOLIDADO_MULTIARCHIVO"
+                    if len(extracciones) > 1 else str(ln.get("fuente") or ""))
+                acumuladas[llave] = item
+                orden.append(llave)
+            else:
+                acumuladas[llave]["cantidad_documento"] = (
+                    float(acumuladas[llave].get("cantidad_documento") or 0)
+                    + qdoc
+                )
+                origenes_arch = set(
+                    str(acumuladas[llave].get("archivo_origen") or "").split(" + "))
+                origenes_arch.add(nombre_arch)
+                acumuladas[llave]["archivo_origen"] = " + ".join(
+                    sorted(x for x in origenes_arch if x))
+
+    out["lineas"] = [acumuladas[k] for k in orden]
+
+    # Agrega tiempos para saber cuánto costó el documento completo.
+    tiempos = {}
+    for e in extracciones:
+        for k, v in (e.get("tiempos_procesamiento") or {}).items():
+            try:
+                tiempos[k] = tiempos.get(k, 0.0) + float(v or 0)
+            except (TypeError, ValueError):
+                pass
+    if tiempos:
+        out["tiempos_procesamiento"] = {
+            k: round(v, 3) for k, v in tiempos.items()
+        }
+
+    metodos = sorted({
+        str(e.get("metodo") or "").strip()
+        for e in extracciones if str(e.get("metodo") or "").strip()
+    })
+    out["metodo"] = "CONSOLIDADO: " + " + ".join(metodos)
+    out["confianza_texto"] = round(
+        sum(float(e.get("confianza_texto") or 0) for e in extracciones)
+        / max(1, len(extracciones)), 3)
+
+    if out["entrada_ia"]:
+        fuentes_ia = sorted({
+            str(e.get("ia_fuente") or "").strip()
+            for e in extracciones if str(e.get("ia_fuente") or "").strip()
+        })
+        modelos_ia = sorted({
+            str(e.get("ia_modelo") or "").strip()
+            for e in extracciones if str(e.get("ia_modelo") or "").strip()
+        })
+        out["ia_fuente"] = " + ".join(fuentes_ia)
+        out["ia_modelo"] = " + ".join(modelos_ia)
+
+    advertencias = []
+    for campo, etiqueta in (
+        ("referencia", "referencia"),
+        ("fecha", "fecha"),
+        ("bin_desde_canon", "DESDE"),
+        ("bin_hasta_canon", "HASTA"),
+    ):
+        vals = []
+        for e in extracciones:
+            if campo in ("referencia", "fecha"):
+                v, _ = _valor_campo(e, campo)
+            else:
+                v = str(e.get(campo) or "").strip()
+            if v:
+                vals.append(v)
+        unicos = sorted(set(vals))
+        if len(unicos) > 1:
+            advertencias.append(
+                f"Las páginas no coinciden en {etiqueta}: "
+                + " / ".join(unicos[:4]))
+    out["advertencias_consolidacion"] = advertencias
+    out["requiere_revision"] = (
+        not out["lineas"]
+        or any(float(x.get("cantidad_documento") or 0) <= 0
+               for x in out["lineas"])
+        or bool(advertencias)
+    )
+    return out
+
+
+def _extraer_documentos(soportes, proveedor_id):
+    soportes = list(soportes or [])
+    if not soportes:
+        return None, "manual", []
+
+    # Evita doble conteo si el usuario sube dos veces exactamente la misma foto.
+    unicos, vistos = [], set()
+    for soporte in soportes:
+        data = soporte.getvalue()
+        sha = hashlib.sha256(data).hexdigest()
+        if sha in vistos:
+            continue
+        vistos.add(sha)
+        unicos.append(soporte)
+
+    extracciones, digests = [], []
+    for soporte in unicos:
+        extr, digest = _extraer_documento(soporte, proveedor_id)
+        if extr:
+            extr = dict(extr)
+            extr["_archivo_nombre"] = soporte.name
+            extracciones.append(extr)
+        digests.append(digest)
+
+    if not extracciones:
+        return None, "manual", unicos
+
+    digest_global = hashlib.sha256(
+        "|".join(str(x) for x in digests).encode("utf-8")
+    ).hexdigest()[:16]
+    return _consolidar_extracciones(extracciones), digest_global, unicos
+
+
+def _guardar_soportes_consolidados(s, soportes, usuario, digest):
+    """Guarda todos los originales. Si son varios, los archiva en un ZIP."""
+    soportes = list(soportes or [])
+    if not soportes:
+        return None
+    if len(soportes) == 1:
+        a = soportes[0]
+        return guardar_archivo(
+            s, a.name, a.getvalue(), a.type, usuario)
+
+    buf = io.BytesIO()
+    manifiesto = []
+    nombres_usados = set()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i, a in enumerate(soportes, start=1):
+            base = re.sub(r"[^A-Za-z0-9._-]+", "_", str(a.name or f"archivo_{i}"))
+            nombre = f"{i:02d}_{base}"
+            while nombre in nombres_usados:
+                nombre = f"{i:02d}_{hashlib.sha256(a.getvalue()).hexdigest()[:8]}_{base}"
+            nombres_usados.add(nombre)
+            data = a.getvalue()
+            zf.writestr(nombre, data)
+            manifiesto.append(
+                f"{i:02d} | {a.name} | {len(data)} bytes | "
+                f"sha256={hashlib.sha256(data).hexdigest()}"
+            )
+        zf.writestr(
+            "MANIFIESTO.txt",
+            "DOCUMENTO CONSOLIDADO - SOPORTES ORIGINALES\n"
+            + "\n".join(manifiesto)
+        )
+    nombre_zip = f"documento_consolidado_{str(digest or '')[:12]}.zip"
+    return guardar_archivo(
+        s, nombre_zip, buf.getvalue(), "application/zip", usuario)
 
 
 def _filas_sin_cantidad_documento(df):
