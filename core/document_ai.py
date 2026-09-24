@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -36,6 +37,39 @@ def _openai_api_key() -> str:
     except Exception:
         key = ""
     return key
+
+
+def _imagen_api_optimizada(
+        data: bytes, mime: str, max_side: int = 2048) -> tuple[bytes, str]:
+    """Crea una copia de trabajo para Vision; el original NO se modifica.
+
+    La API aplica sus propios límites de resolución en detalle high. Enviar
+    una foto de 8-20 MP completa aumenta transferencia/base64 y memoria.
+    Para lectura se reduce proporcionalmente a 2048 px de lado mayor,
+    conservando el archivo original para trazabilidad y descarga.
+    """
+    if not data or not str(mime or "").startswith("image/"):
+        return data, mime
+    try:
+        import cv2
+        img = _decode_image(data)
+        h, w = img.shape[:2]
+        mayor = max(h, w)
+        if mayor <= max_side:
+            return data, mime
+        escala = float(max_side) / float(mayor)
+        nuevo = cv2.resize(
+            img,
+            (max(1, int(round(w * escala))), max(1, int(round(h * escala)))),
+            interpolation=cv2.INTER_AREA,
+        )
+        ok, enc = cv2.imencode(
+            ".jpg", nuevo, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        if ok:
+            return enc.tobytes(), "image/jpeg"
+    except Exception:
+        pass
+    return data, mime
 
 
 def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> dict | None:
@@ -68,8 +102,9 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
     if not mime.startswith("image/"):
         return None
 
-    encoded = base64.b64encode(data).decode("ascii")
-    data_url = f"data:{mime};base64,{encoded}"
+    data_api, mime_api = _imagen_api_optimizada(data, mime)
+    encoded = base64.b64encode(data_api).decode("ascii")
+    data_url = f"data:{mime_api};base64,{encoded}"
     model = str(
         os.getenv("OPENAI_VISION_MODEL")
         or "gpt-5-nano-2025-08-07"
@@ -155,7 +190,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
                 "strict": True,
             }
         },
-        "max_output_tokens": 5000,
+        "max_output_tokens": 4000,
     }
 
     try:
@@ -166,7 +201,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=75,
+            timeout=(5, 40),
         )
         resp.raise_for_status()
         raw = resp.json()
@@ -700,11 +735,14 @@ def _refinar_cantidades_bin(img, res, txts):
 
 
 def _ocr_rapid(img) -> tuple[str, float]:
-    """OCR principal conservando estructura espacial de tablas."""
+    """OCR principal conservando estructura espacial de tablas.
+
+    No relanza Tesseract por cada número: esa validación se hace únicamente
+    sobre celdas sospechosas de la columna Cantidad en el parser BIN.
+    """
     engine = _rapid_engine()
     res = engine(img)
-    txts_refinados = _refinar_celdas_numericas(img, res)
-    texto, scores = _texto_rapid_ordenado(res, txts_override=txts_refinados)
+    texto, scores = _texto_rapid_ordenado(res)
     confianza = sum(scores) / len(scores) if scores else 0.0
     return texto, confianza
 
@@ -891,12 +929,11 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
 
 
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae filas BIN con orientación automática + geometría de columnas."""
+    """Extrae filas BIN reutilizando una sola pasada RapidOCR."""
     try:
-        orientados, _, _, _ = _orientar_bin_bytes(data)
+        orientados, res = _rapid_resultado_bin(data)
         img = _decode_image(orientados)
-        res = _rapid_engine()(img)
-        txts = _refinar_celdas_numericas(img, res)
+        txts = list(getattr(res, "txts", None) or [])
         txts = _refinar_cantidades_bin(img, res, txts)
         return _extraer_bin_columnas_resultado(res, txts)
     except Exception:
@@ -1486,29 +1523,45 @@ def _score_bin_texto(texto: str) -> tuple[int, int]:
     return score, filas
 
 
+def _img_reducida_ocr(img, max_side=1500):
+    """Copia reducida usada solo para decidir orientación rápidamente."""
+    try:
+        import cv2
+        h, w = img.shape[:2]
+        mayor = max(h, w)
+        if mayor <= max_side:
+            return img
+        s = float(max_side) / float(mayor)
+        return cv2.resize(
+            img,
+            (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    except Exception:
+        return img
+
+
 @lru_cache(maxsize=8)
 def _orientar_bin_bytes(data: bytes) -> tuple[bytes, int, str, float]:
-    """Corrige automáticamente fotos BIN tomadas de lado.
+    """Corrige fotos BIN laterales sin ejecutar Tesseract full-res 4 veces.
 
-    El escenario real de recibo incluye fotos verticales del formato impreso,
-    aunque la tabla está apaisada. El OCR espacial necesita la tabla horizontal.
-    Se prueba primero la orientación original con Tesseract. Solo si NO logra
-    estructura BIN suficiente se prueban 90° antihorario, 90° horario y 180°.
-
-    Devuelve:
-      bytes PNG orientados, grados aplicados, texto Tesseract, confianza.
-    Para documentos que no parecen BIN se conserva la orientación original.
+    La orientación se decide sobre una copia reducida. Una vez elegido el giro,
+    Tesseract se ejecuta una sola vez sobre la imagen orientada a resolución
+    completa para conservar precisión.
     """
     import cv2
 
     img = _decode_image(data)
+    mini = _img_reducida_ocr(img, 1500)
 
-    candidatos = [
-        (0, img),
-        (90, cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)),
-        (-90, cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)),
-        (180, cv2.rotate(img, cv2.ROTATE_180)),
-    ]
+    candidatos = [(0, mini)]
+    h, w = mini.shape[:2]
+    candidatos.extend([
+        (90, cv2.rotate(mini, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+        (-90, cv2.rotate(mini, cv2.ROTATE_90_CLOCKWISE)),
+    ])
+    if w >= h:
+        candidatos.append((180, cv2.rotate(mini, cv2.ROTATE_180)))
 
     evaluados = []
     for grados, candidato in candidatos:
@@ -1517,26 +1570,47 @@ def _orientar_bin_bytes(data: bytes) -> tuple[bytes, int, str, float]:
         except Exception:
             texto, conf = "", 0.0
         score, filas = _score_bin_texto(texto)
-        evaluados.append((score, filas, float(conf or 0.0), grados, candidato, texto))
-
-        # Si la orientación actual ya reconstruyó una tabla real, no hace falta
-        # seguir rotando. Dos filas completas evitan falsos positivos.
+        evaluados.append((score, filas, float(conf or 0.0), grados))
         if grados == 0 and filas >= 2 and score >= 36:
             break
 
-    # Solo rota si alguna orientación reconoció estructura BIN real.
     mejores_bin = [x for x in evaluados if x[1] >= 2 and x[0] >= 36]
     if mejores_bin:
-        best = max(mejores_bin, key=lambda x: (x[0], x[1], x[2]))
+        _, _, _, grados = max(
+            mejores_bin, key=lambda x: (x[0], x[1], x[2]))
     else:
-        # No parece BIN: no arriesgar rotar facturas u otros documentos.
-        best = next(x for x in evaluados if x[3] == 0)
+        con_senal = [x for x in evaluados if x[0] >= 20]
+        grados = (
+            max(con_senal, key=lambda x: (x[0], x[1], x[2]))[3]
+            if con_senal else 0
+        )
 
-    _, _, conf, grados, elegido, texto = best
+    if grados == 90:
+        elegido = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif grados == -90:
+        elegido = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    elif grados == 180:
+        elegido = cv2.rotate(img, cv2.ROTATE_180)
+    else:
+        elegido = img
+
+    try:
+        texto_final, conf_final = _ocr_tesseract(elegido)
+    except Exception:
+        texto_final, conf_final = "", 0.0
+
     ok, encoded = cv2.imencode(".png", elegido)
     if not ok:
-        return data, 0, texto, conf
-    return encoded.tobytes(), int(grados), texto, conf
+        return data, 0, texto_final, conf_final
+    return encoded.tobytes(), int(grados), texto_final, float(conf_final or 0.0)
+
+
+@lru_cache(maxsize=6)
+def _rapid_resultado_bin(data: bytes):
+    """RapidOCR único y reutilizable para un BIN fotografiado."""
+    orientados, _, _, _ = _orientar_bin_bytes(data)
+    img = _decode_image(orientados)
+    return orientados, _rapid_engine()(img)
 
 
 def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
@@ -1563,14 +1637,24 @@ def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
 
     rapid_texto, rapid_conf, rapid_var = "", 0.0, ""
     try:
-        for nombre_var, variante in _preprocesar_para_ocr(img):
-            texto, conf = _ocr_rapid(variante)
-            if texto and (
-                    len(texto) > len(rapid_texto)
-                    or conf > rapid_conf + 0.08):
-                rapid_texto, rapid_conf, rapid_var = texto, conf, nombre_var
-            if len(rapid_texto) >= 30 and rapid_conf >= 0.55:
-                break
+        pre_score, _ = _score_bin_texto(tess_pre_texto)
+        if pre_score >= 20:
+            _, res_rapid = _rapid_resultado_bin(data)
+            rapid_texto, scores = _texto_rapid_ordenado(res_rapid)
+            rapid_conf = (
+                sum(float(x) for x in scores) / len(scores)
+                if scores else 0.0
+            )
+            rapid_var = "ORIGINAL"
+        else:
+            for nombre_var, variante in _preprocesar_para_ocr(img):
+                texto, conf = _ocr_rapid(variante)
+                if texto and (
+                        len(texto) > len(rapid_texto)
+                        or conf > rapid_conf + 0.08):
+                    rapid_texto, rapid_conf, rapid_var = texto, conf, nombre_var
+                if len(rapid_texto) >= 30 and rapid_conf >= 0.55:
+                    break
         if not rapid_texto:
             diagnosticos.append("RapidOCR no detectó texto.")
     except Exception as e:
