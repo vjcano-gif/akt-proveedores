@@ -489,6 +489,20 @@ with session_scope() as s:
     check("DESDE correcto no genera alerta documental", not alertas_bin)
 
 with session_scope() as s:
+    esperar_error(
+        "BIN duplicado se bloquea aunque cambien guiones/espacios",
+        lambda: sv.crear_recibo(
+            s, proveedor_id=PID, origen="BIN_A_BIN",
+            referencia="bin 100", usuario="recibo@akt.com",
+            ubicacion_destino="UB-PROV-01",
+            lineas=[sv.LineaRecibo(
+                "CP-A", "Carenaje Crudo", 100, 100,
+                ubicacion_desde="UB-ORIGEN",
+                ubicacion_hasta="UB-PROV-01")]),
+        "duplicar"
+    )
+
+with session_scope() as s:
     res = sv.adjuntar_bin_y_match(
         s, recibo_id=RB1, orden_compra_id=OCS["OC-A-100"],
         usuario="recibo@akt.com")
@@ -541,6 +555,20 @@ with session_scope() as s:
     check("Factura sellada pasa a PENDIENTE_MATCH",
           s.get(Recibo, RB2).estado == "PENDIENTE_MATCH")
     lineas = {l.articulo: l.id for l in r.lineas}
+
+with session_scope() as s:
+    esperar_error(
+        "Factura duplicada se bloquea para el mismo proveedor origen",
+        lambda: sv.crear_recibo(
+            s, proveedor_id=PID, proveedor_origen_id=ORIGEN_ID,
+            factura_origen="FV 9001", origen="FACTURA",
+            referencia="fv 9001", usuario="recibo@akt.com",
+            ubicacion_destino="UB-PROV-01",
+            lineas=[sv.LineaRecibo(
+                "CP-B", "Calca", 1, 1,
+                ubicacion_hasta="UB-PROV-01")]),
+        "duplicar"
+    )
 
 with session_scope() as s:
     res = sv.match_recibo_lineas(
