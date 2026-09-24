@@ -13,7 +13,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 
 from core.models import (
     Base, Archivo, Articulo, Averia, Bom, ConsumoProduccion, ConteoEjecutado,
@@ -539,7 +539,18 @@ def buscar_recibo_duplicado(
     )
 
     if origen == "FACTURA":
-        if proveedor_origen_id:
+        if proveedor_origen_id and proveedor_id:
+            # Si un registro histórico quedó sin proveedor origen identificado,
+            # también debe bloquearse al volver a cargar la misma factura para
+            # el mismo transformador.
+            q = q.filter(or_(
+                Recibo.proveedor_origen_id == int(proveedor_origen_id),
+                (
+                    Recibo.proveedor_origen_id.is_(None)
+                    & (Recibo.proveedor_id == int(proveedor_id))
+                ),
+            ))
+        elif proveedor_origen_id:
             q = q.filter(Recibo.proveedor_origen_id == int(proveedor_origen_id))
         elif proveedor_id:
             q = q.filter(Recibo.proveedor_id == int(proveedor_id))
