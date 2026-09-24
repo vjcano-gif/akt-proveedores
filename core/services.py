@@ -595,9 +595,10 @@ def validar_recibo_no_duplicado(
         trz = dup.documento.trz if dup.documento else f"recibo #{dup.id}"
         ref = dup.documento.referencia if dup.documento else referencia
         estado = dup.estado or "SIN ESTADO"
+        articulo = "este" if origen == "BIN_A_BIN" else "esta"
         etiqueta = "BIN A BIN" if origen == "BIN_A_BIN" else "factura"
         raise ReglaNegocio(
-            f"No se permite duplicar este {etiqueta}. La referencia "
+            f"No se permite duplicar {articulo} {etiqueta}. La referencia "
             f"{ref} ya fue registrada en {trz} y está en estado {estado}. "
             "Consulte la trazabilidad existente en lugar de volver a cargarla.")
     return None
