@@ -1465,6 +1465,7 @@ def _registrar(user):
             "ubicacion_desde", "ubicacion_hasta",
             "ubicacion_desde_ocr_raw", "ubicacion_desde_ocr_score",
             "ubicacion_hasta_ocr_raw", "ubicacion_hasta_ocr_score",
+            "archivo_origen",
         ], errors="ignore")
 
         estado_key = f"rec_estado_{suffix}"
@@ -1680,10 +1681,10 @@ def _registrar(user):
         try:
             with session_scope() as s:
                 arch_id = None
-                if soporte is not None:
-                    arch_id = guardar_archivo(
-                        s, soporte.name, soporte.getvalue(), soporte.type,
-                        user["email"]).id
+                if soportes:
+                    arch_guardado = _guardar_soportes_consolidados(
+                        s, soportes, user["email"], digest)
+                    arch_id = arch_guardado.id if arch_guardado else None
                 r = crear_recibo(
                     s, proveedor_id=pid, origen=origen, lineas=lineas,
                     referencia=referencia or None, usuario=user["email"],
@@ -1721,11 +1722,20 @@ def _registrar(user):
 
             ui.ok(f"{msg} Trazabilidad: **{trz}**")
             if arch_id:
-                st.info(
-                    "El soporte original quedó **archivado y vinculado a esta "
-                    "trazabilidad**. Puede consultarlo o descargarlo después en "
-                    "**Recibo → Documentos** o **Inventario → Trazabilidad**."
-                )
+                if len(soportes) > 1:
+                    st.info(
+                        f"Los **{len(soportes)} archivos originales** quedaron "
+                        "archivados juntos y vinculados a esta trazabilidad. "
+                        "Se conservan dentro de un ZIP con manifiesto SHA-256 y "
+                        "pueden descargarse después en **Recibo → Documentos** "
+                        "o **Inventario → Trazabilidad**."
+                    )
+                else:
+                    st.info(
+                        "El soporte original quedó **archivado y vinculado a esta "
+                        "trazabilidad**. Puede consultarlo o descargarlo después en "
+                        "**Recibo → Documentos** o **Inventario → Trazabilidad**."
+                    )
             else:
                 st.caption(
                     "Registro creado sin soporte adjunto. La cabecera, líneas, "
