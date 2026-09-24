@@ -19,7 +19,7 @@ from core.models import Articulo, Documento, OrdenCompra, Proveedor, Recibo
 from core.services import (
     LineaRecibo, ReglaNegocio, confirmar_recibo_simple, crear_recibo,
     guardar_archivo, ingresar_inventario_bin_satisfactorio, leer_archivo,
-    match_recibo_lineas,
+    match_recibo_lineas, buscar_recibo_duplicado,
     ordenes_compra_abiertas, sellar_recibo, sugerir_oc_por_linea,
     validar_bin_a_bin,
 )
@@ -1458,6 +1458,49 @@ def _registrar(user):
         help=f"Esperado según maestro: {ubicacion_hasta_maestro}",
         key=f"rec_hasta_doc_{suffix}")
 
+    # Bloqueo temprano de duplicados. La validación definitiva también vive
+    # en core.services para proteger dobles clics, integraciones y scripts.
+    duplicado_info = None
+    referencia_obligatoria_faltante = bool(
+        origen in ("BIN_A_BIN", "FACTURA") and not referencia.strip()
+    )
+    if origen in ("BIN_A_BIN", "FACTURA") and referencia.strip():
+        with session_scope() as s:
+            _dup = buscar_recibo_duplicado(
+                s,
+                origen=origen,
+                referencia=referencia,
+                proveedor_id=pid,
+                proveedor_origen_id=prov_origen_id,
+            )
+            if _dup and _dup.documento:
+                duplicado_info = {
+                    "trz": _dup.documento.trz,
+                    "referencia": _dup.documento.referencia or referencia,
+                    "estado": _dup.estado or "SIN ESTADO",
+                    "fecha": _dup.documento.fecha_documento,
+                }
+
+    bloqueo_duplicado = bool(duplicado_info)
+    if referencia_obligatoria_faltante:
+        st.error(
+            "Para BIN A BIN y factura es obligatorio identificar el número "
+            "del documento antes de crear el recibo."
+        )
+    elif duplicado_info:
+        st.error(
+            f"**Documento duplicado bloqueado.** La referencia "
+            f"**{duplicado_info['referencia']}** ya fue registrada como "
+            f"**{duplicado_info['trz']}** y actualmente está en estado "
+            f"**{duplicado_info['estado']}**"
+            + (
+                f" · fecha {duplicado_info['fecha']}."
+                if duplicado_info.get("fecha") else "."
+            )
+            + " Consulte ese TRZ en Documentos/Trazabilidad; no vuelva a "
+            "crear el recibo."
+        )
+
     if origen == "BIN_A_BIN":
         st.caption(
             f"Maestro proveedor → DESDE: **{ubicacion_desde_maestro}** · "
@@ -1491,7 +1534,8 @@ def _registrar(user):
     recepcion_estado = None
     bloqueo_hasta = (
         bool(error_hasta_doc) if origen == "BIN_A_BIN" else False
-    ) or proveedor_doc_mismatch or conflicto_multi
+    ) or proveedor_doc_mismatch or conflicto_multi or bloqueo_duplicado \
+        or referencia_obligatoria_faltante
     if modo == "Cargue masivo":
         ui.boton_plantilla("recibo_lineas", key=f"rec_{suffix}")
         arch = st.file_uploader(
@@ -1676,6 +1720,18 @@ def _registrar(user):
         crear_label = "Crear recibo con discrepancias"
 
     if st.button(crear_label, type="primary", use_container_width=True):
+        if referencia_obligatoria_faltante:
+            ui.err(
+                "No se puede crear el recibo: falta el número de BIN/factura."
+            )
+            return
+        if bloqueo_duplicado:
+            ui.err(
+                f"No se puede crear el recibo: {duplicado_info['referencia']} "
+                f"ya existe en {duplicado_info['trz']} "
+                f"({duplicado_info['estado']})."
+            )
+            return
         if conflicto_multi:
             ui.err(
                 "No se puede crear el recibo: los archivos consolidados tienen "
