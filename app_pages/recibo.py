@@ -640,7 +640,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "real-photo-complete-v24"
+    extractor_version = "fast-ocr-v25"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -918,6 +918,25 @@ def _registrar(user):
                     "como motor principal debe estar configurado OPENAI_API_KEY "
                     "en los Secrets de Streamlit."
                 )
+
+        tiempos = extr.get("tiempos_procesamiento") or {}
+        if tiempos:
+            partes_t = []
+            if float(tiempos.get("openai_s") or 0) >= 0.01:
+                partes_t.append(f"OpenAI {float(tiempos['openai_s']):.1f}s")
+            if float(tiempos.get("mistral_s") or 0) >= 0.01:
+                partes_t.append(f"Mistral {float(tiempos['mistral_s']):.1f}s")
+            if float(tiempos.get("ocr_texto_s") or 0) >= 0.01:
+                partes_t.append(f"OCR texto {float(tiempos['ocr_texto_s']):.1f}s")
+            if float(tiempos.get("parser_columnas_s") or 0) >= 0.01:
+                partes_t.append(
+                    f"columnas {float(tiempos['parser_columnas_s']):.1f}s")
+            total_t = float(tiempos.get("total_s") or 0)
+            st.caption(
+                "Tiempo de lectura: "
+                + (f"**{total_t:.1f}s**" if total_t else "—")
+                + (f" · {' · '.join(partes_t)}" if partes_t else "")
+            )
 
         if diagnostico:
             st.caption(f"Diagnóstico OCR: {diagnostico}")
