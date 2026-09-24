@@ -278,7 +278,8 @@ with session_scope() as s:
     esperar_error(
         "HASTA distinto al maestro bloquea el BIN",
         lambda: sv.crear_recibo(
-            s, proveedor_id=PID, origen="BIN_A_BIN", usuario="test",
+            s, proveedor_id=PID, origen="BIN_A_BIN",
+            referencia="BIN-HASTA-INVALIDO", usuario="test",
             ubicacion_destino="UB-PROV-01",
             lineas=[sv.LineaRecibo(
                 "CP-A", "Carenaje", 1, 1,
