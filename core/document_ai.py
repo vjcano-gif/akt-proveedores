@@ -2568,13 +2568,20 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
     name = (nombre or "").lower()
     mime = mime or ""
+    t_total = time.perf_counter()
+    tiempos = {}
 
     # Motor principal: GPT-5 nano Vision cuando OPENAI_API_KEY existe.
     # Si no está configurado o falla, intenta Mistral (si tiene clave) y luego
     # cae automáticamente al OCR local existente.
+    t0 = time.perf_counter()
     ia = _openai_document_ai(nombre, data, mime)
+    tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
+
     if not (ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))):
+        t0 = time.perf_counter()
         ia_mistral = _mistral_document_ai(nombre, data, mime)
+        tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
         if ia_mistral and ia_mistral.get("ok"):
             ia = ia_mistral
     ia_ok = bool(ia and ia.get("ok") and (ia.get("texto") or ia.get("filas")))
@@ -2619,7 +2626,9 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             })
         out["bin_filas_espaciales"] = filas_ia_bin
     else:
+        t0 = time.perf_counter()
         texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
+        tiempos["ocr_texto_s"] = round(time.perf_counter() - t0, 3)
         out = estructurar(texto, cf)
         out["entrada_ia"] = False
         out["ia_error"] = (ia or {}).get("error") if isinstance(ia, dict) else ""
@@ -2628,12 +2637,14 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             mime.startswith("image/")
             or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
         )
+        t0 = time.perf_counter()
         if es_imagen_local:
             out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
         elif mime == "application/pdf" or name.endswith(".pdf"):
             out["bin_filas_espaciales"] = extraer_bin_columnas_pdf(data)
         else:
             out["bin_filas_espaciales"] = []
+        tiempos["parser_columnas_s"] = round(time.perf_counter() - t0, 3)
 
     es_imagen = bool(
         mime.startswith("image/")
@@ -2665,4 +2676,6 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         float(cf) < 0.85
         or not (out.get("lineas") or out.get("lineas_ia"))
     )
+    tiempos["total_s"] = round(time.perf_counter() - t_total, 3)
+    out["tiempos_procesamiento"] = tiempos
     return out
