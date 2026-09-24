@@ -1089,65 +1089,108 @@ def _registrar(user):
         ),
     )
 
-    soporte = None
+    soportes = []
     if modo_documento == "📸 Foto máxima calidad":
         st.caption(
-            "**Recomendado para BIN.** En celular, toque el selector de imagen "
-            "y elija **Cámara**. Esta ruta no impone el límite de 1080p del "
-            "widget de cámara integrado y conserva el archivo que entregue el "
-            "sistema operativo."
+            "**Recomendado para BIN.** Puede tomar/seleccionar **una o varias "
+            "fotos** del mismo documento. Si el BIN ocupa varias páginas o "
+            "necesita varias tomas, cargue todas: el sistema las procesa por "
+            "separado y luego consolida referencias y cantidades."
         )
-        soporte = st.file_uploader(
-            "Tomar / seleccionar foto en calidad original",
+        cargados = st.file_uploader(
+            "Tomar / seleccionar foto(s) en calidad original",
             type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
             key="rec_foto_full",
             help=(
-                "Use la cámara nativa del celular y evite capturas de pantalla. "
-                "Mantenga el documento completo, recto y con buena luz."
+                "Seleccione todas las fotos que hagan parte del mismo documento. "
+                "Los archivos idénticos se deduplican para evitar doble conteo."
             ),
         )
+        soportes = list(cargados or [])
     elif modo_documento == "📷 Cámara rápida 1080p":
-        soporte = st.camera_input(
+        tomada = st.camera_input(
             "Tomar foto del documento",
             key="rec_camara",
             resolution="1080p",
             width="stretch",
             help=(
-                "Streamlit permite solicitar hasta 1080p en este widget. "
-                "Para más detalle use «Foto máxima calidad»."
+                "Para un documento de varias páginas puede tomar una foto aquí "
+                "y adjuntar las demás como archivos adicionales."
             ),
         )
-    else:
-        soporte = st.file_uploader(
-            "Documento de entrada (PDF o foto)",
+        adicionales = st.file_uploader(
+            "Agregar otras páginas/fotos del mismo documento",
             type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key="rec_camara_adicionales",
+        )
+        if tomada is not None:
+            soportes.append(tomada)
+        soportes.extend(list(adicionales or []))
+    else:
+        cargados = st.file_uploader(
+            "Documento de entrada — puede seleccionar varios PDF/fotos",
+            type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
             key="rec_soporte",
             help=(
-                "Al cargar el archivo se procesa automáticamente y se completan "
-                "los campos detectados."
+                "Seleccione todos los archivos que formen parte del mismo "
+                "documento. Se leerán y consolidarán automáticamente."
             ),
         )
+        soportes = list(cargados or [])
 
-    if soporte is not None and str(getattr(soporte, "type", "") or "").startswith("image/"):
+    # Deduplicación temprana por bytes para no procesar ni sumar dos veces la
+    # misma foto si el usuario la selecciona accidentalmente dos veces.
+    _unicos, _vistos = [], set()
+    for _s in soportes:
         try:
-            from PIL import Image
-            import io
-            _img = Image.open(io.BytesIO(soporte.getvalue()))
-            st.caption(
-                f"Imagen recibida: **{_img.width} × {_img.height} px** "
-                f"({(_img.width * _img.height) / 1_000_000:.1f} MP)."
-            )
-            if min(_img.width, _img.height) < 700:
-                st.warning(
-                    "La imagen tiene poco detalle vertical para una tabla extensa. "
-                    "El sistema intentará leerla, pero para cantidades y códigos "
-                    "es preferible una foto original de mayor resolución."
-                )
+            _sha = hashlib.sha256(_s.getvalue()).hexdigest()
         except Exception:
-            pass
+            _sha = f"id-{id(_s)}"
+        if _sha in _vistos:
+            continue
+        _vistos.add(_sha)
+        _unicos.append(_s)
+    soportes = _unicos
+    hay_soporte = bool(soportes)
 
-    extr, digest = _extraer_documento(soporte, pid)
+    if hay_soporte:
+        st.caption(
+            f"**{len(soportes)} archivo(s)/página(s)** del mismo documento "
+            "serán procesados y consolidados."
+        )
+        with st.expander("Archivos que se consolidarán", expanded=False):
+            for _i, _s in enumerate(soportes, start=1):
+                _tipo = str(getattr(_s, "type", "") or "")
+                _detalle = ""
+                if _tipo.startswith("image/"):
+                    try:
+                        from PIL import Image
+                        _img = Image.open(io.BytesIO(_s.getvalue()))
+                        _detalle = (
+                            f" · {_img.width}×{_img.height}px "
+                            f"· {(_img.width * _img.height) / 1_000_000:.1f} MP"
+                        )
+                    except Exception:
+                        pass
+                st.caption(
+                    f"{_i}. **{getattr(_s, 'name', f'archivo_{_i}')}**"
+                    f"{_detalle}"
+                )
+
+    extr, digest, soportes = _extraer_documentos(soportes, pid)
+    hay_soporte = bool(soportes)
     suffix = digest or "manual"
+
+    if extr and int(extr.get("soportes_count") or 1) > 1:
+        st.success(
+            f"Documento consolidado: **{int(extr.get('soportes_count') or 0)} "
+            "archivo(s)** procesados como una sola recepción."
+        )
+        for _adv in extr.get("advertencias_consolidacion") or []:
+            st.warning(_adv)
 
     origenes = list(ORIGENES)
     origen_sugerido = (extr or {}).get("origen_sugerido")
@@ -1157,13 +1200,13 @@ def _registrar(user):
     # Alerta temprana: para BIN A BIN, HASTA identifica al proveedor
     # transformador al que está dirigido el documento.
     proveedor_doc_mismatch = bool(
-        soporte is not None
+        hay_soporte
         and origen_sugerido == "BIN_A_BIN"
         and origen_confianza >= 0.90
         and (extr or {}).get("proveedor_destino_coincide") is False
     )
 
-    if soporte is not None and extr and origen_sugerido in ORIGENES:
+    if hay_soporte and extr and origen_sugerido in ORIGENES:
         pct_tipo = int(round(origen_confianza * 100))
         st.info(
             f"Tipo de documento detectado automáticamente: "
@@ -1382,7 +1425,7 @@ def _registrar(user):
 
     st.markdown("##### Líneas del recibo")
     modos = ["Documento leído", "Manual", "Cargue masivo"]
-    modo_default = 0 if soporte is not None else 1
+    modo_default = 0 if hay_soporte else 1
     modo = st.radio(
         "Captura", modos,
         index=modo_default,
