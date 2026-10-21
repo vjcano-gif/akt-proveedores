@@ -3138,7 +3138,7 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
 
     # 2) Si OpenAI no resolvió una FOTO con suficiencia, preferimos otro motor
     # remoto antes de consumir CPU local.
-    if es_imagen and not ia_suficiente:
+    if (not ia_ok) or (es_imagen and not ia_suficiente):
         t0 = time.perf_counter()
         ia_mistral = _mistral_document_ai(nombre, data, mime)
         tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
