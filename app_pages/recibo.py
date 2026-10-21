@@ -635,22 +635,42 @@ def _enriquecer_extraccion(extr, proveedor_id):
     return extr
 
 
+@st.cache_data(ttl=3600, max_entries=96, show_spinner=False)
+def _analizar_documento_compartido(
+        nombre, mime, digest_completo, extractor_version, _contenido):
+    """Caché global entre sesiones para no reprocesar el mismo archivo.
+
+    _contenido se excluye del hash de Streamlit; digest_completo identifica los
+    bytes de forma estable y extractor_version invalida resultados antiguos.
+    """
+    return analizar_documento(nombre, _contenido, mime)
+
+
 def _extraer_documento(soporte, proveedor_id):
     """Procesa automáticamente un archivo nuevo; no requiere botón intermedio."""
     if soporte is None:
         return None, "manual"
 
     contenido = soporte.getvalue()
-    digest = hashlib.sha256(contenido).hexdigest()[:16]
-    # Versiona el resultado de extracción para no reutilizar en session_state
-    # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "remote-first-v35"
+    digest_completo = hashlib.sha256(contenido).hexdigest()
+    digest = digest_completo[:16]
+    # Versiona la extracción y permite compartir el resultado crudo entre
+    # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
+    extractor_version = "remote-first-v36-shared-cache"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
         with st.spinner("Procesando documento con IA remota..."):
             try:
-                extr = analizar_documento(soporte.name, contenido, soporte.type)
+                extr = _analizar_documento_compartido(
+                    soporte.name,
+                    soporte.type,
+                    digest_completo,
+                    extractor_version,
+                    contenido,
+                )
+                # st.cache_data devuelve una copia, por lo que enriquecerla para
+                # un proveedor no contamina el valor compartido.
                 st.session_state[clave] = _enriquecer_extraccion(extr, proveedor_id)
             except Exception as e:
                 st.session_state[clave] = {
