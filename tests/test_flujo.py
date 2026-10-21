@@ -1914,6 +1914,71 @@ try:
         check("PDF con IA parcial ejecuta parser de columnas",
               len(analisis_parcial.get("bin_filas_pdf_nativas") or []) == 4,
               str(analisis_parcial.get("bin_filas_pdf_nativas")))
+
+        # Caso producción: la IA entrega cantidades positivas pero incorrectas.
+        # El PDF nativo debe corregirlas porque lee directamente la columna.
+        pdf_doc2 = fitz.open()
+        page2 = pdf_doc2.new_page(width=1400, height=600)
+        page2.insert_text((40, 45), "MOVIMIENTO BIN A BIN", fontsize=13)
+        page2.insert_text((40, 75), "Id de Bin: BIN-QTY-REAL", fontsize=10)
+        for txt_h, x_h in headers_pdf:
+            page2.insert_text((x_h, 140), txt_h, fontsize=9)
+        rows_pdf2 = [
+            ("CHONGQING-012", "7700149453691", "Base Silla 200DS+ Mp", "150",
+             "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+            ("SANYANG IN-001", "7700149422819", "Base Sillin RX Mp", "180",
+             "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+            ("SANYANG IN-001", "7705946161657", "Base silla tras 125SC-R PRO Mp", "1200",
+             "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+            ("SANYANG IN-001", "7705946161923", "Base sillin Del SC-R PRO Mp", "1200",
+             "NONE", "NONE", "WSERE PUMO 1 1 1", "WSERE WUMO 1 1 1"),
+        ]
+        y2 = 175
+        for row in rows_pdf2:
+            for txt_cell, x_cell in zip(row, xs_pdf):
+                page2.insert_text((x_cell, y2), txt_cell, fontsize=8)
+            y2 += 28
+        pdf_qty_real = pdf_doc2.tobytes()
+        pdf_doc2.close()
+
+        dai._mistral_document_ai = lambda *args, **kwargs: {
+            "ok": True,
+            "texto": "MOVIMIENTO BIN A BIN",
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": "BIN-QTY-REAL",
+            "fecha": "2026-10-21",
+            "modelo": "mistral-wrong-positive-test",
+            "fuente": "MISTRAL_DOCUMENT_AI",
+            "filas": [
+                {"codigo": "7700149453691", "descripcion": "Base Silla 200DS+ Mp",
+                 "cantidad": 80, "serial": "NONE", "lote": "NONE",
+                 "desde": "WSERE PUMO 1 1 1", "hasta": "WSERE WUMO 1 1 1"},
+                {"codigo": "7700149422819", "descripcion": "Base Sillin RX Mp",
+                 "cantidad": 156, "serial": "NONE", "lote": "NONE",
+                 "desde": "WSERE PUMO 1 1 1", "hasta": "WSERE WUMO 1 1 1"},
+                {"codigo": "7705946161657", "descripcion": "Base silla tras 125SC-R PRO Mp",
+                 "cantidad": 288, "serial": "NONE", "lote": "NONE",
+                 "desde": "WSERE PUMO 1 1 1", "hasta": "WSERE WUMO 1 1 1"},
+                {"codigo": "7705946161923", "descripcion": "Base sillin Del SC-R PRO Mp",
+                 "cantidad": 288, "serial": "NONE", "lote": "NONE",
+                 "desde": "WSERE PUMO 1 1 1", "hasta": "WSERE WUMO 1 1 1"},
+            ],
+        }
+        analisis_qty_real = analizar_documento(
+            "BIN_QTY_REAL.pdf", pdf_qty_real, "application/pdf")
+        completar_con_catalogo(analisis_qty_real, catalogo_real)
+        qty_real_final = {
+            x["articulo"]: float(x["cantidad_documento"])
+            for x in analisis_qty_real.get("lineas", [])
+        }
+        esperado_qty_real = {
+            "7700149453691": 150.0,
+            "7700149422819": 180.0,
+            "7705946161657": 1200.0,
+            "7705946161923": 1200.0,
+        }
+        check("PDF nativo corrige cantidades IA positivas 150/180/1200/1200",
+              qty_real_final == esperado_qty_real, str(qty_real_final))
     finally:
         dai._openai_document_ai = _openai_pdf_original
         dai._mistral_document_ai = _mistral_pdf_original
