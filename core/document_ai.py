@@ -2506,8 +2506,24 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "DOCUMENT_AI": 20,
         }
         qty_actual = float(actual.get("cantidad_documento") or 0)
+
+        # En BIN PDF con capa de texto nativa, la lectura geométrica del propio
+        # PDF es más confiable para CANTIDAD que una interpretación de IA.
+        # Puede corregir incluso una cantidad positiva pero mal leída por IA
+        # (p.ej. 1200 -> 288). En imágenes/fotos la IA conserva prioridad.
+        pdf_nativo_corrige_ia = bool(
+            resultado.get("entrada_pdf")
+            and fuente_nueva in {
+                "BIN_PDF_CODIGO", "BIN_PDF_CLIP", "BIN_PDF_ESPACIAL"
+            }
+            and fuente_actual in {
+                "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "DOCUMENT_AI"
+            }
+        )
+
         if qty_nueva > 0 and (
             qty_actual <= 0
+            or pdf_nativo_corrige_ia
             or prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0)
         ):
             # Una fila validada con cantidad 0 significa "código reconocido,
