@@ -644,11 +644,11 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "fast-ocr-v29"
+    extractor_version = "fast-ocr-v30-batch"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
-        with st.spinner("Procesando documento automáticamente..."):
+        with st.spinner("Leyendo foto y validando cantidades por columna..."):
             try:
                 extr = analizar_documento(soporte.name, contenido, soporte.type)
                 st.session_state[clave] = _enriquecer_extraccion(extr, proveedor_id)
