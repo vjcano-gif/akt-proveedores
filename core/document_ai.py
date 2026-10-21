@@ -61,6 +61,20 @@ def _openai_vision_model() -> str:
     return model or "gpt-6-luna"
 
 
+def _auto_local_ocr_allowed() -> bool:
+    """Permite OCR pesado automático solo en desarrollo/sin OpenAI.
+
+    En producción con OPENAI_API_KEY configurada se desactiva para proteger
+    CPU de Streamlit y permitir concurrencia.
+    """
+    flag = str(os.getenv("AKT_AUTO_LOCAL_OCR") or "").strip().lower()
+    if flag in {"1", "true", "yes", "si", "sí"}:
+        return True
+    if flag in {"0", "false", "no"}:
+        return False
+    return not bool(_openai_api_key())
+
+
 def _imagen_api_optimizada(
         data: bytes, mime: str, max_side: int = 2048) -> tuple[bytes, str]:
     """Crea una copia de trabajo para Vision; el original NO se modifica.
@@ -3221,20 +3235,40 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         # PDF conserva el comportamiento local/nativo. Para FOTO sin IA no
         # lanzamos OCR pesado automáticamente: la UI podrá ofrecer refuerzo.
         if es_imagen:
-            texto, cf, metodo, diagnostico = "", 0.0, "IA_NO_DISPONIBLE", ""
-            out = estructurar("", 0.0)
-            out["entrada_ia"] = False
-            out["ia_error"] = (
-                (ia or {}).get("error") if isinstance(ia, dict)
-                else "Motor IA no disponible"
-            )
-            out["bin_filas_espaciales"] = []
-            out["ocr_local_ejecutado"] = False
-            out["modo_escalable"] = "SIN_IA_REVISION"
-            out["diagnostico_escalabilidad"] = (
-                "No fue posible completar la lectura remota. "
-                "OCR local pesado permanece desactivado automáticamente."
-            )
+            if _auto_local_ocr_allowed():
+                t0 = time.perf_counter()
+                local_foto = _analisis_local_foto_bin(data)
+                tiempos["ocr_local_s"] = round(
+                    time.perf_counter() - t0, 3)
+                texto = str(local_foto.get("texto") or "")
+                cf = float(local_foto.get("confianza") or 0.0)
+                metodo = "RAPIDOCR_LOCAL_BATCH"
+                diagnostico = str(local_foto.get("error") or "")
+                out = estructurar(texto, cf)
+                out["bin_filas_espaciales"] = list(
+                    local_foto.get("filas") or [])
+                out["entrada_ia"] = False
+                out["ia_error"] = (
+                    (ia or {}).get("error") if isinstance(ia, dict)
+                    else "Motor IA no disponible"
+                )
+                out["ocr_local_ejecutado"] = True
+                out["modo_escalable"] = "OCR_LOCAL_DESARROLLO"
+            else:
+                texto, cf, metodo, diagnostico = "", 0.0, "IA_NO_DISPONIBLE", ""
+                out = estructurar("", 0.0)
+                out["entrada_ia"] = False
+                out["ia_error"] = (
+                    (ia or {}).get("error") if isinstance(ia, dict)
+                    else "Motor IA no disponible"
+                )
+                out["bin_filas_espaciales"] = []
+                out["ocr_local_ejecutado"] = False
+                out["modo_escalable"] = "SIN_IA_REVISION"
+                out["diagnostico_escalabilidad"] = (
+                    "No fue posible completar la lectura remota. "
+                    "OCR local pesado permanece desactivado automáticamente."
+                )
         else:
             t0 = time.perf_counter()
             texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
