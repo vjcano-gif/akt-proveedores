@@ -1140,6 +1140,52 @@ def _releer_cantidades_bin_por_fila(img, res, filas: list[dict]) -> list[dict]:
     return filas
 
 
+def _extraer_referencia_bin_resultado(res) -> str | None:
+    """Rescata Id de Bin desde la misma pasada RapidOCR usada para la foto.
+
+    Tolera que OCR separe "BIN" y el número en cajas distintas o que confunda
+    espacios/puntuación. No hace otra llamada OCR.
+    """
+    txts = list(getattr(res, "txts", None) or [])
+    if not txts:
+        return None
+
+    texto_ordenado, _ = _texto_rapid_ordenado(res)
+    candidatos_texto = [
+        texto_ordenado,
+        " ".join(str(x or "").strip() for x in txts if str(x or "").strip()),
+    ]
+
+    patrones = [
+        # Forma normal del reporte: Id de Bin: BIN2761968
+        r"\bID\s*(?:DE\s*)?BIN\s*[:#.-]?\s*(BIN\s*[- ]?\s*\d{4,})\b",
+        # Respaldo: cualquier token BIN + número suficientemente largo.
+        r"\b(BIN\s*[- ]?\s*\d{4,})\b",
+        # OCR puede separar B I N con espacios.
+        r"\b(B\s*I\s*N\s*[- ]?\s*\d{4,})\b",
+    ]
+    for texto in candidatos_texto:
+        normal = str(texto or "").upper()
+        for patron in patrones:
+            m = re.search(patron, normal, re.I)
+            if not m:
+                continue
+            ref = re.sub(r"[^A-Z0-9]", "", m.group(1).upper())
+            ref = re.sub(r"^B\s*I\s*N", "BIN", ref)
+            if re.fullmatch(r"BIN\d{4,}", ref):
+                return ref
+    return None
+
+
+def _extraer_referencia_bin_imagen(data: bytes) -> str | None:
+    """Referencia BIN desde OCR local reutilizando el resultado cacheado."""
+    try:
+        _, res = _rapid_resultado_bin(data)
+        return _extraer_referencia_bin_resultado(res)
+    except Exception:
+        return None
+
+
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
     """Extrae BIN fotografiado con verificación masiva de la columna Cantidad."""
     try:
@@ -2967,6 +3013,27 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     out["entrada_pdf"] = bool(
         mime == "application/pdf" or name.endswith(".pdf")
     )
+
+    # El número BIN es crítico y vive en el encabezado, no en la tabla.
+    # Para fotos lo rescatamos también con RapidOCR local, incluso cuando
+    # Document AI omitió la referencia. La llamada reutiliza el resultado
+    # cacheado del parser espacial y no repite OCR completo.
+    if es_imagen:
+        ref_local_bin = _extraer_referencia_bin_imagen(data)
+        out["referencia_bin_local"] = ref_local_bin
+        ref_actual = str(((out.get("referencia") or {}).get("valor") or "")).strip()
+        if ref_local_bin and (
+            not ref_actual
+            or not re.fullmatch(r"BIN[- ]?\d{4,}", ref_actual, re.I)
+        ):
+            out["referencia"] = asdict(Campo(
+                ref_local_bin, 0.99, "OCR encabezado BIN"))
+        elif ref_local_bin and ref_actual:
+            # Canoniza variantes como "BIN 2761968" -> "BIN2761968".
+            canon_actual = re.sub(r"[^A-Z0-9]", "", ref_actual.upper())
+            if canon_actual == ref_local_bin:
+                out["referencia"] = asdict(Campo(
+                    ref_local_bin, 0.99, "OCR encabezado BIN"))
 
     out.update(resumir_ubicaciones_bin(out.get("bin_filas_espaciales") or []))
     out["metodo"] = metodo
