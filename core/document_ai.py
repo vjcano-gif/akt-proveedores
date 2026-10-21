@@ -238,25 +238,50 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
         "max_output_tokens": 12000,
     }
 
-    try:
-        resp = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=(5, 40),
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-    except Exception as e:
+    raw = None
+    ultimo_error = None
+    resp = None
+    for intento in range(2):
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=(5, 28),
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                ultimo_error = RuntimeError(
+                    f"OpenAI HTTP {resp.status_code}: {str(resp.text or '')[:500]}"
+                )
+                if intento == 0:
+                    time.sleep(0.7)
+                    continue
+            resp.raise_for_status()
+            raw = resp.json()
+            break
+        except Exception as e:
+            ultimo_error = e
+            # Reintenta una sola vez únicamente ante fallos transitorios.
+            transitorio = (
+                isinstance(e, (requests.Timeout, requests.ConnectionError))
+                or (resp is not None and (
+                    resp.status_code == 429 or resp.status_code >= 500
+                ))
+            )
+            if intento == 0 and transitorio:
+                time.sleep(0.7)
+                continue
+            break
+
+    if raw is None:
+        e = ultimo_error or RuntimeError("OpenAI no devolvió respuesta")
         detalle = str(e)
         try:
-            if "resp" in locals() and getattr(resp, "text", None):
+            if resp is not None and getattr(resp, "text", None):
                 cuerpo = str(resp.text or "")
-                # El cuerpo de error de OpenAI no contiene la API key; se
-                # limita para no inundar la UI con respuestas largas.
                 detalle = f"{detalle} · {cuerpo[:900]}"
         except Exception:
             pass
