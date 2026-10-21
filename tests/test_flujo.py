@@ -1375,6 +1375,46 @@ try:
             qty_img, fake_trunc, list(fake_trunc.txts))
         check("Cantidad truncada 1 se relee como 150 aunque Rapid tenga alta confianza",
               trunc_refinada[3] == "150", str(trunc_refinada))
+
+        # Valida el diseño final para fotos: relectura de la CELDA completa por
+        # fila y consenso independiente 150/180/1200/1200.
+        fake_rows_res = SimpleNamespace(
+            txts=["Cantidad", "Serial"],
+            scores=[0.99, 0.99],
+            boxes=[
+                [[100, 20], [180, 20], [180, 45], [100, 45]],
+                [[220, 20], [280, 20], [280, 45], [220, 45]],
+            ],
+        )
+        filas_qty_photo = [
+            {"articulo": "A1", "cantidad_documento": 1.0,
+             "_row_cy": 80.0, "fuente": "BIN_ESPACIAL"},
+            {"articulo": "A2", "cantidad_documento": 1.0,
+             "_row_cy": 130.0, "fuente": "BIN_ESPACIAL"},
+            {"articulo": "A3", "cantidad_documento": 1.0,
+             "_row_cy": 180.0, "fuente": "BIN_ESPACIAL"},
+            {"articulo": "A4", "cantidad_documento": 1.0,
+             "_row_cy": 230.0, "fuente": "BIN_ESPACIAL"},
+        ]
+        votos_photo = iter(
+            ["150", "150", "150",
+             "180", "180", "180",
+             "1200", "1200", "1200",
+             "1200", "1200", "1200"]
+        )
+        pytesseract.image_to_string = lambda *args, **kwargs: next(votos_photo)
+        img_qty_photo = np.full((300, 320, 3), 255, dtype=np.uint8)
+        verificadas_photo = dai._releer_cantidades_bin_por_fila(
+            img_qty_photo, fake_rows_res, filas_qty_photo)
+        qty_photo = [
+            float(x["cantidad_documento"]) for x in verificadas_photo
+        ]
+        check("Foto BIN verifica por celda completa 150/180/1200/1200",
+              qty_photo == [150.0, 180.0, 1200.0, 1200.0],
+              str(qty_photo))
+        check("Foto BIN marca consenso fuerte en las cuatro cantidades",
+              all(x.get("cantidad_verificada") for x in verificadas_photo),
+              str(verificadas_photo))
     finally:
         pytesseract.image_to_string = tess_img_original
 except Exception as e:
