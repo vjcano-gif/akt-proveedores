@@ -1086,8 +1086,13 @@ def _registrar(user):
         st.warning("Su rol no registra recibos.")
         return
 
-    pid = ui.selector_proveedor(user, key="rec_prov")
+    pid = ui.selector_proveedor(
+        user,
+        key="rec_prov_blank_v2",
+        allow_blank=True,
+    )
     if not pid:
+        st.caption("Seleccione un proveedor para iniciar la recepción.")
         return
 
     ubicacion_desde_maestro, ubicacion_hasta_maestro, error_ubicacion = (
