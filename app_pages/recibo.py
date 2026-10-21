@@ -644,11 +644,11 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "fast-ocr-v34-parallel"
+    extractor_version = "remote-first-v35"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
-        with st.spinner("Leyendo foto y validando cantidades por columna..."):
+        with st.spinner("Procesando documento con IA remota..."):
             try:
                 extr = analizar_documento(soporte.name, contenido, soporte.type)
                 st.session_state[clave] = _enriquecer_extraccion(extr, proveedor_id)
@@ -1334,15 +1334,30 @@ def _registrar(user):
             ia_error = str(extr.get("ia_error") or "").strip()
             if ia_error:
                 st.warning(
-                    "GPT-5 nano no pudo utilizarse en esta lectura; se usó "
-                    f"OCR local como respaldo. Detalle: {ia_error}"
+                    "La lectura remota no pudo completarse. "
+                    f"Detalle: {ia_error}"
                 )
             else:
                 st.info(
-                    "Esta lectura se procesó con OCR local. Para usar GPT-5 nano "
-                    "como motor principal debe estar configurado OPENAI_API_KEY "
-                    "en los Secrets de Streamlit."
+                    "No se utilizó un motor remoto en esta lectura."
                 )
+
+        modo_escalable = str(extr.get("modo_escalable") or "").strip()
+        if modo_escalable == "IA_REMOTA":
+            st.success(
+                "Procesamiento escalable: lectura resuelta por IA remota. "
+                "No se consumió OCR pesado de la CPU de Streamlit."
+            )
+        elif modo_escalable == "IA_REMOTA_REVISION":
+            st.warning(
+                str(extr.get("diagnostico_escalabilidad") or
+                    "La lectura requiere revisión antes de confirmar.")
+            )
+        elif modo_escalable == "SIN_IA_REVISION":
+            st.error(
+                "No se ejecutó OCR local pesado automáticamente para proteger "
+                "la capacidad concurrente de la aplicación."
+            )
 
         tiempos = extr.get("tiempos_procesamiento") or {}
         if tiempos:
@@ -1697,6 +1712,19 @@ def _registrar(user):
                 "consenso automático.",
                 value=False,
                 key=f"rec_qty_review_{suffix}",
+            )
+
+        # Si la IA remota declaró la foto incompleta, exigir revisión explícita
+        # antes de confirmar, sin disparar OCR pesado automáticamente.
+        if (
+            (extr or {}).get("entrada_imagen")
+            and (extr or {}).get("modo_escalable") == "IA_REMOTA_REVISION"
+        ):
+            revision_cantidades_ok = st.checkbox(
+                "He revisado el BIN y confirmo que las referencias y cantidades "
+                "mostradas coinciden con el documento.",
+                value=False,
+                key=f"rec_remote_review_{suffix}",
             )
 
         b1, b2, b3 = st.columns([1.3, 1.1, 0.8])
