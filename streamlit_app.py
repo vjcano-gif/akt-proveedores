@@ -10,7 +10,8 @@ st.set_page_config(page_title="AKT · Proveedores de Transformación",
 
 from core import ui                                  # noqa: E402
 from core.auth import ROLES, autenticar, puede       # noqa: E402
-from core.db import db_label, healthcheck, init_db   # noqa: E402
+from core.db import (database_connection_hint, db_label, healthcheck,
+                     init_db)                        # noqa: E402
 
 
 @st.cache_resource(show_spinner="Preparando la base de datos...")
@@ -58,7 +59,28 @@ def pantalla_login():
 
 
 def main():
-    _arranque()
+    try:
+        _arranque()
+    except Exception as exc:
+        from sqlalchemy.exc import OperationalError
+        if isinstance(exc, OperationalError) or isinstance(
+                getattr(exc, "__cause__", None), OperationalError):
+            ui.aplicar_estilos()
+            st.error(
+                "No fue posible conectar con la base de datos PostgreSQL/Supabase."
+            )
+            st.info(database_connection_hint())
+            st.caption(
+                "La aplicación no cambia automáticamente a SQLite porque eso "
+                "ocultaría el problema y podría mostrar una base distinta a la "
+                "productiva. Revise el secreto de conexión y reinicie la app."
+            )
+            if st.button("Reintentar conexión", type="primary"):
+                _arranque.clear()
+                st.rerun()
+            st.stop()
+        raise
+
     if "user" not in st.session_state:
         pantalla_login()
         return
