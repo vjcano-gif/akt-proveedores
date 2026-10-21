@@ -680,15 +680,28 @@ def _refinar_cantidades_bin(img, res, txts):
             )
         except Exception:
             score_rapid = 0.0
-        if not original or score_rapid < 0.72:
+        # Un único dígito se revalida aunque RapidOCR declare alta
+        # confianza: en fotos de pantalla es frecuente que 150/1200 queden
+        # segmentados y RapidOCR vea solo el primer "1".
+        if not original or score_rapid < 0.72 or len(original) == 1:
             sospechosos.append(d)
 
     for d in sospechosos:
         try:
-            pad_x = max(10, int(d["w"] * 0.55))
+            original_digits = re.sub(r"\D", "", d["txt"])
             pad_y = max(7, int(d["h"] * 0.55))
-            x1 = max(0, int(d["x0"]) - pad_x)
-            x2 = min(w_img, int(d["x1"]) + pad_x)
+
+            if len(original_digits) == 1:
+                # Para un "1" aislado no recortamos alrededor de su bbox:
+                # puede ser solo el primer dígito de 150/1200. Leemos toda la
+                # celda entre los encabezados Cantidad y Serial.
+                x1 = max(0, int(x_qty - 0.55 * ancho_col))
+                x2 = min(w_img, int(x_serial - 1.0))
+            else:
+                pad_x = max(10, int(d["w"] * 0.55))
+                x1 = max(0, int(d["x0"]) - pad_x)
+                x2 = min(w_img, int(d["x1"]) + pad_x)
+
             y1 = max(0, int(d["y0"]) - pad_y)
             y2 = min(h_img, int(d["y1"]) + pad_y)
             crop = img[y1:y2, x1:x2]
@@ -2427,10 +2440,22 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
                 "completa cantidades faltantes sin reemplazar lecturas IA válidas."
             )
         else:
-            fuentes_merge = propuestas_ia
+            # Para fotos conservamos IA como fuente principal, pero añadimos
+            # geometría solo para el MISMO código exacto del maestro. Su única
+            # capacidad de sobrescritura es rescatar IA truncada a "1".
+            codigos_ia = {
+                str(x.get("articulo") or "").strip().upper()
+                for x in propuestas_ia
+            }
+            espaciales_mismo_codigo = [
+                x for x in propuestas_espaciales
+                if str(x.get("articulo") or "").strip().upper() in codigos_ia
+            ]
+            fuentes_merge = propuestas_ia + espaciales_mismo_codigo
             resultado["diagnostico_bin"] = (
                 f"{resultado.get('ia_fuente') or 'Document AI'} validó "
-                f"{len(propuestas_ia)} fila(s) contra el maestro."
+                f"{len(propuestas_ia)} fila(s); la geometría de la foto se usa "
+                "solo para confirmar cantidades truncadas del mismo código."
             )
     elif es_bin_imagen:
         # Un rescate espacial solo puede entrar si el MISMO código apareció
@@ -2521,9 +2546,23 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             }
         )
 
+        # Foto real: si Document AI devolvió solamente "1", pero el parser
+        # espacial del MISMO código releyó una cantidad de varios dígitos en
+        # la columna Cantidad, se considera la lectura IA truncada.
+        imagen_corrige_ia_truncada = bool(
+            resultado.get("entrada_imagen")
+            and fuente_nueva == "BIN_ESPACIAL"
+            and fuente_actual in {
+                "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "DOCUMENT_AI"
+            }
+            and qty_actual == 1
+            and qty_nueva >= 10
+        )
+
         if qty_nueva > 0 and (
             qty_actual <= 0
             or pdf_nativo_corrige_ia
+            or imagen_corrige_ia_truncada
             or prioridad.get(fuente_nueva, 0) >= prioridad.get(fuente_actual, 0)
         ):
             # Una fila validada con cantidad 0 significa "código reconocido,
