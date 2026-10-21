@@ -644,7 +644,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "fast-ocr-v28"
+    extractor_version = "fast-ocr-v29"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -1368,6 +1368,22 @@ def _registrar(user):
         if extr.get("diagnostico_bin"):
             st.warning(extr["diagnostico_bin"])
 
+        if extr.get("entrada_imagen"):
+            verificadas = int(extr.get("cantidades_foto_verificadas") or 0)
+            sin_consenso = list(extr.get("cantidades_foto_sin_consenso") or [])
+            if verificadas:
+                st.success(
+                    f"**{verificadas} cantidad(es)** verificadas con lectura "
+                    "numérica independiente de la celda Cantidad."
+                )
+            if sin_consenso:
+                st.warning(
+                    "No hubo consenso automático para la cantidad de: "
+                    + ", ".join(sin_consenso[:12])
+                    + ("…" if len(sin_consenso) > 12 else "")
+                    + ". Revise esas filas antes de confirmar el recibo."
+                )
+
         with st.expander("Texto detectado", expanded=False):
             texto_ocr = extr.get("texto", "")
             st.text(texto_ocr[:12000] if texto_ocr else "Sin texto detectado.")
@@ -1672,12 +1688,26 @@ def _registrar(user):
                 + ("…" if len(faltan_qty) > 12 else "")
                 + ". Corrija esas cantidades antes de marcar recepción completa.")
 
+        cantidades_sin_consenso = list(
+            (extr or {}).get("cantidades_foto_sin_consenso") or [])
+        revision_cantidades_ok = True
+        if cantidades_sin_consenso:
+            revision_cantidades_ok = st.checkbox(
+                "He revisado manualmente las cantidades que no tuvieron "
+                "consenso automático.",
+                value=False,
+                key=f"rec_qty_review_{suffix}",
+            )
+
         b1, b2, b3 = st.columns([1.3, 1.1, 0.8])
         if b1.button(
             "✓ Marcar recibo satisfactorio y completo",
             type="primary",
             use_container_width=True,
-            disabled=bool(faltan_qty) or lineas_df.empty or bloqueo_hasta,
+            disabled=(
+                bool(faltan_qty) or lineas_df.empty or bloqueo_hasta
+                or not revision_cantidades_ok
+            ),
             key=f"btn_completo_{suffix}",
         ):
             nuevo = lineas_df.copy()
@@ -1691,7 +1721,10 @@ def _registrar(user):
         if b2.button(
             "⚠ Registrar discrepancias",
             use_container_width=True,
-            disabled=lineas_df.empty or bloqueo_hasta,
+            disabled=(
+                lineas_df.empty or bloqueo_hasta
+                or not revision_cantidades_ok
+            ),
             key=f"btn_disc_{suffix}",
         ):
             nuevo = lineas_df.copy()
