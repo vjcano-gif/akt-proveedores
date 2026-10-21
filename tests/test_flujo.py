@@ -1354,6 +1354,27 @@ try:
             qty_img, fake_qty, list(fake_qty.txts))
         check("Cantidad deformada uaz se relee como 142",
               refinadas[3] == "142", str(refinadas))
+
+        # Producción: RapidOCR puede devolver un "1" limpio y con alta
+        # confianza aunque la celda real sea 150/1200. Un solo dígito debe
+        # releerse igualmente sobre toda la columna Cantidad.
+        fake_trunc = SimpleNamespace(
+            txts=["Cantidad", "Serial", "Lote", "1", "NONE", "NONE"],
+            scores=[0.99] * 6,
+            boxes=[
+                [[100, 20], [180, 20], [180, 45], [100, 45]],
+                [[220, 20], [280, 20], [280, 45], [220, 45]],
+                [[320, 20], [370, 20], [370, 45], [320, 45]],
+                [[135, 80], [145, 80], [145, 108], [135, 108]],
+                [[225, 80], [280, 80], [280, 108], [225, 108]],
+                [[325, 80], [380, 80], [380, 108], [325, 108]],
+            ],
+        )
+        pytesseract.image_to_string = lambda *args, **kwargs: "150"
+        trunc_refinada = dai._refinar_cantidades_bin(
+            qty_img, fake_trunc, list(fake_trunc.txts))
+        check("Cantidad truncada 1 se relee como 150 aunque Rapid tenga alta confianza",
+              trunc_refinada[3] == "150", str(trunc_refinada))
     finally:
         pytesseract.image_to_string = tess_img_original
 except Exception as e:
@@ -1431,6 +1452,41 @@ try:
     check("GPT-5 nano descarta código fuera del maestro",
           "9999999999999" not in cantidades_nano,
           str(cantidades_nano))
+
+    resultado_img_trunc = {
+        "texto": "MOVIMIENTO BIN A BIN",
+        "confianza_texto": 0.97,
+        "entrada_imagen": True,
+        "entrada_pdf": False,
+        "origen_sugerido": "BIN_A_BIN",
+        "metodo": "OPENAI_GPT5_NANO",
+        "ia_fuente": "OPENAI_GPT5_NANO",
+        "lineas": [],
+        "lineas_ia": [{
+            "codigo": "7700149453691",
+            "descripcion": "Chasis 125NKD CBS V4 Mp",
+            "cantidad": 1,
+            "serial": "NONE", "lote": "NONE",
+            "desde": "WSERE PPUN 1 1 1",
+            "hasta": "WSERE WPUN 1 1 1",
+        }],
+        "bin_filas_espaciales": [{
+            "articulo": "7700149453691",
+            "descripcion_ocr": "Chasis 125NKD CBS V4 Mp",
+            "cantidad_documento": 150,
+            "cantidad_fisica": 0,
+            "serial": "NONE", "lote": "NONE",
+            "ubicacion_desde": "WSERE PPUN 1 1 1",
+            "ubicacion_hasta": "WSERE WPUN 1 1 1",
+            "fuente": "BIN_ESPACIAL",
+        }],
+    }
+    completar_con_catalogo(
+        resultado_img_trunc,
+        {"7700149453691": "Chasis 125NKD CBS V4 Mp"})
+    check("Foto BIN corrige IA truncada 1 -> 150 con geometría del mismo código",
+          float(resultado_img_trunc["lineas"][0]["cantidad_documento"]) == 150.0,
+          str(resultado_img_trunc["lineas"]))
 finally:
     dai._openai_document_ai = _openai_original
 
