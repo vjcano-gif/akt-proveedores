@@ -3125,10 +3125,13 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     # cacheado del parser espacial y no repite OCR completo.
     if es_imagen:
         cabecera_bin = _extraer_cabecera_bin_imagen(data)
-        ref_local_bin = (
-            _extraer_referencia_bin_imagen(data)
-            or cabecera_bin.get("referencia")
-        )
+        ref_rapid_bin = None
+        try:
+            _, _res_ref = _rapid_resultado_bin(data)
+            ref_rapid_bin = _extraer_referencia_bin_resultado(_res_ref)
+        except Exception:
+            ref_rapid_bin = None
+        ref_local_bin = ref_rapid_bin or cabecera_bin.get("referencia")
         out["referencia_bin_local"] = ref_local_bin
         out["cabecera_bin_local"] = {
             "referencia": cabecera_bin.get("referencia"),
