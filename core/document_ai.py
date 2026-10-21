@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -3001,25 +3002,89 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     )
     return resultado
 
+def _analisis_local_foto_bin(data: bytes) -> dict:
+    """Una sola tarea local para foto BIN: RapidOCR + cantidades + encabezado.
+
+    Reutiliza caches internas para evitar escanear la imagen varias veces.
+    """
+    t0 = time.perf_counter()
+    filas = extraer_bin_columnas_imagen(data)
+
+    texto_rapid = ""
+    ref_rapid = None
+    try:
+        _, res = _rapid_resultado_bin(data)
+        texto_rapid, scores = _texto_rapid_ordenado(res)
+        ref_rapid = _extraer_referencia_bin_resultado(res)
+        conf_rapid = (
+            sum(float(x) for x in scores) / len(scores)
+            if scores else 0.0
+        )
+    except Exception:
+        conf_rapid = 0.0
+
+    cabecera = _extraer_cabecera_bin_imagen(data)
+    return {
+        "filas": filas,
+        "texto": texto_rapid,
+        "confianza": float(conf_rapid or 0.0),
+        "referencia": ref_rapid or cabecera.get("referencia"),
+        "fecha_transaccion": cabecera.get("fecha_transaccion"),
+        "cabecera": cabecera,
+        "tiempo_s": round(time.perf_counter() - t0, 3),
+    }
+
+
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
     name = (nombre or "").lower()
     mime = mime or ""
     t_total = time.perf_counter()
     tiempos = {}
 
-    # Motor principal: GPT-5 nano Vision cuando OPENAI_API_KEY existe.
-    # Si no está configurado o falla, intenta Mistral (si tiene clave) y luego
-    # cae automáticamente al OCR local existente.
-    t0 = time.perf_counter()
-    ia = _openai_document_ai(nombre, data, mime)
-    tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
+    es_imagen_entrada = bool(
+        mime.startswith("image/")
+        or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+    )
 
-    if not (ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))):
+    # Photo-first en paralelo:
+    # - la llamada OpenAI corre en el hilo principal para leer st.secrets;
+    # - RapidOCR/Tesseract local corre simultáneamente en un worker.
+    # El tiempo total deja de ser OpenAI + OCR local y pasa a aproximarse al
+    # más lento de los dos.
+    local_future = None
+    executor = None
+    if es_imagen_entrada:
+        executor = ThreadPoolExecutor(max_workers=1)
+        local_future = executor.submit(_analisis_local_foto_bin, data)
+
+    try:
         t0 = time.perf_counter()
-        ia_mistral = _mistral_document_ai(nombre, data, mime)
-        tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
-        if ia_mistral and ia_mistral.get("ok"):
-            ia = ia_mistral
+        ia = _openai_document_ai(nombre, data, mime)
+        tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
+
+        if not (ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))):
+            t0 = time.perf_counter()
+            ia_mistral = _mistral_document_ai(nombre, data, mime)
+            tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
+            if ia_mistral and ia_mistral.get("ok"):
+                ia = ia_mistral
+
+        local_foto = None
+        if local_future is not None:
+            try:
+                local_foto = local_future.result()
+                tiempos["ocr_local_paralelo_s"] = float(
+                    local_foto.get("tiempo_s") or 0.0)
+            except Exception as exc:
+                local_foto = {
+                    "filas": [], "texto": "", "confianza": 0.0,
+                    "referencia": None, "fecha_transaccion": None,
+                    "cabecera": {}, "error": f"{type(exc).__name__}: {exc}",
+                }
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False)
+
     ia_ok = bool(ia and ia.get("ok") and (ia.get("texto") or ia.get("filas")))
 
     if ia_ok:
@@ -3078,37 +3143,41 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             # Se conserva la salida IA para auditoría y se añaden las filas
             # nativas como fuente complementaria.
             out["bin_filas_espaciales"] = filas_ia_bin + filas_pdf_nativas
-        elif mime.startswith("image/") or name.endswith(
-                (".png", ".jpg", ".jpeg", ".webp", ".bmp")):
-            # Foto-first: aunque la IA haya respondido, validamos localmente
-            # Código/Cantidad por geometría. El fast-path de RapidOCR evita las
-            # rotaciones costosas cuando la imagen ya viene derecha.
-            t0 = time.perf_counter()
-            filas_foto_local = extraer_bin_columnas_imagen(data)
-            tiempos["parser_columnas_s"] = round(
-                time.perf_counter() - t0, 3)
+        elif es_imagen_entrada:
+            filas_foto_local = list((local_foto or {}).get("filas") or [])
             out["bin_filas_foto_local"] = filas_foto_local
             out["bin_filas_espaciales"] = filas_ia_bin + filas_foto_local
+            tiempos["parser_columnas_s"] = float(
+                (local_foto or {}).get("tiempo_s") or 0.0)
     else:
-        t0 = time.perf_counter()
-        texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
-        tiempos["ocr_texto_s"] = round(time.perf_counter() - t0, 3)
-        out = estructurar(texto, cf)
+        if es_imagen_entrada and local_foto is not None:
+            texto = str(local_foto.get("texto") or "")
+            cf = float(local_foto.get("confianza") or 0.0)
+            metodo = "RAPIDOCR_LOCAL_BATCH"
+            diagnostico = str(local_foto.get("error") or "")
+            out = estructurar(texto, cf)
+            out["bin_filas_espaciales"] = list(
+                local_foto.get("filas") or [])
+            tiempos["ocr_texto_s"] = float(
+                local_foto.get("tiempo_s") or 0.0)
+            tiempos["parser_columnas_s"] = float(
+                local_foto.get("tiempo_s") or 0.0)
+        else:
+            t0 = time.perf_counter()
+            texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
+            tiempos["ocr_texto_s"] = round(time.perf_counter() - t0, 3)
+            out = estructurar(texto, cf)
+
+            t0 = time.perf_counter()
+            if mime == "application/pdf" or name.endswith(".pdf"):
+                out["bin_filas_espaciales"] = extraer_bin_columnas_pdf(data)
+            else:
+                out["bin_filas_espaciales"] = []
+            tiempos["parser_columnas_s"] = round(
+                time.perf_counter() - t0, 3)
+
         out["entrada_ia"] = False
         out["ia_error"] = (ia or {}).get("error") if isinstance(ia, dict) else ""
-
-        es_imagen_local = bool(
-            mime.startswith("image/")
-            or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
-        )
-        t0 = time.perf_counter()
-        if es_imagen_local:
-            out["bin_filas_espaciales"] = extraer_bin_columnas_imagen(data)
-        elif mime == "application/pdf" or name.endswith(".pdf"):
-            out["bin_filas_espaciales"] = extraer_bin_columnas_pdf(data)
-        else:
-            out["bin_filas_espaciales"] = []
-        tiempos["parser_columnas_s"] = round(time.perf_counter() - t0, 3)
 
     es_imagen = bool(
         mime.startswith("image/")
@@ -3124,18 +3193,18 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     # Document AI omitió la referencia. La llamada reutiliza el resultado
     # cacheado del parser espacial y no repite OCR completo.
     if es_imagen:
-        cabecera_bin = _extraer_cabecera_bin_imagen(data)
-        ref_rapid_bin = None
-        try:
-            _, _res_ref = _rapid_resultado_bin(data)
-            ref_rapid_bin = _extraer_referencia_bin_resultado(_res_ref)
-        except Exception:
-            ref_rapid_bin = None
-        ref_local_bin = ref_rapid_bin or cabecera_bin.get("referencia")
+        cabecera_bin = dict((local_foto or {}).get("cabecera") or {})
+        ref_local_bin = (
+            (local_foto or {}).get("referencia")
+            or cabecera_bin.get("referencia")
+        )
         out["referencia_bin_local"] = ref_local_bin
         out["cabecera_bin_local"] = {
             "referencia": cabecera_bin.get("referencia"),
-            "fecha_transaccion": cabecera_bin.get("fecha_transaccion"),
+            "fecha_transaccion": (
+                (local_foto or {}).get("fecha_transaccion")
+                or cabecera_bin.get("fecha_transaccion")
+            ),
         }
 
         ref_actual = str(((out.get("referencia") or {}).get("valor") or "")).strip()
@@ -3153,7 +3222,11 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
 
         # Fecha Transacción del encabezado local también puede rescatar una
         # omisión de IA/OCR general.
-        fecha_tx_local = str(cabecera_bin.get("fecha_transaccion") or "").strip()
+        fecha_tx_local = str(
+            (local_foto or {}).get("fecha_transaccion")
+            or cabecera_bin.get("fecha_transaccion")
+            or ""
+        ).strip()
         if fecha_tx_local:
             fecha_actual = str(((out.get("fecha") or {}).get("valor") or "")).strip()
             if not fecha_actual:
