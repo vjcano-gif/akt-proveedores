@@ -1566,7 +1566,9 @@ try:
             "serial": "NONE", "lote": "NONE",
             "ubicacion_desde": "WSERE PPUN 1 1 1",
             "ubicacion_hasta": "WSERE WPUN 1 1 1",
-            "fuente": "BIN_ESPACIAL",
+            "fuente": "BIN_ESPACIAL_VERIFICADO",
+            "cantidad_verificada": True,
+            "cantidad_votos": {"150": 3},
         }],
     }
     completar_con_catalogo(
