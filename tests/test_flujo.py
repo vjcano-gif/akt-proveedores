@@ -828,6 +828,21 @@ check("Extractor infiere BIN por estructura tabular aunque falte el título",
           "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta"
       ) == "BIN_A_BIN")
 
+fake_header_bin = SimpleNamespace(
+    txts=[
+        "MOVIMIENTO BIN A BIN",
+        "Id de Bin:", "BIN2761968",
+        "Usuario:", "1017237842",
+        "Fecha Transacción:", "2026-10-13-15.41.38",
+        "Proveedor", "Código", "Descripción", "Cantidad",
+    ],
+    scores=[0.99] * 11,
+    boxes=None,
+)
+check("Foto rescata Id de Bin del encabezado aunque IA lo omita",
+      dai._extraer_referencia_bin_resultado(fake_header_bin) == "BIN2761968",
+      str(dai._extraer_referencia_bin_resultado(fake_header_bin)))
+
 sample_fechas_bin = """
 MOVIMIENTO BIN A BIN
 Id de Bin: BIN2654425
