@@ -1569,6 +1569,69 @@ try:
           "9999999999999" not in cantidades_nano,
           str(cantidades_nano))
 
+    # Producción escalable: una lectura IA completa no debe ejecutar OCR local
+    # pesado ni el verificador remoto secundario.
+    _local_original = dai._analisis_local_foto_bin
+    _mistral_original_scalable = dai._mistral_document_ai
+    try:
+        dai._openai_document_ai = lambda nombre, data, mime=None: {
+            "ok": True,
+            "texto": "MOVIMIENTO BIN A BIN",
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": "BIN2761968",
+            "fecha": "2026-10-13",
+            "fecha_transaccion": "2026-10-13",
+            "fecha_documento": "13/10/2026",
+            "filas_visibles": 2,
+            "lectura_completa": True,
+            "modelo": "gpt-6-luna",
+            "fuente": "OPENAI_VISION",
+            "filas": [
+                {
+                    "proveedor": "EICHER MOT-001",
+                    "codigo": "7700149366632",
+                    "descripcion": "Cal Gbo Tras Neg Hmlyan 450 Mp",
+                    "cantidad": 68,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PINT 1 1 1",
+                    "hasta": "WSERE WINT 1 1 1",
+                },
+                {
+                    "proveedor": "EICHER MOT-001",
+                    "codigo": "7700149543231",
+                    "descripcion": "Cal Tan Der1 Honey Bear 650 Mp",
+                    "cantidad": 50,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PINT 1 1 1",
+                    "hasta": "WSERE WINT 1 1 1",
+                },
+            ],
+        }
+        dai._analisis_local_foto_bin = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("OCR local no debe ejecutarse en lectura completa")
+            )
+        )
+        dai._mistral_document_ai = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("Mistral no debe ejecutarse en lectura OpenAI completa")
+            )
+        )
+        analisis_escalable = analizar_documento(
+            "BIN2761968.jpg", b"FOTO-COMPLETA", "image/jpeg")
+        check("Foto BIN completa usa modo IA_REMOTA",
+              analisis_escalable.get("modo_escalable") == "IA_REMOTA",
+              str(analisis_escalable.get("modo_escalable")))
+        check("Foto BIN completa no ejecuta OCR local",
+              analisis_escalable.get("ocr_local_ejecutado") is False,
+              str(analisis_escalable.get("ocr_local_ejecutado")))
+        check("Foto BIN completa conserva 2 filas remotas",
+              len(analisis_escalable.get("lineas_ia") or []) == 2,
+              str(analisis_escalable.get("lineas_ia")))
+    finally:
+        dai._analisis_local_foto_bin = _local_original
+        dai._mistral_document_ai = _mistral_original_scalable
+
     resultado_img_trunc = {
         "texto": "MOVIMIENTO BIN A BIN",
         "confianza_texto": 0.97,
