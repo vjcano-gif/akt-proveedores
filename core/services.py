@@ -1123,6 +1123,23 @@ def registrar_novedad(s, *, recibo_id=None, proveedor_id=None, articulo, tipo,
     s.add(nov)
     s.flush()
 
+    # Cuando la novedad se registra manualmente, el sistema debe reflejar de
+    # inmediato la condición real en inventario. Las novedades automáticas de
+    # match traen recibo_linea_id y el sobrante ya fue segregado previamente.
+    if tipo in ("AVERIA", "SOBRANTE") and recibo_linea_id is None:
+        reclasificar(
+            s,
+            proveedor_id=proveedor_id,
+            articulo=articulo,
+            cantidad=cantidad,
+            estado="CRUDO",
+            desde="DISPONIBLE",
+            hacia="RESTRINGIDO",
+            documento_id=doc.id,
+            referencia=doc.trz,
+            usuario=usuario,
+        )
+
     if r and r.estado not in ("CERRADA",):
         r.estado = "NOVEDAD"
     auditar(s, usuario, None, "NOVEDAD", "novedades", nov.id, f"{tipo} {articulo} {cantidad}")
