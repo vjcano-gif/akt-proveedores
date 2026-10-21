@@ -2,6 +2,7 @@
 import datetime as dt
 import hashlib
 import io
+import json
 import re
 import zipfile
 from collections import Counter
@@ -643,7 +644,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = hashlib.sha256(contenido).hexdigest()[:16]
     # Versiona el resultado de extracción para no reutilizar en session_state
     # una lectura hecha por un parser anterior después de un redeploy.
-    extractor_version = "fast-ocr-v27"
+    extractor_version = "fast-ocr-v28"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -1575,12 +1576,44 @@ def _registrar(user):
         estado_key = f"rec_estado_{suffix}"
         df_key = f"rec_df_{suffix}"
         version_key = f"rec_df_version_{suffix}"
+        source_key = f"rec_df_source_{suffix}"
 
         if estado_key not in st.session_state:
             st.session_state[estado_key] = "PENDIENTE"
         if version_key not in st.session_state:
             st.session_state[version_key] = 0
-        if df_key not in st.session_state:
+
+        # La misma imagen/PDF conserva el mismo digest. Si cambia el resultado
+        # del extractor después de un despliegue, Streamlit no debe seguir
+        # mostrando la tabla vieja guardada en session_state.
+        firma_cols = [
+            "articulo", "descripcion", "cantidad_documento",
+            "cantidad_fisica", "serial", "lote",
+        ]
+        firma_rows = []
+        for _, _r in base.iterrows():
+            firma_rows.append({
+                _c: (
+                    None if pd.isna(_r.get(_c))
+                    else _r.get(_c)
+                )
+                for _c in firma_cols
+            })
+        firma_fuente = hashlib.sha256(
+            json.dumps(
+                firma_rows,
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+        if st.session_state.get(source_key) != firma_fuente:
+            st.session_state[df_key] = base.copy()
+            st.session_state[estado_key] = "PENDIENTE"
+            st.session_state[version_key] += 1
+            st.session_state[source_key] = firma_fuente
+        elif df_key not in st.session_state:
             st.session_state[df_key] = base.copy()
 
         stored = st.session_state[df_key].copy()
