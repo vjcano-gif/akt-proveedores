@@ -204,11 +204,12 @@ def limpiar_cache():
     # Proveedores se consulta en vivo para respetar activación/desactivación inmediata.
 
 
-def selector_proveedor(user, label="Proveedor", key=None):
+def selector_proveedor(user, label="Proveedor", key=None, allow_blank=False):
     """Selector basado exclusivamente en proveedores ACTIVOS del maestro.
 
     - PROVEEDOR: muestra su proveedor asignado, preseleccionado y bloqueado.
     - Otros roles: permite elegir únicamente entre proveedores activos.
+    - allow_blank=True: inicia sin proveedor seleccionado.
     La consulta es en vivo para que una desactivación en Maestros tenga efecto
     inmediato y no quede retenida por caché.
     """
@@ -250,6 +251,19 @@ def selector_proveedor(user, label="Proveedor", key=None):
         f"{r.nombre} ({r.codigo})": int(r.id)
         for r in df.itertuples()
     }
+    if allow_blank:
+        etiqueta_vacia = "— Seleccione un proveedor —"
+        opciones_ui = [etiqueta_vacia] + list(opciones)
+        sel = st.selectbox(
+            label,
+            opciones_ui,
+            index=0,
+            key=key,
+            help="Solo se muestran proveedores marcados como Activo en Maestros.")
+        if sel == etiqueta_vacia:
+            return None
+        return opciones[sel]
+
     sel = st.selectbox(
         label,
         list(opciones),
