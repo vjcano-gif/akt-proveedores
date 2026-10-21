@@ -43,14 +43,22 @@ def _openai_api_key() -> str:
 def _openai_vision_model() -> str:
     """Modelo Vision configurable por entorno o Streamlit Secrets."""
     model = str(os.getenv("OPENAI_VISION_MODEL") or "").strip()
-    if model:
-        return model
-    try:
-        import streamlit as st
-        model = str(st.secrets.get("OPENAI_VISION_MODEL", "") or "").strip()
-    except Exception:
-        model = ""
-    # GPT-6 Luna es el modelo eficiente actual para cargas visuales masivas.
+    if not model:
+        try:
+            import streamlit as st
+            model = str(
+                st.secrets.get("OPENAI_VISION_MODEL", "") or ""
+            ).strip()
+        except Exception:
+            model = ""
+
+    # Compatibilidad con la configuración indicada durante pruebas previas.
+    # El modelo Luna vigente en API es gpt-6-luna.
+    alias = {
+        "gpt-5.6-luna": "gpt-6-luna",
+        "gpt-5-6-luna": "gpt-6-luna",
+    }
+    model = alias.get(model.lower(), model) if model else ""
     return model or "gpt-6-luna"
 
 
