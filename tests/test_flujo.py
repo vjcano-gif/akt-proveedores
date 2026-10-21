@@ -847,8 +847,8 @@ check("Foto rescata Id de Bin del encabezado aunque IA lo omita",
 _model_original = os.environ.get("OPENAI_VISION_MODEL")
 try:
     os.environ["OPENAI_VISION_MODEL"] = "gpt-5.6-luna"
-    check("OpenAI Vision respeta OPENAI_VISION_MODEL configurado",
-          dai._openai_vision_model() == "gpt-5.6-luna",
+    check("OpenAI Vision normaliza alias Luna al modelo vigente",
+          dai._openai_vision_model() == "gpt-6-luna",
           dai._openai_vision_model())
 finally:
     if _model_original is None:
