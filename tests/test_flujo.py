@@ -1376,8 +1376,9 @@ try:
         check("Cantidad truncada 1 se relee como 150 aunque Rapid tenga alta confianza",
               trunc_refinada[3] == "150", str(trunc_refinada))
 
-        # Valida el diseño final para fotos: relectura de la CELDA completa por
-        # fila y consenso independiente 150/180/1200/1200.
+        # Valida el diseño photo-first final: toda la columna Cantidad se
+        # procesa en bloque. Debe recuperar 150/180/1200/1200 con solo
+        # TRES llamadas Tesseract, independientemente del número de filas.
         fake_rows_res = SimpleNamespace(
             txts=["Cantidad", "Serial"],
             scores=[0.99, 0.99],
@@ -1396,25 +1397,72 @@ try:
             {"articulo": "A4", "cantidad_documento": 1.0,
              "_row_cy": 230.0, "fuente": "BIN_ESPACIAL"},
         ]
-        votos_photo = iter(
-            ["150", "150", "150",
-             "180", "180", "180",
-             "1200", "1200", "1200",
-             "1200", "1200", "1200"]
-        )
-        pytesseract.image_to_string = lambda *args, **kwargs: next(votos_photo)
-        img_qty_photo = np.full((300, 320, 3), 255, dtype=np.uint8)
-        verificadas_photo = dai._releer_cantidades_bin_por_fila(
-            img_qty_photo, fake_rows_res, filas_qty_photo)
+
+        data_batch = {
+            "text": ["150", "180", "1200", "1200"],
+            "top": [48, 148, 248, 348],
+            "height": [20, 20, 20, 20],
+            "conf": [99, 99, 99, 99],
+        }
+        tess_data_original = pytesseract.image_to_data
+        llamadas_batch = {"n": 0}
+        try:
+            def _fake_image_to_data(*args, **kwargs):
+                llamadas_batch["n"] += 1
+                return dict(data_batch)
+
+            pytesseract.image_to_data = _fake_image_to_data
+            img_qty_photo = np.full((300, 320, 3), 255, dtype=np.uint8)
+            verificadas_photo = dai._releer_cantidades_bin_por_fila(
+                img_qty_photo, fake_rows_res, filas_qty_photo)
+        finally:
+            pytesseract.image_to_data = tess_data_original
+
         qty_photo = [
             float(x["cantidad_documento"]) for x in verificadas_photo
         ]
-        check("Foto BIN verifica por celda completa 150/180/1200/1200",
+        check("Foto BIN verifica por columna 150/180/1200/1200",
               qty_photo == [150.0, 180.0, 1200.0, 1200.0],
               str(qty_photo))
         check("Foto BIN marca consenso fuerte en las cuatro cantidades",
               all(x.get("cantidad_verificada") for x in verificadas_photo),
               str(verificadas_photo))
+        check("Validación masiva usa solo 3 pasadas Tesseract",
+              llamadas_batch["n"] == 3, str(llamadas_batch))
+
+        # Escalabilidad: 36 filas siguen usando exactamente 3 llamadas.
+        filas_largas = [
+            {
+                "articulo": f"ART-{i:02d}",
+                "cantidad_documento": float(50 + i),
+                "_row_cy": 80.0 + i * 20.0,
+                "fuente": "BIN_ESPACIAL",
+            }
+            for i in range(36)
+        ]
+        fake_largo = SimpleNamespace(
+            txts=["Cantidad", "Serial"],
+            scores=[0.99, 0.99],
+            boxes=[
+                [[100, 20], [180, 20], [180, 45], [100, 45]],
+                [[220, 20], [280, 20], [280, 45], [220, 45]],
+            ],
+        )
+        contador_largo = {"n": 0}
+        try:
+            def _fake_largo(*args, **kwargs):
+                contador_largo["n"] += 1
+                return {"text": [], "top": [], "height": [], "conf": []}
+
+            pytesseract.image_to_data = _fake_largo
+            img_larga = np.full((900, 320, 3), 255, dtype=np.uint8)
+            dai._releer_cantidades_bin_por_fila(
+                img_larga, fake_largo, filas_largas)
+        finally:
+            pytesseract.image_to_data = tess_data_original
+
+        check("Foto BIN de 36 filas no multiplica llamadas Tesseract",
+              contador_largo["n"] == 3, str(contador_largo))
     finally:
         pytesseract.image_to_string = tess_img_original
 except Exception as e:
