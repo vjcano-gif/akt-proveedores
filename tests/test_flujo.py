@@ -635,6 +635,66 @@ with session_scope() as s:
     check("Registro manual suma 30 (68 -> 98)",
           sv.saldo_articulo(s, PID, "CP-B") == 98)
 
+print("\n=== 4B. NOVEDADES MANUALES -> DISPONIBLE / RESTRINGIDO ===")
+with session_scope() as s:
+    nov_sob_manual = sv.registrar_novedad(
+        s,
+        proveedor_id=PID,
+        articulo="CP-C",
+        tipo="SOBRANTE",
+        cantidad=2,
+        motivo="ORIGEN",
+        usuario="recibo@akt.com",
+        observaciones="Sobrante manual detectado en recibo.",
+    )
+    NOV_SOB_MAN = nov_sob_manual.id
+    check("Sobrante manual pasa 2 a RESTRINGIDO",
+          sv.saldo_articulo(s, PID, "CP-C", "CRUDO", "RESTRINGIDO") == 2)
+    check("Sobrante manual deja 8 DISPONIBLES",
+          sv.saldo_articulo(s, PID, "CP-C", "CRUDO", "DISPONIBLE") == 8)
+
+with session_scope() as s:
+    sv.ajustar_novedad(
+        s, novedad_id=NOV_SOB_MAN, documento_ajuste="TD96",
+        numero_ajuste="AJ-SOB-MAN", usuario="inventarios@akt.com")
+    check("TD96 libera sobrante manual a DISPONIBLE",
+          sv.saldo_articulo(s, PID, "CP-C", "CRUDO", "DISPONIBLE") == 10)
+    check("TD96 deja restringido manual en cero",
+          sv.saldo_articulo(s, PID, "CP-C", "CRUDO", "RESTRINGIDO") == 0)
+
+with session_scope() as s:
+    ev_nov = sv.guardar_archivo(
+        s, "averia_novedad.jpg", b"FOTO-NOVEDAD",
+        "image/jpeg", "recibo@akt.com")
+    nov_av_manual = sv.registrar_novedad(
+        s,
+        proveedor_id=PID,
+        articulo="CP-D",
+        tipo="AVERIA",
+        cantidad=2,
+        motivo="MANIPULACION",
+        usuario="recibo@akt.com",
+        evidencia_id=ev_nov.id,
+        observaciones="Avería manual desde módulo Novedades.",
+    )
+    NOV_AV_MAN = nov_av_manual.id
+    check("Avería manual exige evidencia y entra a cola Inventarios",
+          nov_av_manual.estado == "EN_COLA_INVENTARIOS"
+          and bool(nov_av_manual.evidencia_id))
+    check("Avería manual pasa 2 a RESTRINGIDO",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "RESTRINGIDO") == 5)
+    check("Avería manual reduce DISPONIBLE",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "DISPONIBLE") == 8)
+
+with session_scope() as s:
+    sv.ajustar_novedad(
+        s, novedad_id=NOV_AV_MAN, documento_ajuste="TD90",
+        numero_ajuste="AJ-AV-MAN", usuario="inventarios@akt.com")
+    check("TD90 da de baja la avería manual restringida",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "RESTRINGIDO") == 3)
+    check("TD90 no devuelve avería a DISPONIBLE",
+          sv.saldo_articulo(s, PID, "CP-D", "CRUDO", "DISPONIBLE") == 8)
+
 print("\n=== 5. UBICACIONES ===")
 with session_scope() as s:
     esperar_error(
