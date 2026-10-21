@@ -2722,15 +2722,36 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
                 str(x.get("articulo") or "").strip().upper()
                 for x in propuestas_ia
             }
-            espaciales_mismo_codigo = [
+            # Una fila espacial puede entrar si el código existe EXACTAMENTE en
+            # el maestro y la cantidad tuvo consenso independiente. Esto rescata
+            # renglones que la IA omitió en fotos largas sin abrir la puerta a
+            # referencias inventadas.
+            espaciales_confiables = [
                 x for x in propuestas_espaciales
-                if str(x.get("articulo") or "").strip().upper() in codigos_ia
+                if (
+                    str(x.get("articulo") or "").strip().upper() in codigos_ia
+                    or (
+                        bool(x.get("cantidad_verificada"))
+                        and str(x.get("articulo") or "").strip().upper()
+                        in mapa_upper
+                    )
+                )
             ]
-            fuentes_merge = propuestas_ia + espaciales_mismo_codigo
+            fuentes_merge = propuestas_ia + espaciales_confiables
+            rescatadas_local = len({
+                str(x.get("articulo") or "").strip().upper()
+                for x in espaciales_confiables
+                if bool(x.get("cantidad_verificada"))
+            } - codigos_ia)
             resultado["diagnostico_bin"] = (
                 f"{resultado.get('ia_fuente') or 'Document AI'} validó "
-                f"{len(propuestas_ia)} fila(s); la geometría de la foto se usa "
-                "solo para confirmar cantidades truncadas del mismo código."
+                f"{len(propuestas_ia)} fila(s)"
+                + (
+                    f" y el OCR local rescató {rescatadas_local} fila(s) "
+                    "adicional(es) verificadas contra el maestro."
+                    if rescatadas_local else
+                    "; el OCR local confirmó cantidades por columna."
+                )
             )
     elif es_bin_imagen:
         # Un rescate espacial solo puede entrar si el MISMO código apareció
@@ -2804,6 +2825,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "BIN_MAESTRO_VALIDADO": 9,
             "MISTRAL_DOCUMENT_AI": 20,
             "OPENAI_GPT5_NANO": 20,
+            "OPENAI_VISION": 20,
             "DOCUMENT_AI": 20,
         }
         qty_actual = float(actual.get("cantidad_documento") or 0)
@@ -2818,7 +2840,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
                 "BIN_PDF_CODIGO", "BIN_PDF_CLIP", "BIN_PDF_ESPACIAL"
             }
             and fuente_actual in {
-                "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "DOCUMENT_AI"
+                "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "OPENAI_VISION", "DOCUMENT_AI"
             }
         )
 
@@ -2830,7 +2852,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             and fuente_nueva == "BIN_ESPACIAL_VERIFICADO"
             and bool(ln.get("cantidad_verificada"))
             and fuente_actual in {
-                "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "DOCUMENT_AI"
+                "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "OPENAI_VISION", "DOCUMENT_AI"
             }
             and qty_nueva > 0
             and qty_nueva != qty_actual
