@@ -9,7 +9,7 @@ st.set_page_config(page_title="AKT · Proveedores de Transformación",
                    initial_sidebar_state="expanded")
 
 from core import ui                                  # noqa: E402
-from core.auth import ROLES, autenticar, puede       # noqa: E402
+from core.auth import ROLES, autenticar, puede, refrescar_usuario       # noqa: E402
 from core.db import (database_connection_hint, db_label, healthcheck,
                      init_db)                        # noqa: E402
 
@@ -85,7 +85,11 @@ def main():
         pantalla_login()
         return
 
-    user = st.session_state.user
+    user = refrescar_usuario(st.session_state.user)
+    if user is None:
+        st.session_state.clear()
+        st.rerun()
+    st.session_state.user = user
     ui.aplicar_estilos()
 
     from app_pages import (almacenamiento, averias, ddmrp, despacho, inicio,
@@ -133,7 +137,7 @@ def main():
     with st.sidebar:
         st.divider()
         if st.button("Cerrar sesión", use_container_width=True):
-            del st.session_state.user
+            st.session_state.clear()
             st.rerun()
         st.caption(db_label())
 
