@@ -843,6 +843,19 @@ check("Foto rescata Id de Bin del encabezado aunque IA lo omita",
       dai._extraer_referencia_bin_resultado(fake_header_bin) == "BIN2761968",
       str(dai._extraer_referencia_bin_resultado(fake_header_bin)))
 
+# El modelo configurado en Streamlit Secrets debe ser leído por el extractor.
+_model_original = os.environ.get("OPENAI_VISION_MODEL")
+try:
+    os.environ["OPENAI_VISION_MODEL"] = "gpt-5.6-luna"
+    check("OpenAI Vision respeta OPENAI_VISION_MODEL configurado",
+          dai._openai_vision_model() == "gpt-5.6-luna",
+          dai._openai_vision_model())
+finally:
+    if _model_original is None:
+        os.environ.pop("OPENAI_VISION_MODEL", None)
+    else:
+        os.environ["OPENAI_VISION_MODEL"] = _model_original
+
 sample_fechas_bin = """
 MOVIMIENTO BIN A BIN
 Id de Bin: BIN2654425
