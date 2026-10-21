@@ -942,7 +942,10 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
         if qty is None or qty <= 0:
             qty = _num(celdas.get("cantidad"))
         if qty is None or qty <= 0:
-            continue
+            # Conserva la fila/código. La relectura numérica de celda completa
+            # puede rescatar la cantidad después; si no, quedará en 0 para
+            # revisión humana en vez de desaparecer o inventarse.
+            qty = 0.0
 
         out.append({
             "articulo": codigo,
@@ -955,18 +958,158 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
             "ubicacion_hasta": celdas.get("hasta", "").strip().upper(),
             "proveedor_bin": celdas.get("proveedor", ""),
             "fuente": "BIN_ESPACIAL",
+            "_row_cy": float(fila["cy"]),
+            "cantidad_verificada": False,
         })
     return out
 
 
+def _releer_cantidades_bin_por_fila(img, res, filas: list[dict]) -> list[dict]:
+    """Verifica Cantidad por fila leyendo la CELDA completa, no una caja parcial.
+
+    Para fotos de celular/pantalla, RapidOCR puede segmentar "1200" como "1".
+    Se recorta toda la franja entre CANTIDAD y SERIAL para cada renglón y se
+    obtienen votos independientes. Solo el consenso se marca como verificado.
+    """
+    if not filas:
+        return filas
+    boxes = getattr(res, "boxes", None)
+    txts = list(getattr(res, "txts", None) or [])
+    scores = list(getattr(res, "scores", None) or [])
+    if boxes is None or len(boxes) != len(txts):
+        return filas
+
+    try:
+        import cv2
+        import pytesseract
+        from collections import Counter
+    except Exception:
+        return filas
+
+    dets = []
+    for i, (txt, box) in enumerate(zip(txts, boxes)):
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in box]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            dets.append({
+                "i": i,
+                "txt": str(txt or "").strip(),
+                "x0": min(xs), "x1": max(xs),
+                "y0": min(ys), "y1": max(ys),
+                "cx": (min(xs) + max(xs)) / 2.0,
+                "cy": (min(ys) + max(ys)) / 2.0,
+                "h": max(1.0, max(ys) - min(ys)),
+            })
+        except Exception:
+            continue
+
+    headers = {}
+    for d in dets:
+        n = _norm_cabecera(d["txt"])
+        if n == "CANTIDAD" and "cantidad" not in headers:
+            headers["cantidad"] = d
+        elif n == "SERIAL" and "serial" not in headers:
+            headers["serial"] = d
+    if not {"cantidad", "serial"}.issubset(headers):
+        return filas
+
+    x_qty = float(headers["cantidad"]["x0"])
+    x_serial = float(headers["serial"]["x0"])
+    ancho = max(20.0, x_serial - x_qty)
+    h_img, w_img = img.shape[:2]
+
+    centros = sorted(
+        [float(x.get("_row_cy") or 0) for x in filas if x.get("_row_cy") is not None]
+    )
+    if not centros:
+        return filas
+    diffs = [centros[i+1] - centros[i] for i in range(len(centros)-1)
+             if centros[i+1] - centros[i] > 3]
+    paso = sorted(diffs)[len(diffs)//2] if diffs else max(
+        18.0, sum(d["h"] for d in dets) / max(1, len(dets)) * 1.8)
+
+    for fila in filas:
+        cy = float(fila.get("_row_cy") or 0)
+        if not cy:
+            continue
+        alto = max(10.0, paso * 0.38)
+        y1 = max(0, int(cy - alto))
+        y2 = min(h_img, int(cy + alto))
+        # Franja completa. Margen izquierdo tolera perspectiva y números
+        # alineados a la derecha; termina antes de SERIAL.
+        x1 = max(0, int(x_qty - 0.60 * ancho))
+        x2 = min(w_img, int(x_serial - 1))
+        crop = img[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        escala = max(3, min(7, int(round(115 / max(14, gray.shape[0])))))
+        enlarged = cv2.resize(
+            gray, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
+        enlarged = cv2.copyMakeBorder(
+            enlarged, 24, 24, 35, 35, cv2.BORDER_CONSTANT, value=255)
+        clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
+        contrast = clahe.apply(enlarged)
+        _, otsu = cv2.threshold(
+            contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        adaptive = cv2.adaptiveThreshold(
+            contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 9)
+
+        lecturas = []
+        # Tres votos sobre la celda completa; sigue siendo acotado a una sola
+        # columna y evita OCR de la imagen completa repetidas veces.
+        for variante, psm in ((contrast, 7), (otsu, 7), (adaptive, 7)):
+            try:
+                raw = pytesseract.image_to_string(
+                    variante,
+                    config=(
+                        f"--oem 3 --psm {psm} "
+                        "-c tessedit_char_whitelist=0123456789"
+                    ),
+                )
+                val = re.sub(r"\D", "", raw or "")
+                if 1 <= len(val) <= 7 and int(val) > 0:
+                    lecturas.append(val)
+            except Exception:
+                pass
+
+        actual = re.sub(
+            r"\D", "", str(fila.get("cantidad_documento") or ""))
+        if actual and actual != "0":
+            lecturas.append(actual)
+
+        if not lecturas:
+            fila["cantidad_documento"] = 0.0
+            fila["cantidad_verificada"] = False
+            continue
+
+        votos = Counter(lecturas)
+        mejor, n = votos.most_common(1)[0]
+        # Consenso mínimo de 2 votos. Si no existe, no certificamos el número.
+        if n >= 2:
+            fila["cantidad_documento"] = float(mejor)
+            fila["cantidad_verificada"] = True
+            fila["cantidad_votos"] = dict(votos)
+            fila["fuente"] = "BIN_ESPACIAL_VERIFICADO"
+        else:
+            fila["cantidad_verificada"] = False
+            fila["cantidad_votos"] = dict(votos)
+
+    return filas
+
+
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae filas BIN reutilizando una sola pasada RapidOCR."""
+    """Extrae BIN fotografiado con doble validación espacial de cantidades."""
     try:
         orientados, res = _rapid_resultado_bin(data)
         img = _decode_image(orientados)
         txts = list(getattr(res, "txts", None) or [])
         txts = _refinar_cantidades_bin(img, res, txts)
-        return _extraer_bin_columnas_resultado(res, txts)
+        filas = _extraer_bin_columnas_resultado(res, txts)
+        filas = _releer_cantidades_bin_por_fila(img, res, filas)
+        return filas
     except Exception:
         return []
 
@@ -2425,6 +2568,8 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "ubicacion_hasta": row.get("ubicacion_hasta", ""),
             "confianza": round(min(cf, 0.99), 3),
             "fuente": row.get("fuente", "BIN_ESPACIAL"),
+            "cantidad_verificada": bool(row.get("cantidad_verificada")),
+            "cantidad_votos": row.get("cantidad_votos") or {},
         })
 
     if propuestas_ia:
@@ -2520,6 +2665,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "OCR": 0,
             "OCR+MAESTRO": 1,
             "BIN_ESPACIAL": 2,
+            "BIN_ESPACIAL_VERIFICADO": 30,
             "BIN_TABLA": 3,
             "BIN_PDF_ESPACIAL": 4,
             "BIN_PDF_CLIP": 5,
@@ -2551,12 +2697,13 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         # la columna Cantidad, se considera la lectura IA truncada.
         imagen_corrige_ia_truncada = bool(
             resultado.get("entrada_imagen")
-            and fuente_nueva == "BIN_ESPACIAL"
+            and fuente_nueva == "BIN_ESPACIAL_VERIFICADO"
+            and bool(ln.get("cantidad_verificada"))
             and fuente_actual in {
                 "MISTRAL_DOCUMENT_AI", "OPENAI_GPT5_NANO", "DOCUMENT_AI"
             }
-            and qty_actual == 1
-            and qty_nueva >= 10
+            and qty_nueva > 0
+            and qty_nueva != qty_actual
         )
 
         if qty_nueva > 0 and (
@@ -2621,6 +2768,20 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             depuradas.append(existentes.get(key, ln))
             vistos.add(key)
     resultado["lineas"] = depuradas
+
+    if resultado.get("entrada_imagen"):
+        verificadas = {
+            str(x.get("articulo") or "").strip().upper()
+            for x in propuestas_espaciales
+            if bool(x.get("cantidad_verificada"))
+            and float(x.get("cantidad_documento") or 0) > 0
+        }
+        resultado["cantidades_foto_verificadas"] = len(verificadas)
+        resultado["cantidades_foto_sin_consenso"] = [
+            str(x.get("articulo") or "").strip()
+            for x in propuestas_espaciales
+            if not bool(x.get("cantidad_verificada"))
+        ]
 
     resultado["requiere_revision"] = (
         cf < 0.85 or not resultado.get("lineas")
