@@ -5,12 +5,13 @@ import json
 import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test.db"))
 
-from core.db import init_db, session_scope  # noqa: E402
+from core.db import get_engine, init_db, session_scope  # noqa: E402
 from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
                               lineas_bin_desde_texto, resumir_ubicaciones_bin,
@@ -2271,6 +2272,33 @@ with session_scope() as s:
         if abs(float(suma or 0) - float(inv.cantidad or 0)) > 1e-6:
             malas += 1
     check("Kardex cuadra con saldos", malas == 0, f"{malas} descuadres")
+
+print("\n=== 12. CONCURRENCIA 20 USUARIOS ===")
+if get_engine().dialect.name == "postgresql":
+    from sqlalchemy import text as SQLText
+
+    def _consulta_concurrente(i):
+        with session_scope() as s:
+            valor = s.execute(SQLText("SELECT 1")).scalar()
+            # Consulta real de tabla para validar ORM/esquema en cada sesión.
+            total = s.query(Proveedor).count()
+            return i, int(valor or 0), int(total or 0)
+
+    try:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            resultados_20 = list(executor.map(_consulta_concurrente, range(20)))
+        check(
+            "PostgreSQL atiende 20 sesiones concurrentes sin agotar pool",
+            len(resultados_20) == 20
+            and all(v == 1 for _, v, _ in resultados_20),
+            str(resultados_20[:4]) + f" ... total={len(resultados_20)}",
+        )
+    except Exception as e:
+        check(
+            "PostgreSQL atiende 20 sesiones concurrentes sin agotar pool",
+            False, f"{type(e).__name__}: {e}")
+else:
+    check("Concurrencia 20 usuarios se valida en job PostgreSQL", True, "SQLite omitido")
 
 print("\n" + "=" * 70)
 print(f"RESULTADO: {len(OK)} OK, {len(FAIL)} fallidas")
