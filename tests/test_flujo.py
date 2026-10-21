@@ -1844,6 +1844,79 @@ try:
     check("Pipeline completo (analizar_documento + completar_con_catalogo) "
           "produce 80/156/288/288, no 0",
           lineas_finales == esperado_real, str(lineas_finales))
+
+    # Regresión producción: si Document AI/Mistral responde parcialmente el PDF
+    # (solo la primera cantidad), el parser nativo debe completar 156/288/288.
+    _openai_pdf_original = dai._openai_document_ai
+    _mistral_pdf_original = dai._mistral_document_ai
+    try:
+        dai._openai_document_ai = lambda *args, **kwargs: None
+        dai._mistral_document_ai = lambda *args, **kwargs: {
+            "ok": True,
+            "texto": (
+                "MOVIMIENTO BIN A BIN\n"
+                "Id de Bin: BIN2654425\n"
+                "Proveedor Código Descripción Cantidad Serial Lote Desde Hasta"
+            ),
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": "BIN2654425",
+            "fecha": "2026-08-14",
+            "modelo": "mistral-partial-test",
+            "fuente": "MISTRAL_DOCUMENT_AI",
+            "filas": [
+                {
+                    "proveedor": "CHONGQING-012",
+                    "codigo": "7700149453691",
+                    "descripcion": "Base Silla 200DS+ Mp",
+                    "cantidad": 80,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PUMO 1 1 1",
+                    "hasta": "WSERE WUMO 1 1 1",
+                },
+                {
+                    "proveedor": "SANYANG IN-001",
+                    "codigo": "7700149422819",
+                    "descripcion": "Base Sillin RX Mp",
+                    "cantidad": 0,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PUMO 1 1 1",
+                    "hasta": "WSERE WUMO 1 1 1",
+                },
+                {
+                    "proveedor": "SANYANG IN-001",
+                    "codigo": "7705946161657",
+                    "descripcion": "Base silla tras 125SC-R PRO Mp",
+                    "cantidad": 0,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PUMO 1 1 1",
+                    "hasta": "WSERE WUMO 1 1 1",
+                },
+                {
+                    "proveedor": "SANYANG IN-001",
+                    "codigo": "7705946161923",
+                    "descripcion": "Base sillin Del SC-R PRO Mp",
+                    "cantidad": 0,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PUMO 1 1 1",
+                    "hasta": "WSERE WUMO 1 1 1",
+                },
+            ],
+        }
+        analisis_parcial = analizar_documento(
+            "BIN2654425_UMO.pdf", pdf_bytes_real, "application/pdf")
+        completar_con_catalogo(analisis_parcial, catalogo_real)
+        parcial_final = {
+            x["articulo"]: float(x["cantidad_documento"])
+            for x in analisis_parcial.get("lineas", [])
+        }
+        check("PDF con IA parcial completa cantidades con geometría nativa",
+              parcial_final == esperado_real, str(parcial_final))
+        check("PDF con IA parcial ejecuta parser de columnas",
+              len(analisis_parcial.get("bin_filas_pdf_nativas") or []) == 4,
+              str(analisis_parcial.get("bin_filas_pdf_nativas")))
+    finally:
+        dai._openai_document_ai = _openai_pdf_original
+        dai._mistral_document_ai = _mistral_pdf_original
 except Exception as e:
     check("BIN real (proveedor+código pegados) ejecuta sin excepción",
           False, f"{type(e).__name__}: {e}")
