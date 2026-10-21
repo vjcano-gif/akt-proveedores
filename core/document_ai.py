@@ -39,6 +39,20 @@ def _openai_api_key() -> str:
     return key
 
 
+def _openai_vision_model() -> str:
+    """Modelo Vision configurable por entorno o Streamlit Secrets."""
+    model = str(os.getenv("OPENAI_VISION_MODEL") or "").strip()
+    if model:
+        return model
+    try:
+        import streamlit as st
+        model = str(st.secrets.get("OPENAI_VISION_MODEL", "") or "").strip()
+    except Exception:
+        model = ""
+    # GPT-6 Luna es el modelo eficiente actual para cargas visuales masivas.
+    return model or "gpt-6-luna"
+
+
 def _imagen_api_optimizada(
         data: bytes, mime: str, max_side: int = 2048) -> tuple[bytes, str]:
     """Crea una copia de trabajo para Vision; el original NO se modifica.
@@ -105,13 +119,13 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
     data_api, mime_api = _imagen_api_optimizada(data, mime)
     encoded = base64.b64encode(data_api).decode("ascii")
     data_url = f"data:{mime_api};base64,{encoded}"
-    model = str(
-        os.getenv("OPENAI_VISION_MODEL")
-        or "gpt-5-nano-2025-08-07"
-    ).strip()
+    model = _openai_vision_model()
 
     prompt = (
         "Lee este documento de recibo con máxima precisión visual. "
+        "PRIORIDAD 1: identifica el encabezado y, si es MOVIMIENTO BIN A BIN, "
+        "extrae referencia EXCLUSIVAMENTE del campo 'Id de Bin' (ej. BIN2761968). "
+        "PRIORIDAD 2: extrae todas las filas visibles de la tabla. "
         "NO inventes, NO completes y NO corrijas códigos ni cantidades. "
         "Si un carácter o número no es legible devuelve null en ese campo. "
         "Clasifica tipo_documento como BIN_A_BIN, FACTURA u OTRO. "
@@ -170,6 +184,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
     payload = {
         "model": model,
         "store": False,
+        "reasoning": {"effort": "none"},
         "input": [{
             "role": "user",
             "content": [
@@ -206,12 +221,21 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
         resp.raise_for_status()
         raw = resp.json()
     except Exception as e:
+        detalle = str(e)
+        try:
+            if "resp" in locals() and getattr(resp, "text", None):
+                cuerpo = str(resp.text or "")
+                # El cuerpo de error de OpenAI no contiene la API key; se
+                # limita para no inundar la UI con respuestas largas.
+                detalle = f"{detalle} · {cuerpo[:900]}"
+        except Exception:
+            pass
         return {
             "ok": False,
-            "error": f"{type(e).__name__}: {e}",
+            "error": f"{type(e).__name__}: {detalle}",
             "texto": "",
             "filas": [],
-            "fuente": "OPENAI_GPT5_NANO",
+            "fuente": "OPENAI_VISION",
             "modelo": model,
         }
 
@@ -229,7 +253,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
             "error": "OpenAI no devolvió salida estructurada.",
             "texto": "",
             "filas": [],
-            "fuente": "OPENAI_GPT5_NANO",
+            "fuente": "OPENAI_VISION",
             "modelo": model,
         }
 
@@ -241,7 +265,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
             "error": f"JSON inválido de OpenAI: {type(e).__name__}: {e}",
             "texto": output_text,
             "filas": [],
-            "fuente": "OPENAI_GPT5_NANO",
+            "fuente": "OPENAI_VISION",
             "modelo": model,
         }
 
@@ -280,7 +304,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
         "filas": filas,
         "modelo": str(raw.get("model") or model),
         "usage_info": usage,
-        "fuente": "OPENAI_GPT5_NANO",
+        "fuente": "OPENAI_VISION",
     }
 
 
