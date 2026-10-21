@@ -205,7 +205,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
                 "strict": True,
             }
         },
-        "max_output_tokens": 4000,
+        "max_output_tokens": 12000,
     }
 
     try:
@@ -1201,13 +1201,72 @@ def _extraer_referencia_bin_resultado(res) -> str | None:
     return None
 
 
+def _extraer_cabecera_bin_imagen(data: bytes) -> dict:
+    """Lee solo el encabezado de una foto BIN para metadatos críticos.
+
+    En documentos con 30-50 filas, el OCR de página completa puede omitir el
+    encabezado. Recortar el tercio superior hace que Id de Bin y Fecha
+    Transacción sean mucho más legibles y cuesta una única pasada Tesseract
+    sobre una región pequeña.
+    """
+    try:
+        import cv2
+        import pytesseract
+
+        orientados, _ = _rapid_resultado_bin(data)
+        img = _decode_image(orientados)
+        h, w = img.shape[:2]
+
+        # Incluye título, bloque Id de Bin/Usuario/Fecha Transacción y cabecera
+        # de tabla, pero evita procesar el cuerpo completo.
+        y2 = max(120, int(h * 0.34))
+        crop = img[0:y2, 0:w]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+        contrast = clahe.apply(gray)
+
+        texto = pytesseract.image_to_string(
+            contrast,
+            config="--oem 3 --psm 11",
+        )
+        texto = str(texto or "")
+
+        ref = None
+        for patron in (
+            r"\bID\s*(?:DE\s*)?BIN\s*[:#.-]?\s*(BIN\s*[- ]?\s*\d{4,})\b",
+            r"\b(BIN\s*[- ]?\s*\d{4,})\b",
+        ):
+            m = re.search(patron, texto, re.I)
+            if m:
+                cand = re.sub(r"[^A-Z0-9]", "", m.group(1).upper())
+                if re.fullmatch(r"BIN\d{4,}", cand):
+                    ref = cand
+                    break
+
+        fecha_tx = _extraer_fecha_transaccion(texto)
+        return {
+            "referencia": ref,
+            "fecha_transaccion": fecha_tx,
+            "texto": texto,
+        }
+    except Exception:
+        return {
+            "referencia": None,
+            "fecha_transaccion": None,
+            "texto": "",
+        }
+
+
 def _extraer_referencia_bin_imagen(data: bytes) -> str | None:
-    """Referencia BIN desde OCR local reutilizando el resultado cacheado."""
+    """Referencia BIN por RapidOCR, con rescate dirigido del encabezado."""
     try:
         _, res = _rapid_resultado_bin(data)
-        return _extraer_referencia_bin_resultado(res)
+        ref = _extraer_referencia_bin_resultado(res)
+        if ref:
+            return ref
+        return _extraer_cabecera_bin_imagen(data).get("referencia")
     except Exception:
-        return None
+        return _extraer_cabecera_bin_imagen(data).get("referencia")
 
 
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
@@ -3065,8 +3124,17 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     # Document AI omitió la referencia. La llamada reutiliza el resultado
     # cacheado del parser espacial y no repite OCR completo.
     if es_imagen:
-        ref_local_bin = _extraer_referencia_bin_imagen(data)
+        cabecera_bin = _extraer_cabecera_bin_imagen(data)
+        ref_local_bin = (
+            _extraer_referencia_bin_imagen(data)
+            or cabecera_bin.get("referencia")
+        )
         out["referencia_bin_local"] = ref_local_bin
+        out["cabecera_bin_local"] = {
+            "referencia": cabecera_bin.get("referencia"),
+            "fecha_transaccion": cabecera_bin.get("fecha_transaccion"),
+        }
+
         ref_actual = str(((out.get("referencia") or {}).get("valor") or "")).strip()
         if ref_local_bin and (
             not ref_actual
@@ -3075,11 +3143,20 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             out["referencia"] = asdict(Campo(
                 ref_local_bin, 0.99, "OCR encabezado BIN"))
         elif ref_local_bin and ref_actual:
-            # Canoniza variantes como "BIN 2761968" -> "BIN2761968".
             canon_actual = re.sub(r"[^A-Z0-9]", "", ref_actual.upper())
             if canon_actual == ref_local_bin:
                 out["referencia"] = asdict(Campo(
                     ref_local_bin, 0.99, "OCR encabezado BIN"))
+
+        # Fecha Transacción del encabezado local también puede rescatar una
+        # omisión de IA/OCR general.
+        fecha_tx_local = str(cabecera_bin.get("fecha_transaccion") or "").strip()
+        if fecha_tx_local:
+            fecha_actual = str(((out.get("fecha") or {}).get("valor") or "")).strip()
+            if not fecha_actual:
+                out["fecha"] = asdict(Campo(
+                    fecha_tx_local, 0.98, "OCR encabezado BIN"))
+            out["fecha_transaccion_local"] = fecha_tx_local
 
     out.update(resumir_ubicaciones_bin(out.get("bin_filas_espaciales") or []))
     out["metodo"] = metodo
