@@ -2415,14 +2415,23 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         })
 
     if propuestas_ia:
-        # Cuando Document AI respondió, esta es la única fuente autorizada para
-        # código y cantidad. Todo código se valida EXACTAMENTE contra el maestro
-        # local antes de llegar aquí.
-        fuentes_merge = propuestas_ia
-        resultado["diagnostico_bin"] = (
-            f"{resultado.get('ia_fuente') or 'Document AI'} validó "
-            f"{len(propuestas_ia)} fila(s) contra el maestro."
-        )
+        # En imágenes, Document AI sigue siendo la fuente principal y única de
+        # código/cantidad. En PDF, además aceptamos el parser nativo de columnas
+        # como RESPALDO: completa filas/cantidades omitidas por la IA, pero por
+        # prioridad nunca pisa una cantidad positiva de Document AI.
+        if resultado.get("entrada_pdf"):
+            fuentes_merge = propuestas_ia + propuestas_espaciales
+            resultado["diagnostico_bin"] = (
+                f"{resultado.get('ia_fuente') or 'Document AI'} + parser PDF "
+                "nativo validaron las filas contra el maestro; el parser local "
+                "completa cantidades faltantes sin reemplazar lecturas IA válidas."
+            )
+        else:
+            fuentes_merge = propuestas_ia
+            resultado["diagnostico_bin"] = (
+                f"{resultado.get('ia_fuente') or 'Document AI'} validó "
+                f"{len(propuestas_ia)} fila(s) contra el maestro."
+            )
     elif es_bin_imagen:
         # Un rescate espacial solo puede entrar si el MISMO código apareció
         # literalmente en el OCR y existe exactamente en el maestro. Así
@@ -2625,6 +2634,23 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                 "fuente": fuente_ia,
             })
         out["bin_filas_espaciales"] = filas_ia_bin
+
+        # Un PDF BIN tiene una capa de texto/geométrica mucho más determinista
+        # que una respuesta generativa. Aunque Document AI responda, ejecutamos
+        # también el parser nativo de columnas para completar cantidades que la
+        # IA haya omitido. No reemplaza una cantidad positiva validada de IA.
+        es_pdf_ia = bool(
+            mime == "application/pdf" or name.endswith(".pdf")
+        )
+        if es_pdf_ia:
+            t0 = time.perf_counter()
+            filas_pdf_nativas = extraer_bin_columnas_pdf(data)
+            tiempos["parser_columnas_s"] = round(
+                time.perf_counter() - t0, 3)
+            out["bin_filas_pdf_nativas"] = filas_pdf_nativas
+            # Se conserva la salida IA para auditoría y se añaden las filas
+            # nativas como fuente complementaria.
+            out["bin_filas_espaciales"] = filas_ia_bin + filas_pdf_nativas
     else:
         t0 = time.perf_counter()
         texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
@@ -2651,6 +2677,9 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
     )
     out["entrada_imagen"] = es_imagen
+    out["entrada_pdf"] = bool(
+        mime == "application/pdf" or name.endswith(".pdf")
+    )
 
     out.update(resumir_ubicaciones_bin(out.get("bin_filas_espaciales") or []))
     out["metodo"] = metodo
