@@ -64,12 +64,14 @@ def _postgres_kwargs(url: str | None = None):
     kwargs = {
         "pool_pre_ping": True,
         "future": True,
-        # Streamlit puede reiniciar/replicar procesos. Mantener un pool pequeño
-        # evita consumir conexiones de Supabase innecesariamente.
-        "pool_size": 3,
-        "max_overflow": 2,
-        "pool_timeout": 20,
+        # Capacidad objetivo: ~20 usuarios concurrentes con consultas cortas.
+        # 8 conexiones persistentes + 4 de pico mantienen la app fluida sin
+        # acercarse al límite de Supabase Nano/Free.
+        "pool_size": 8,
+        "max_overflow": 4,
+        "pool_timeout": 10,
         "pool_recycle": 900,
+        "pool_use_lifo": True,
     }
     try:
         parsed = make_url(url) if url else None
