@@ -965,23 +965,23 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
 
 
 def _releer_cantidades_bin_por_fila(img, res, filas: list[dict]) -> list[dict]:
-    """Verifica Cantidad por fila leyendo la CELDA completa, no una caja parcial.
+    """Verifica Cantidad en bloque y asigna números a filas por coordenada Y.
 
-    Para fotos de celular/pantalla, RapidOCR puede segmentar "1200" como "1".
-    Se recorta toda la franja entre CANTIDAD y SERIAL para cada renglón y se
-    obtienen votos independientes. Solo el consenso se marca como verificado.
+    Coste casi constante: 3 pasadas Tesseract sobre TODA la columna Cantidad,
+    no 3 pasadas por artículo. Esto permite procesar fotos con decenas de filas
+    sin que el tiempo crezca linealmente.
     """
     if not filas:
         return filas
     boxes = getattr(res, "boxes", None)
     txts = list(getattr(res, "txts", None) or [])
-    scores = list(getattr(res, "scores", None) or [])
     if boxes is None or len(boxes) != len(txts):
         return filas
 
     try:
         import cv2
         import pytesseract
+        from pytesseract import Output
         from collections import Counter
     except Exception:
         return filas
@@ -1018,95 +1018,136 @@ def _releer_cantidades_bin_por_fila(img, res, filas: list[dict]) -> list[dict]:
     ancho = max(20.0, x_serial - x_qty)
     h_img, w_img = img.shape[:2]
 
-    centros = sorted(
-        [float(x.get("_row_cy") or 0) for x in filas if x.get("_row_cy") is not None]
-    )
-    if not centros:
+    rows = [
+        (idx, float(f.get("_row_cy") or 0))
+        for idx, f in enumerate(filas)
+        if f.get("_row_cy") is not None
+    ]
+    rows = [(i, cy) for i, cy in rows if cy > 0]
+    rows.sort(key=lambda z: z[1])
+    if not rows:
         return filas
-    diffs = [centros[i+1] - centros[i] for i in range(len(centros)-1)
-             if centros[i+1] - centros[i] > 3]
-    paso = sorted(diffs)[len(diffs)//2] if diffs else max(
-        18.0, sum(d["h"] for d in dets) / max(1, len(dets)) * 1.8)
 
-    for fila in filas:
-        cy = float(fila.get("_row_cy") or 0)
-        if not cy:
+    centros = [cy for _, cy in rows]
+    diffs = [
+        centros[i + 1] - centros[i]
+        for i in range(len(centros) - 1)
+        if centros[i + 1] - centros[i] > 3
+    ]
+    paso = (
+        sorted(diffs)[len(diffs) // 2]
+        if diffs else max(
+            18.0,
+            sum(d["h"] for d in dets) / max(1, len(dets)) * 1.8,
+        )
+    )
+
+    # Recorta UNA vez toda la columna Cantidad.
+    x1 = max(0, int(x_qty - 0.62 * ancho))
+    x2 = min(w_img, int(x_serial - 1.0))
+    y_top = max(0, int(centros[0] - paso * 0.58))
+    y_bottom = min(h_img, int(centros[-1] + paso * 0.58))
+    crop = img[y_top:y_bottom, x1:x2]
+    if crop.size == 0:
+        return filas
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    escala = max(2, min(4, int(round(70 / max(14, paso)))))
+    enlarged = cv2.resize(
+        gray, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
+    borde = 18
+    enlarged = cv2.copyMakeBorder(
+        enlarged, borde, borde, 24, 24, cv2.BORDER_CONSTANT, value=255)
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    contrast = clahe.apply(enlarged)
+    _, otsu = cv2.threshold(
+        contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    adaptive = cv2.adaptiveThreshold(
+        contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 31, 9)
+
+    votos_por_fila = {i: [] for i, _ in rows}
+
+    # El valor espacial de RapidOCR cuenta como un voto inicial.
+    for i, _ in rows:
+        actual = float(filas[i].get("cantidad_documento") or 0)
+        if actual > 0:
+            # Evita "1" truncado como voto fuerte; se conserva solo como pista.
+            if actual != 1:
+                votos_por_fila[i].append(str(int(actual)) if actual.is_integer() else str(actual))
+
+    def _asignar_lectura(valor: str, cy_original: float):
+        if not valor or not valor.isdigit() or int(valor) <= 0:
+            return
+        dist = [(abs(cy_original - cy), i) for i, cy in rows]
+        if not dist:
+            return
+        dmin, i = min(dist)
+        if dmin <= max(8.0, paso * 0.48):
+            votos_por_fila[i].append(valor)
+
+    # Tres llamadas Tesseract totales, aunque haya 40+ referencias.
+    for variante in (contrast, otsu, adaptive):
+        try:
+            datos = pytesseract.image_to_data(
+                variante,
+                config=(
+                    "--oem 3 --psm 6 "
+                    "-c tessedit_char_whitelist=0123456789"
+                ),
+                output_type=Output.DICT,
+            )
+        except Exception:
             continue
-        alto = max(10.0, paso * 0.38)
-        y1 = max(0, int(cy - alto))
-        y2 = min(h_img, int(cy + alto))
-        # Franja completa. Margen izquierdo tolera perspectiva y números
-        # alineados a la derecha; termina antes de SERIAL.
-        x1 = max(0, int(x_qty - 0.60 * ancho))
-        x2 = min(w_img, int(x_serial - 1))
-        crop = img[y1:y2, x1:x2]
-        if crop.size == 0:
-            continue
 
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        escala = max(3, min(7, int(round(115 / max(14, gray.shape[0])))))
-        enlarged = cv2.resize(
-            gray, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
-        enlarged = cv2.copyMakeBorder(
-            enlarged, 24, 24, 35, 35, cv2.BORDER_CONSTANT, value=255)
-        clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
-        contrast = clahe.apply(enlarged)
-        _, otsu = cv2.threshold(
-            contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        adaptive = cv2.adaptiveThreshold(
-            contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 9)
-
-        lecturas = []
-        # Tres votos sobre la celda completa; sigue siendo acotado a una sola
-        # columna y evita OCR de la imagen completa repetidas veces.
-        for variante, psm in ((contrast, 7), (otsu, 7), (adaptive, 7)):
+        textos = datos.get("text", [])
+        tops = datos.get("top", [])
+        heights = datos.get("height", [])
+        confs = datos.get("conf", [])
+        for raw, top, hh, conf in zip(textos, tops, heights, confs):
+            val = re.sub(r"\D", "", str(raw or ""))
+            if not val or len(val) > 7:
+                continue
             try:
-                raw = pytesseract.image_to_string(
-                    variante,
-                    config=(
-                        f"--oem 3 --psm {psm} "
-                        "-c tessedit_char_whitelist=0123456789"
-                    ),
-                )
-                val = re.sub(r"\D", "", raw or "")
-                if 1 <= len(val) <= 7 and int(val) > 0:
-                    lecturas.append(val)
+                if float(conf) < 20:
+                    continue
             except Exception:
                 pass
+            # Revierte borde/escala para regresar al Y de la foto original.
+            cy_crop_scaled = float(top) + float(hh) / 2.0 - borde
+            cy_original = y_top + cy_crop_scaled / max(1, escala)
+            _asignar_lectura(val, cy_original)
 
-        actual = re.sub(
-            r"\D", "", str(fila.get("cantidad_documento") or ""))
-        if actual and actual != "0":
-            lecturas.append(actual)
-
-        if not lecturas:
-            fila["cantidad_documento"] = 0.0
-            fila["cantidad_verificada"] = False
+    for i, _ in rows:
+        votos = Counter(votos_por_fila[i])
+        if not votos:
+            filas[i]["cantidad_verificada"] = False
+            filas[i]["cantidad_votos"] = {}
             continue
 
-        votos = Counter(lecturas)
         mejor, n = votos.most_common(1)[0]
-        # Consenso mínimo de 2 votos. Si no existe, no certificamos el número.
+        # Requiere 2 fuentes coincidentes. Para fotos grandes esto normalmente
+        # significa dos variantes Tesseract, o RapidOCR + una variante.
         if n >= 2:
-            fila["cantidad_documento"] = float(mejor)
-            fila["cantidad_verificada"] = True
-            fila["cantidad_votos"] = dict(votos)
-            fila["fuente"] = "BIN_ESPACIAL_VERIFICADO"
+            filas[i]["cantidad_documento"] = float(mejor)
+            filas[i]["cantidad_verificada"] = True
+            filas[i]["cantidad_votos"] = dict(votos)
+            filas[i]["fuente"] = "BIN_ESPACIAL_VERIFICADO"
         else:
-            fila["cantidad_verificada"] = False
-            fila["cantidad_votos"] = dict(votos)
+            filas[i]["cantidad_verificada"] = False
+            filas[i]["cantidad_votos"] = dict(votos)
 
     return filas
 
 
 def extraer_bin_columnas_imagen(data: bytes) -> list[dict]:
-    """Extrae BIN fotografiado con doble validación espacial de cantidades."""
+    """Extrae BIN fotografiado con verificación masiva de la columna Cantidad."""
     try:
         orientados, res = _rapid_resultado_bin(data)
         img = _decode_image(orientados)
+        # No se ejecuta Tesseract por celda. RapidOCR aporta la geometría y un
+        # primer valor; luego se valida toda la columna Cantidad en bloque.
         txts = list(getattr(res, "txts", None) or [])
-        txts = _refinar_cantidades_bin(img, res, txts)
         filas = _extraer_bin_columnas_resultado(res, txts)
         filas = _releer_cantidades_bin_por_fila(img, res, filas)
         return filas
@@ -1781,10 +1822,29 @@ def _orientar_bin_bytes(data: bytes) -> tuple[bytes, int, str, float]:
 
 @lru_cache(maxsize=6)
 def _rapid_resultado_bin(data: bytes):
-    """RapidOCR único y reutilizable para un BIN fotografiado."""
+    """RapidOCR único con fast-path para fotos ya orientadas.
+
+    La mayoría de las fotos llegan derechas. Primero se intenta RapidOCR sobre
+    la imagen original; solo si no aparece estructura BIN suficiente se activa
+    la orientación costosa con Tesseract.
+    """
+    import cv2
+
+    img = _decode_image(data)
+    res = _rapid_engine()(img)
+    try:
+        texto, _ = _texto_rapid_ordenado(res)
+        score, filas = _score_bin_texto(texto)
+    except Exception:
+        score, filas = 0, 0
+
+    if score >= 20 or filas >= 2:
+        ok, enc = cv2.imencode(".png", img)
+        return (enc.tobytes() if ok else data), res
+
     orientados, _, _, _ = _orientar_bin_bytes(data)
-    img = _decode_image(orientados)
-    return orientados, _rapid_engine()(img)
+    img_orientada = _decode_image(orientados)
+    return orientados, _rapid_engine()(img_orientada)
 
 
 def _ocr_image(data: bytes) -> tuple[str, float, str, str]:
@@ -2867,6 +2927,17 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             # Se conserva la salida IA para auditoría y se añaden las filas
             # nativas como fuente complementaria.
             out["bin_filas_espaciales"] = filas_ia_bin + filas_pdf_nativas
+        elif mime.startswith("image/") or name.endswith(
+                (".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+            # Foto-first: aunque la IA haya respondido, validamos localmente
+            # Código/Cantidad por geometría. El fast-path de RapidOCR evita las
+            # rotaciones costosas cuando la imagen ya viene derecha.
+            t0 = time.perf_counter()
+            filas_foto_local = extraer_bin_columnas_imagen(data)
+            tiempos["parser_columnas_s"] = round(
+                time.perf_counter() - t0, 3)
+            out["bin_filas_foto_local"] = filas_foto_local
+            out["bin_filas_espaciales"] = filas_ia_bin + filas_foto_local
     else:
         t0 = time.perf_counter()
         texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
