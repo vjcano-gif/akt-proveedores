@@ -10,10 +10,13 @@ Esto permite compartir un proyecto Supabase sin colisionar nombres de tablas.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from core.models import Base
@@ -35,10 +38,19 @@ def _resolve_url() -> str:
     url = None
     try:
         import streamlit as st  # noqa
-        url = st.secrets.get("DATABASE_URL")  # type: ignore[attr-defined]
+        # En Streamlit Cloud preferimos explícitamente el Session Pooler IPv4.
+        # DATABASE_URL se conserva por compatibilidad.
+        url = (
+            st.secrets.get("DATABASE_URL_POOLER")
+            or st.secrets.get("DATABASE_URL")
+        )  # type: ignore[attr-defined]
     except Exception:
         url = None
-    url = url or os.environ.get("DATABASE_URL")
+    url = (
+        url
+        or os.environ.get("DATABASE_URL_POOLER")
+        or os.environ.get("DATABASE_URL")
+    )
     if not url:
         url = f"sqlite:///{DATA_DIR / 'akt.db'}"
     if url.startswith("postgres://"):
@@ -48,27 +60,109 @@ def _resolve_url() -> str:
     return url
 
 
-def _postgres_kwargs():
-    return {
+def _postgres_kwargs(url: str | None = None):
+    kwargs = {
         "pool_pre_ping": True,
         "future": True,
-        "pool_size": 5,
-        "max_overflow": 10,
-        "pool_recycle": 1800,
+        # Streamlit puede reiniciar/replicar procesos. Mantener un pool pequeño
+        # evita consumir conexiones de Supabase innecesariamente.
+        "pool_size": 3,
+        "max_overflow": 2,
+        "pool_timeout": 20,
+        "pool_recycle": 900,
     }
+    try:
+        parsed = make_url(url) if url else None
+        host = str(parsed.host or "").lower() if parsed else ""
+    except Exception:
+        host = ""
+
+    if host.endswith(".supabase.co"):
+        kwargs["connect_args"] = {
+            "connect_timeout": 10,
+            "sslmode": "require",
+            "application_name": "akt-proveedores-streamlit",
+        }
+    return kwargs
+
+
+def database_endpoint_info() -> dict:
+    """Información segura del endpoint configurado; nunca devuelve credenciales."""
+    url = _resolve_url()
+    if url.startswith("sqlite"):
+        return {
+            "dialecto": "sqlite",
+            "host": "local",
+            "puerto": None,
+            "modo": "sqlite",
+        }
+    try:
+        p = make_url(url)
+        host = str(p.host or "")
+        port = p.port
+    except Exception:
+        host, port = "", None
+
+    if ".pooler.supabase.com" in host:
+        modo = "session_pooler" if port == 5432 else "transaction_pooler"
+    elif host.startswith("db.") and host.endswith(".supabase.co"):
+        modo = "direct_supabase"
+    else:
+        modo = "postgres"
+    return {
+        "dialecto": "postgresql",
+        "host": host,
+        "puerto": port,
+        "modo": modo,
+    }
+
+
+def database_connection_hint() -> str:
+    info = database_endpoint_info()
+    if info["modo"] == "direct_supabase":
+        return (
+            "El DATABASE_URL apunta a la conexión directa de Supabase "
+            f"({info['host']}:{info['puerto'] or 5432}). Para Streamlit Cloud "
+            "use el Session Pooler de Supabase (host *.pooler.supabase.com, "
+            "puerto 5432) y guárdelo como DATABASE_URL_POOLER."
+        )
+    if info["modo"] == "session_pooler":
+        return (
+            "La app está configurada con Supabase Session Pooler "
+            f"({info['host']}:{info['puerto']})."
+        )
+    if info["modo"] == "transaction_pooler":
+        return (
+            "La app usa Supabase Transaction Pooler. Para este backend con "
+            "SQLAlchemy se recomienda Session Pooler en puerto 5432."
+        )
+    return "Revise DATABASE_URL/DATABASE_URL_POOLER y disponibilidad de PostgreSQL."
 
 
 def _detectar_schema_postgres(url: str) -> str:
     """Detecta si public es compatible con AKT sin modificar tablas existentes."""
-    probe = create_engine(url, **_postgres_kwargs())
+    probe = create_engine(url, **_postgres_kwargs(url))
     try:
-        with probe.connect() as conn:
-            columnas = set(conn.execute(text("""
-                SELECT column_name
-                  FROM information_schema.columns
-                 WHERE table_schema = 'public'
-                   AND table_name = 'proveedores'
-            """)).scalars().all())
+        columnas = None
+        ultimo_error = None
+        for intento in range(1, 4):
+            try:
+                with probe.connect() as conn:
+                    columnas = set(conn.execute(text("""
+                        SELECT column_name
+                          FROM information_schema.columns
+                         WHERE table_schema = 'public'
+                           AND table_name = 'proveedores'
+                    """)).scalars().all())
+                break
+            except OperationalError as exc:
+                ultimo_error = exc
+                if intento >= 3:
+                    raise
+                time.sleep(1.25 * intento)
+
+        if columnas is None and ultimo_error is not None:
+            raise ultimo_error
 
         # Base nueva o base ya propia de AKT: conserva public y datos existentes.
         if not columnas or _AKT_PROVIDER_SIGNATURE.issubset(columnas):
@@ -148,7 +242,7 @@ def get_engine():
             cur.close()
     else:
         _active_schema = _detectar_schema_postgres(url)
-        base_engine = create_engine(url, **_postgres_kwargs())
+        base_engine = create_engine(url, **_postgres_kwargs(url))
         if _active_schema != "public":
             # Fuerza todas las tablas y FKs del metadata de AKT al schema
             # dedicado. A diferencia de search_path, esto también hace que
