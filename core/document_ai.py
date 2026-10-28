@@ -77,30 +77,64 @@ def _auto_local_ocr_allowed() -> bool:
 
 def _imagen_api_optimizada(
         data: bytes, mime: str, max_side: int = 2048) -> tuple[bytes, str]:
-    """Crea una copia de trabajo para Vision; el original NO se modifica.
+    """Crea una copia de trabajo más legible y liviana para Vision.
 
-    La API aplica sus propios límites de resolución en detalle high. Enviar
-    una foto de 8-20 MP completa aumenta transferencia/base64 y memoria.
-    Para lectura se reduce proporcionalmente a 2048 px de lado mayor,
-    conservando el archivo original para trazabilidad y descarga.
+    El original nunca se modifica. Antes de redimensionar se intenta recortar
+    únicamente el fondo exterior del documento. En fotos de BIN esto aumenta
+    el tamaño relativo de la letra y reduce bytes transferidos sin aplicar una
+    binarización agresiva que pueda borrar dígitos finos.
     """
     if not data or not str(mime or "").startswith("image/"):
         return data, mime
     try:
         import cv2
         img = _decode_image(data)
+
+        # Recorte conservador del papel: solo se acepta un contorno grande.
+        # No corrige perspectiva aquí; Vision tolera mejor una leve inclinación
+        # que una transformación geométrica equivocada.
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            _, mask = cv2.threshold(
+                blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            contornos, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contornos:
+                h0, w0 = img.shape[:2]
+                area_img = float(h0 * w0)
+                cnt = max(contornos, key=cv2.contourArea)
+                x, y, ww, hh = cv2.boundingRect(cnt)
+                area_rect = float(ww * hh)
+                if (
+                    area_rect >= area_img * 0.52
+                    and ww >= w0 * 0.68
+                    and hh >= h0 * 0.60
+                ):
+                    pad_x = max(6, int(ww * 0.012))
+                    pad_y = max(6, int(hh * 0.012))
+                    x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
+                    x2 = min(w0, x + ww + pad_x)
+                    y2 = min(h0, y + hh + pad_y)
+                    recorte = img[y1:y2, x1:x2]
+                    if getattr(recorte, "size", 0):
+                        img = recorte
+        except Exception:
+            pass
+
         h, w = img.shape[:2]
         mayor = max(h, w)
-        if mayor <= max_side:
-            return data, mime
-        escala = float(max_side) / float(mayor)
-        nuevo = cv2.resize(
-            img,
-            (max(1, int(round(w * escala))), max(1, int(round(h * escala)))),
-            interpolation=cv2.INTER_AREA,
-        )
+        if mayor > max_side:
+            escala = float(max_side) / float(mayor)
+            img = cv2.resize(
+                img,
+                (max(1, int(round(w * escala))),
+                 max(1, int(round(h * escala)))),
+                interpolation=cv2.INTER_AREA,
+            )
+
         ok, enc = cv2.imencode(
-            ".jpg", nuevo, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            ".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 91])
         if ok:
             return enc.tobytes(), "image/jpeg"
     except Exception:
@@ -151,10 +185,16 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
         "NO inventes, NO completes y NO corrijas códigos ni cantidades. "
         "Si un carácter o número no es legible devuelve null en ese campo. "
         "Clasifica tipo_documento como BIN_A_BIN, FACTURA u OTRO. "
-        "Si es BIN_A_BIN, extrae exactamente una fila por cada renglón visible "
-        "de la tabla. El campo codigo debe contener exactamente el código impreso. "
-        "El campo cantidad debe tomarse EXCLUSIVAMENTE de la columna Cantidad; "
-        "nunca uses números de la descripción, serial, lote, DESDE o HASTA. "
+        "Si es BIN_A_BIN, usa primero la fila de encabezados "
+        "Proveedor | Código | Descripción | Cantidad | Serial | Lote | Desde | Hasta "
+        "para fijar mentalmente los límites horizontales de cada columna. "
+        "Después recorre la tabla de arriba hacia abajo y extrae EXACTAMENTE una "
+        "fila por cada renglón visible, sin propagar valores de la fila anterior. "
+        "El campo codigo debe contener exactamente el código impreso. "
+        "El campo cantidad debe tomarse EXCLUSIVAMENTE de la franja vertical bajo "
+        "el encabezado Cantidad; nunca uses números de la descripción, serial, lote, "
+        "DESDE o HASTA. Si la cantidad de una fila no se ve con certeza devuelve null "
+        "para ESA fila, pero continúa leyendo las filas siguientes. "
         "Conserva Serial, Lote, DESDE y HASTA tal como aparecen. "
         "FECHAS: si es BIN_A_BIN pueden aparecer dos fechas distintas. "
         "fecha_transaccion debe ser EXCLUSIVAMENTE el valor rotulado "
@@ -235,7 +275,7 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
                 "strict": True,
             }
         },
-        "max_output_tokens": 12000,
+        "max_output_tokens": 8000,
     }
 
     raw = None
@@ -3134,6 +3174,24 @@ def _analisis_local_foto_bin(data: bytes) -> dict:
     }
 
 
+def _texto_pdf_nativo_rapido(data: bytes) -> str:
+    """Lee únicamente la capa de texto de un PDF, sin OCR ni llamadas remotas."""
+    if not data:
+        return ""
+    try:
+        import fitz
+        doc = fitz.open(stream=data, filetype="pdf")
+        partes = []
+        for p in doc:
+            t = (p.get_text("text") or "").strip()
+            if t:
+                partes.append(t)
+        texto = "\n".join(partes).strip()
+        return texto if len(texto) >= 40 else ""
+    except Exception:
+        return ""
+
+
 def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dict:
     """Extracción escalable: IA remota primero; OCR local solo como último recurso.
 
@@ -3151,19 +3209,47 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     )
     es_pdf = bool(mime == "application/pdf" or name.endswith(".pdf"))
 
-    # 1) Motor remoto principal.
+    # Fast-path de PDF con capa de texto: no tiene sentido esperar Document AI
+    # remoto si PyMuPDF ya puede leer el documento de forma determinística.
     t0 = time.perf_counter()
-    ia = _openai_document_ai(nombre, data, mime)
-    tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
-    ia_ok = bool(
-        ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))
-    )
+    pdf_texto_nativo = _texto_pdf_nativo_rapido(data) if es_pdf else ""
+    if es_pdf:
+        tiempos["pdf_nativo_s"] = round(time.perf_counter() - t0, 3)
+
+    # 1) Motor remoto principal solo cuando realmente hace falta.
+    if pdf_texto_nativo:
+        ia = None
+        ia_ok = False
+        tiempos["openai_s"] = 0.0
+    else:
+        t0 = time.perf_counter()
+        ia = _openai_document_ai(nombre, data, mime)
+        tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
+        ia_ok = bool(
+            ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))
+        )
 
     ia_suficiente, razones_ia = _ia_bin_suficiente(ia) if es_imagen else (False, [])
 
-    # 2) Si OpenAI no resolvió una FOTO con suficiencia, preferimos otro motor
-    # remoto antes de consumir CPU local.
-    if (not ia_ok) or (es_imagen and not ia_suficiente):
+    # 2) Mistral queda como respaldo remoto, pero no se dispara por señales
+    # blandas como "ia_declara_incompleta". Eso duplicaba el tiempo aun cuando
+    # OpenAI ya había entregado referencia y todas las filas con cantidad.
+    razones_fallback_remoto = {
+        "motor_ia_no_disponible", "tipo_no_bin", "referencia_bin",
+        "sin_filas", "fila_incompleta", "conteo_filas",
+    }
+    requiere_fallback_remoto = bool(
+        not pdf_texto_nativo
+        and (
+            (not ia_ok)
+            or (
+                es_imagen
+                and not ia_suficiente
+                and any(r in razones_fallback_remoto for r in razones_ia)
+            )
+        )
+    )
+    if requiere_fallback_remoto:
         t0 = time.perf_counter()
         ia_mistral = _mistral_document_ai(nombre, data, mime)
         tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
@@ -3296,7 +3382,12 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                 )
         else:
             t0 = time.perf_counter()
-            texto, cf, metodo, diagnostico = extraer_texto(nombre, data, mime)
+            if es_pdf and pdf_texto_nativo:
+                texto, cf, metodo, diagnostico = (
+                    pdf_texto_nativo, 0.98, "PDF_TEXT_FAST", "")
+            else:
+                texto, cf, metodo, diagnostico = extraer_texto(
+                    nombre, data, mime)
             tiempos["ocr_texto_s"] = round(time.perf_counter() - t0, 3)
             out = estructurar(texto, cf)
             out["entrada_ia"] = False
