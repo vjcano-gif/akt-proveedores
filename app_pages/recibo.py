@@ -656,7 +656,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "document-ai-v40-mistral-primary"
+    extractor_version = "document-ai-v41-local-first"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -1413,6 +1413,9 @@ def _registrar(user):
             if float(tiempos.get("parser_columnas_s") or 0) >= 0.01:
                 partes_t.append(
                     f"columnas {float(tiempos['parser_columnas_s']):.1f}s")
+            if float(tiempos.get("rapid_local_s") or 0) >= 0.01:
+                partes_t.append(
+                    f"lectura local {float(tiempos['rapid_local_s']):.1f}s")
             if float(tiempos.get("rapid_rescate_s") or 0) >= 0.01:
                 partes_t.append(
                     f"rescate RapidOCR {float(tiempos['rapid_rescate_s']):.1f}s")
