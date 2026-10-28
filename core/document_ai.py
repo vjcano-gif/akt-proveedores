@@ -3272,10 +3272,11 @@ def _analisis_local_foto_bin(data: bytes) -> dict:
 
 
 def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
-    """Rescate rápido para fotos cuando la IA devuelve texto pero cero filas.
+    """Lectura rápida local de una foto BIN en una sola pasada.
 
-    Hace UNA sola pasada RapidOCR sobre una copia reducida. No ejecuta
-    Tesseract, no prueba rotaciones y no llama servicios remotos adicionales.
+    No ejecuta Tesseract, no prueba rotaciones y no llama servicios remotos.
+    Si la geometría de encabezados/columnas es suficiente, puede cerrar el
+    documento completo sin depender de una API externa.
     """
     t0 = time.perf_counter()
     try:
@@ -3283,8 +3284,8 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
         img = _decode_image(data)
         h, w = img.shape[:2]
         mayor = max(h, w)
-        if mayor > 1800:
-            s = 1800.0 / float(mayor)
+        if mayor > 2200:
+            s = 2200.0 / float(mayor)
             img = cv2.resize(
                 img,
                 (max(1, int(round(w * s))), max(1, int(round(h * s)))),
@@ -3298,11 +3299,37 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
             sum(float(x) for x in scores) / len(scores)
             if scores else 0.0
         )
+        referencia = _extraer_referencia_bin_resultado(res)
+        fecha_tx = _extraer_fecha_transaccion(texto)
+
+        # Normaliza las filas locales al mismo contrato de Document AI.
+        filas_ai = []
+        for row in filas:
+            codigo = str(row.get("articulo") or "").strip()
+            if not codigo:
+                continue
+            filas_ai.append({
+                "proveedor": str(row.get("proveedor_bin") or "").strip(),
+                "codigo": codigo,
+                "descripcion": str(row.get("descripcion_ocr") or "").strip(),
+                "cantidad": _num(row.get("cantidad_documento")),
+                "serial": str(row.get("serial") or "").strip(),
+                "lote": str(row.get("lote") or "").strip(),
+                "desde": str(row.get("ubicacion_desde") or "").strip(),
+                "hasta": str(row.get("ubicacion_hasta") or "").strip(),
+            })
+
+        score_bin, filas_texto = _score_bin_texto(texto)
         return {
-            "ok": bool(texto or filas),
+            "ok": bool(texto or filas_ai),
             "texto": texto,
             "filas": filas,
+            "filas_ai": filas_ai,
+            "referencia": referencia,
+            "fecha_transaccion": fecha_tx,
             "confianza": float(conf or 0.0),
+            "score_bin": int(score_bin),
+            "filas_texto": int(filas_texto),
             "tiempo_s": round(time.perf_counter() - t0, 3),
         }
     except Exception as e:
@@ -3310,7 +3337,12 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
             "ok": False,
             "texto": "",
             "filas": [],
+            "filas_ai": [],
+            "referencia": None,
+            "fecha_transaccion": None,
             "confianza": 0.0,
+            "score_bin": 0,
+            "filas_texto": 0,
             "tiempo_s": round(time.perf_counter() - t0, 3),
             "error": f"{type(e).__name__}: {e}",
         }
@@ -3358,6 +3390,27 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     if es_pdf:
         tiempos["pdf_nativo_s"] = round(time.perf_counter() - t0, 3)
 
+    # Lectura local primero para FOTOS BIN. Esto garantiza que la app
+    # realmente intente leer siempre, incluso si no hay claves remotas o una API
+    # está lenta. Si recupera una tabla razonable, evita completamente la red.
+    rapid_pre = None
+    if es_imagen:
+        t0 = time.perf_counter()
+        rapid_pre = _rescate_rapid_bin_una_pasada(data)
+        tiempos["rapid_local_s"] = round(time.perf_counter() - t0, 3)
+
+    rapid_filas_ai = list((rapid_pre or {}).get("filas_ai") or [])
+    rapid_suficiente = bool(
+        es_imagen
+        and len(rapid_filas_ai) >= 5
+        and int((rapid_pre or {}).get("score_bin") or 0) >= 20
+        and all(
+            str(r.get("codigo") or "").strip()
+            and (_num(r.get("cantidad")) or 0) > 0
+            for r in rapid_filas_ai
+        )
+    )
+
     # 1) Motor remoto principal.
     #
     # Para FOTOS de documentos se prioriza Mistral OCR porque es un motor
@@ -3366,7 +3419,27 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     # Nunca se encadenan dos proveedores después de un timeout.
     ia = None
     ia_ok = False
-    if pdf_texto_nativo:
+    if rapid_suficiente:
+        ia = {
+            "ok": True,
+            "texto": str((rapid_pre or {}).get("texto") or ""),
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": str((rapid_pre or {}).get("referencia") or ""),
+            "fecha_transaccion": str(
+                (rapid_pre or {}).get("fecha_transaccion") or ""),
+            "fecha_documento": "",
+            "fecha": str((rapid_pre or {}).get("fecha_transaccion") or ""),
+            "filas_visibles": len(rapid_filas_ai),
+            "lectura_completa": True,
+            "filas": rapid_filas_ai,
+            "modelo": "rapidocr-local",
+            "usage_info": {},
+            "fuente": "RAPIDOCR_LOCAL",
+        }
+        ia_ok = True
+        tiempos["mistral_s"] = 0.0
+        tiempos["openai_s"] = 0.0
+    elif pdf_texto_nativo:
         tiempos["mistral_s"] = 0.0
         tiempos["openai_s"] = 0.0
     elif es_imagen and _mistral_api_key():
@@ -3482,9 +3555,31 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                     + ". OCR local pesado no se ejecutó automáticamente."
                 )
     else:
-        # PDF conserva el comportamiento local/nativo. Para FOTO sin IA no
-        # lanzamos OCR pesado automáticamente: la UI podrá ofrecer refuerzo.
-        if es_imagen:
+        # Si la red falla pero la pasada local obtuvo filas, se conservan.
+        if es_imagen and rapid_pre and (rapid_pre.get("filas_ai") or rapid_pre.get("texto")):
+            texto = str(rapid_pre.get("texto") or "")
+            cf = float(rapid_pre.get("confianza") or 0.0)
+            metodo = "RAPIDOCR_LOCAL_FALLBACK"
+            diagnostico = (
+                str((ia or {}).get("error") or "")
+                if isinstance(ia, dict) else ""
+            )
+            out = estructurar(texto, cf)
+            out["entrada_ia"] = False
+            out["ia_error"] = diagnostico
+            out["ocr_local_ejecutado"] = True
+            out["modo_escalable"] = "RAPIDOCR_LOCAL_FALLBACK"
+            out["lineas_ia"] = list(rapid_pre.get("filas_ai") or [])
+            out["bin_filas_espaciales"] = list(rapid_pre.get("filas") or [])
+            if rapid_pre.get("referencia"):
+                out["referencia"] = asdict(Campo(
+                    rapid_pre.get("referencia"), 0.90, "RAPIDOCR_LOCAL"))
+            if rapid_pre.get("fecha_transaccion"):
+                out["fecha"] = asdict(Campo(
+                    rapid_pre.get("fecha_transaccion"), 0.85, "RAPIDOCR_LOCAL"))
+        # PDF conserva el comportamiento local/nativo. Para FOTO sin ninguna
+        # lectura local ni remota, mantiene el fallback de desarrollo.
+        elif es_imagen:
             if _auto_local_ocr_allowed():
                 t0 = time.perf_counter()
                 local_foto = _analisis_local_foto_bin(data)
