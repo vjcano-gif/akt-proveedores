@@ -656,7 +656,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "remote-first-v38-hard-timeout"
+    extractor_version = "remote-first-v39-visible-unvalidated-rapid-rescue"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -1047,6 +1047,28 @@ def _filas_sin_cantidad_documento(df):
     return faltan
 
 
+def _articulos_no_validos_maestro(df):
+    """Devuelve artículos editados que no existen activos en el maestro."""
+    if df is None or df.empty:
+        return []
+    codigos = {
+        str(v).strip().upper()
+        for v in df.get("articulo", pd.Series(dtype=str)).tolist()
+        if str(v or "").strip()
+    }
+    if not codigos:
+        return []
+    with session_scope() as s:
+        activos = {
+            str(x[0]).strip().upper()
+            for x in s.query(Articulo.codigo).filter(
+                Articulo.activo.is_(True),
+                Articulo.codigo.in_(list(codigos)),
+            ).all()
+        }
+    return sorted(c for c in codigos if c not in activos)
+
+
 def _diferencias_recepcion(df):
     if df is None or df.empty:
         return []
@@ -1391,6 +1413,9 @@ def _registrar(user):
             if float(tiempos.get("parser_columnas_s") or 0) >= 0.01:
                 partes_t.append(
                     f"columnas {float(tiempos['parser_columnas_s']):.1f}s")
+            if float(tiempos.get("rapid_rescate_s") or 0) >= 0.01:
+                partes_t.append(
+                    f"rescate RapidOCR {float(tiempos['rapid_rescate_s']):.1f}s")
             total_t = float(tiempos.get("total_s") or 0)
             st.caption(
                 "Tiempo de lectura: "
@@ -1723,6 +1748,17 @@ def _registrar(user):
                 + ("…" if len(faltan_qty) > 12 else "")
                 + ". Corrija esas cantidades antes de marcar recepción completa.")
 
+        no_validos_maestro = _articulos_no_validos_maestro(lineas_df)
+        if no_validos_maestro:
+            st.error(
+                "Estas referencias fueron leídas del documento pero aún no existen "
+                "como artículos activos en el maestro: "
+                + ", ".join(no_validos_maestro[:12])
+                + ("…" if len(no_validos_maestro) > 12 else "")
+                + ". Corrija el código en la tabla o active/cargue el artículo "
+                "antes de confirmar."
+            )
+
         cantidades_sin_consenso = list(
             (extr or {}).get("cantidades_foto_sin_consenso") or [])
         revision_cantidades_ok = True
@@ -1753,7 +1789,8 @@ def _registrar(user):
             type="primary",
             use_container_width=True,
             disabled=(
-                bool(faltan_qty) or lineas_df.empty or bloqueo_hasta
+                bool(faltan_qty) or bool(no_validos_maestro)
+                or lineas_df.empty or bloqueo_hasta
                 or not revision_cantidades_ok
             ),
             key=f"btn_completo_{suffix}",
@@ -1770,8 +1807,8 @@ def _registrar(user):
             "⚠ Registrar discrepancias",
             use_container_width=True,
             disabled=(
-                lineas_df.empty or bloqueo_hasta
-                or not revision_cantidades_ok
+                lineas_df.empty or bool(no_validos_maestro)
+                or bloqueo_hasta or not revision_cantidades_ok
             ),
             key=f"btn_disc_{suffix}",
         ):
@@ -1882,6 +1919,14 @@ def _registrar(user):
             ui.err(
                 "Hay referencias sin cantidad documental: "
                 + ", ".join(faltan_qty[:12]))
+            return
+
+        no_validos_maestro = _articulos_no_validos_maestro(lineas_df)
+        if modo == "Documento leído" and no_validos_maestro:
+            ui.err(
+                "No se puede crear el recibo mientras existan referencias no "
+                "validadas contra el maestro: "
+                + ", ".join(no_validos_maestro[:12]))
             return
 
         def num(v):
