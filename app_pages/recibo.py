@@ -656,11 +656,11 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "remote-first-v37-bin-mot-prefix"
+    extractor_version = "remote-first-v38-hard-timeout"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
-        with st.spinner("Procesando documento con IA remota..."):
+        with st.spinner("Procesando documento (máximo ~20 s por intento)..."):
             try:
                 extr = _analizar_documento_compartido(
                     soporte.name,
