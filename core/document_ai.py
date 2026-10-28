@@ -477,7 +477,7 @@ def _mistral_document_ai(nombre: str, data: bytes, mime: str | None = None) -> d
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=60,
+            timeout=(4, 22),
         )
         resp.raise_for_status()
         raw = resp.json()
@@ -3358,127 +3358,35 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     if es_pdf:
         tiempos["pdf_nativo_s"] = round(time.perf_counter() - t0, 3)
 
-    # 1) Motor remoto principal solo cuando realmente hace falta.
+    # 1) Motor remoto principal.
+    #
+    # Para FOTOS de documentos se prioriza Mistral OCR porque es un motor
+    # documental especializado y devuelve tabla/anotación estructurada. OpenAI
+    # queda como alternativa únicamente cuando Mistral NO está configurado.
+    # Nunca se encadenan dos proveedores después de un timeout.
+    ia = None
+    ia_ok = False
     if pdf_texto_nativo:
-        ia = None
-        ia_ok = False
+        tiempos["mistral_s"] = 0.0
         tiempos["openai_s"] = 0.0
+    elif es_imagen and _mistral_api_key():
+        t0 = time.perf_counter()
+        ia = _mistral_document_ai(nombre, data, mime)
+        tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
+        tiempos["openai_s"] = 0.0
+        ia_ok = bool(
+            ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))
+        )
     else:
         t0 = time.perf_counter()
         ia = _openai_document_ai(nombre, data, mime)
         tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
+        tiempos["mistral_s"] = 0.0
         ia_ok = bool(
             ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))
         )
 
     ia_suficiente, razones_ia = _ia_bin_suficiente(ia) if es_imagen else (False, [])
-
-    # 2) Mistral queda como respaldo remoto, pero no se dispara por señales
-    # blandas como "ia_declara_incompleta". Eso duplicaba el tiempo aun cuando
-    # OpenAI ya había entregado referencia y todas las filas con cantidad.
-    razones_fallback_remoto = {
-        "motor_ia_no_disponible", "tipo_no_bin", "referencia_bin",
-        "sin_filas", "fila_incompleta", "conteo_filas",
-    }
-    # En imágenes NO encadenamos un segundo proveedor remoto automáticamente.
-    # Una foto debe terminar en un único intento acotado; si falla, vuelve a la
-    # UI para corrección/reintento. Esto evita esperas acumuladas de 1-2 minutos.
-    requiere_fallback_remoto = bool(
-        not es_imagen
-        and not pdf_texto_nativo
-        and not ia_ok
-    )
-    if requiere_fallback_remoto:
-        t0 = time.perf_counter()
-        ia_mistral = _mistral_document_ai(nombre, data, mime)
-        tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
-        mistral_ok = bool(
-            ia_mistral and ia_mistral.get("ok")
-            and (ia_mistral.get("texto") or ia_mistral.get("filas"))
-        )
-        if mistral_ok:
-            if not ia_ok:
-                ia = ia_mistral
-                ia_ok = True
-                ia_suficiente, razones_ia = (
-                    _ia_bin_suficiente(ia) if es_imagen else (False, [])
-                )
-            else:
-                # OpenAI conserva prioridad, pero Mistral sí puede completar
-                # filas omitidas o campos vacíos del MISMO código. Antes solo
-                # guardábamos un contador de verificación y pagábamos la
-                # segunda llamada sin aprovechar sus datos.
-                filas_base = list(ia.get("filas") or [])
-                por_codigo = {
-                    str(r.get("codigo") or "").strip().upper(): r
-                    for r in filas_base
-                    if str(r.get("codigo") or "").strip()
-                }
-                agregadas = 0
-                completadas = 0
-                for respaldo in ia_mistral.get("filas") or []:
-                    if not isinstance(respaldo, dict):
-                        continue
-                    key = str(respaldo.get("codigo") or "").strip().upper()
-                    qty_respaldo = _num(respaldo.get("cantidad"))
-                    if not key:
-                        continue
-                    actual = por_codigo.get(key)
-                    if actual is None:
-                        # Una fila nueva solo entra si trae código y cantidad
-                        # positivos; así Mistral no agrega renglones incompletos.
-                        if qty_respaldo is None or qty_respaldo <= 0:
-                            continue
-                        copia = dict(respaldo)
-                        filas_base.append(copia)
-                        por_codigo[key] = copia
-                        agregadas += 1
-                        continue
-
-                    cambio = False
-                    qty_actual = _num(actual.get("cantidad"))
-                    if (
-                        (qty_actual is None or qty_actual <= 0)
-                        and qty_respaldo is not None
-                        and qty_respaldo > 0
-                    ):
-                        actual["cantidad"] = float(qty_respaldo)
-                        cambio = True
-                    for campo in (
-                        "proveedor", "descripcion", "serial",
-                        "lote", "desde", "hasta",
-                    ):
-                        if not str(actual.get(campo) or "").strip() and str(
-                                respaldo.get(campo) or "").strip():
-                            actual[campo] = respaldo.get(campo)
-                            cambio = True
-                    if cambio:
-                        completadas += 1
-
-                ia["filas"] = filas_base
-                # Si OpenAI había contado las filas visibles y la fusión alcanza
-                # exactamente ese total con datos completos, la lectura puede
-                # considerarse cerrada sin OCR local.
-                visibles = ia.get("filas_visibles")
-                if visibles is not None:
-                    try:
-                        if int(visibles) == len(filas_base) and all(
-                            str(r.get("codigo") or "").strip()
-                            and (_num(r.get("cantidad")) or 0) > 0
-                            for r in filas_base
-                        ):
-                            ia["lectura_completa"] = True
-                    except Exception:
-                        pass
-
-                ia["verificacion_remota"] = {
-                    "fuente": ia_mistral.get("fuente"),
-                    "filas": len(ia_mistral.get("filas") or []),
-                    "referencia": ia_mistral.get("referencia"),
-                    "filas_agregadas": agregadas,
-                    "filas_completadas": completadas,
-                }
-                ia_suficiente, razones_ia = _ia_bin_suficiente(ia)
 
     # 3) Construye salida IA si existe.
     local_foto = None
