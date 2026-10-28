@@ -6,8 +6,16 @@ import io
 import pandas as pd
 import streamlit as st
 
-from core.db import session_scope
-from core.services import SEMAFORO_COLOR
+# Mantener este módulo liviano al importar. Las dependencias de DB/servicios
+# se cargan dentro de las funciones que realmente las necesitan para que un
+# fallo aguas abajo no tumbe toda la interfaz al arrancar.
+SEMAFORO_COLOR = {
+    "CRÍTICO": "#e02424",
+    "ALERTA": "#f59e0b",
+    "ÓPTIMO": "#16a34a",
+    "EXCESO": "#2563eb",
+    "SIN MOVIMIENTO": "#6b7280",
+}
 
 COLORES_ESTADO = {
     "CERRADA": "#16a34a", "NOVEDAD": "#e02424", "BORRADOR": "#6b7280",
@@ -168,6 +176,7 @@ def exportar_excel(dfs: dict[str, pd.DataFrame]) -> bytes:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def catalogo_articulos(limite=5000) -> pd.DataFrame:
+    from core.db import session_scope
     from core.models import Articulo
     with session_scope() as s:
         rows = s.query(Articulo.codigo, Articulo.descripcion, Articulo.tipo).filter(
@@ -177,6 +186,7 @@ def catalogo_articulos(limite=5000) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def catalogo_ubicaciones(proveedor_id=None, incluir_restringidas=False) -> list[str]:
+    from core.db import session_scope
     from core.models import Ubicacion
     with session_scope() as s:
         q = s.query(Ubicacion.codigo).filter(
@@ -191,6 +201,7 @@ def catalogo_ubicaciones(proveedor_id=None, incluir_restringidas=False) -> list[
 
 
 def catalogo_proveedores() -> pd.DataFrame:
+    from core.db import session_scope
     from core.models import Proveedor
     with session_scope() as s:
         rows = s.query(Proveedor.id, Proveedor.codigo, Proveedor.nombre).filter(
@@ -213,6 +224,7 @@ def selector_proveedor(user, label="Proveedor", key=None, allow_blank=False):
     La consulta es en vivo para que una desactivación en Maestros tenga efecto
     inmediato y no quede retenida por caché.
     """
+    from core.db import session_scope
     from core.models import Proveedor
 
     if user.get("rol") == "PROVEEDOR":
