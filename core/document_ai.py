@@ -997,7 +997,10 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
     for d in datos:
         target = None
         for fila in filas:
-            tol = max(9.0, 0.65 * max(d["h"], fila["h"]))
+            # En fotos de tablas densas una tolerancia fija de 8-9 px fusiona
+            # dos renglones vecinos. Agrupamos por cercanía relativa a la altura
+            # de la fuente, con un máximo conservador.
+            tol = min(5.0, max(2.2, 0.38 * max(d["h"], fila["h"])))
             if abs(d["cy"] - fila["cy"]) <= tol:
                 target = fila
                 break
@@ -1005,6 +1008,11 @@ def _extraer_bin_columnas_resultado(res, txts=None) -> list[dict]:
             target = {"cy": d["cy"], "h": d["h"], "items": []}
             filas.append(target)
         target["items"].append(d)
+        n_items = len(target["items"])
+        target["cy"] = (
+            (target["cy"] * (n_items - 1) + d["cy"]) / n_items
+        )
+        target["h"] = max(target["h"], d["h"])
 
     out = []
     for fila in filas:
@@ -3359,7 +3367,12 @@ def _inferir_ubicaciones_bin_desde_texto(texto: str) -> tuple[str, str]:
 
 
 def _estimar_filas_bin_resultado(res) -> int:
-    """Cuenta bandas horizontales de datos aunque el código OCR esté dañado."""
+    """Estima filas reales por bandas Y dentro del cuerpo de la tabla.
+
+    No exige que el código o los NONE hayan sido reconocidos. Detecta las
+    bandas horizontales y usa su espaciado mediano para compensar renglones
+    completamente omitidos por OCR.
+    """
     txts = list(getattr(res, "txts", None) or [])
     boxes = getattr(res, "boxes", None)
     if boxes is None or len(boxes) != len(txts):
@@ -3377,6 +3390,8 @@ def _estimar_filas_bin_resultado(res) -> int:
             dets.append({
                 "txt": txt,
                 "x0": min(xs), "x1": max(xs),
+                "y0": min(ys), "y1": max(ys),
+                "cx": (min(xs) + max(xs)) / 2.0,
                 "cy": (min(ys) + max(ys)) / 2.0,
                 "h": max(1.0, max(ys) - min(ys)),
             })
@@ -3389,17 +3404,46 @@ def _estimar_filas_bin_resultado(res) -> int:
         if n in {"PROVEEDOR", "CODIGO", "DESCRIPCION", "CANTIDAD",
                  "SERIAL", "LOTE", "DESDE", "HASTA"}:
             headers[n] = d
-    if not headers:
+    if len(headers) < 3:
         return 0
-    header_y = max(d["cy"] for d in headers.values())
 
-    datos = [d for d in dets if d["cy"] > header_y + 3]
+    header_y = max(d["cy"] for d in headers.values())
+    table_left = min(d["x0"] for d in headers.values())
+    table_right = max(d["x1"] for d in headers.values())
+    header_width = max(1.0, table_right - table_left)
+
+    # Pie típico del reporte. Todo lo que esté por debajo ya no es tabla.
+    footer_candidates = []
+    for d in dets:
+        if d["cy"] <= header_y + 20:
+            continue
+        n = _norm_cabecera(d["txt"])
+        if (
+            "CONTINUA" in n
+            or "SIGUIENTE" in n
+            or n == "PAGINA"
+        ):
+            footer_candidates.append(d["cy"])
+    footer_y = min(footer_candidates) if footer_candidates else None
+
+    datos = []
+    for d in dets:
+        if d["cy"] <= header_y + 2:
+            continue
+        if footer_y is not None and d["cy"] >= footer_y - 2:
+            continue
+        # Descarta firmas/notas muy apartadas del ancho horizontal de tabla.
+        if d["x1"] < table_left - 20 or d["x0"] > table_right + header_width * 0.40:
+            continue
+        datos.append(d)
+
     datos.sort(key=lambda z: (z["cy"], z["x0"]))
     filas = []
     for d in datos:
         target = None
-        for f in filas:
-            if abs(d["cy"] - f["cy"]) <= max(8.0, 0.72 * max(d["h"], f["h"])):
+        for f in reversed(filas[-4:]):
+            tol = min(5.0, max(2.2, 0.38 * max(d["h"], f["h"])))
+            if abs(d["cy"] - f["cy"]) <= tol:
                 target = f
                 break
         if target is None:
@@ -3407,20 +3451,54 @@ def _estimar_filas_bin_resultado(res) -> int:
             filas.append(target)
         target["items"].append(d)
         n = len(target["items"])
-        target["cy"] = ((target["cy"] * (n - 1)) + d["cy"]) / n
+        target["cy"] = (target["cy"] * (n - 1) + d["cy"]) / n
         target["h"] = max(target["h"], d["h"])
 
-    total = 0
+    # Conserva bandas con evidencia horizontal suficiente. No requiere código.
+    candidatas = []
     for f in filas:
-        textos = [str(x["txt"] or "").upper() for x in f["items"]]
-        linea = " ".join(textos)
-        # Una fila real suele tener código largo o al menos dos NONE, y varias
-        # detecciones distribuidas horizontalmente. Evita firmas/pie de página.
-        codigo_largo = bool(re.search(r"\d{10,18}", linea))
-        dos_none = linea.count("NONE") >= 2
-        if (codigo_largo or dos_none) and len(f["items"]) >= 4:
-            total += 1
-    return total
+        if len(f["items"]) < 2:
+            continue
+        xs0 = [x["x0"] for x in f["items"]]
+        xs1 = [x["x1"] for x in f["items"]]
+        span = max(xs1) - min(xs0)
+        linea = " ".join(str(x["txt"] or "").upper() for x in f["items"])
+        evidencia = (
+            span >= header_width * 0.28
+            or bool(re.search(r"\d{8,18}", linea))
+            or linea.count("NONE") >= 1
+        )
+        if evidencia:
+            candidatas.append(f)
+
+    if not candidatas:
+        return 0
+
+    centros = sorted(float(f["cy"]) for f in candidatas)
+    if len(centros) < 3:
+        return len(centros)
+
+    diffs = [
+        centros[i + 1] - centros[i]
+        for i in range(len(centros) - 1)
+        if 3.0 <= centros[i + 1] - centros[i] <= 30.0
+    ]
+    if not diffs:
+        return len(centros)
+
+    diffs_ordenados = sorted(diffs)
+    # Usa el cuartil inferior/mediana baja para que huecos de filas omitidas
+    # (2x/3x el paso normal) no inflen el espaciado base.
+    paso = diffs_ordenados[max(0, len(diffs_ordenados) // 3)]
+    paso = max(4.0, min(20.0, paso))
+
+    estimadas_por_span = int(round((centros[-1] - centros[0]) / paso)) + 1
+    # Nunca reporta menos bandas que las realmente observadas y limita
+    # extrapolaciones anómalas por firmas/ruido.
+    return max(
+        len(centros),
+        min(estimadas_por_span, len(centros) + 25)
+    )
 
 
 def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
