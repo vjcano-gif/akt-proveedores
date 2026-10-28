@@ -1100,6 +1100,124 @@ try:
 finally:
     dai._mistral_document_ai = _mistral_original
 
+print("\n=== 10A1B. LATENCIA: NO DUPLICAR MOTOR REMOTO POR ADVERTENCIA BLANDA ===")
+_openai_soft_original = dai._openai_document_ai
+_mistral_soft_original = dai._mistral_document_ai
+try:
+    llamadas_mistral = {"n": 0}
+
+    def _openai_soft(*args, **kwargs):
+        return {
+            "ok": True,
+            "texto": "MOVIMIENTO BIN A BIN",
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": "BIN2761968",
+            "fecha_transaccion": "2026-10-13",
+            "fecha_documento": "13/10/2026",
+            "fecha": "2026-10-13",
+            "filas_visibles": 2,
+            # Señal conservadora: filas válidas, pero el modelo no se atreve
+            # a declarar la página completa.
+            "lectura_completa": False,
+            "fuente": "OPENAI_VISION",
+            "modelo": "mock-openai",
+            "filas": [
+                {
+                    "proveedor": "EICHER",
+                    "codigo": "7700149366632",
+                    "descripcion": "Cal Gbo Tras Neg Hmylan 450 Mp",
+                    "cantidad": 68,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PINT 1 1 1",
+                    "hasta": "WSERE WINT 1 1 1",
+                },
+                {
+                    "proveedor": "EICHER",
+                    "codigo": "7700149543231",
+                    "descripcion": "Cal Tan Der1 Honey Bear 650 Mp",
+                    "cantidad": 50,
+                    "serial": "NONE", "lote": "NONE",
+                    "desde": "WSERE PINT 1 1 1",
+                    "hasta": "WSERE WINT 1 1 1",
+                },
+            ],
+        }
+
+    def _mistral_no_debe_llamarse(*args, **kwargs):
+        llamadas_mistral["n"] += 1
+        return {"ok": False, "filas": [], "texto": ""}
+
+    dai._openai_document_ai = _openai_soft
+    dai._mistral_document_ai = _mistral_no_debe_llamarse
+    soft = analizar_documento("bin_foto.jpg", b"fake", "image/jpeg")
+    check(
+        "Foto BIN completa no duplica llamada remota por lectura_completa=False",
+        llamadas_mistral["n"] == 0,
+        str(llamadas_mistral),
+    )
+    check(
+        "Foto BIN conserva todas las cantidades aunque quede revisión blanda",
+        [x.get("cantidad") for x in soft.get("lineas_ia", [])] == [68, 50],
+        str(soft.get("lineas_ia")),
+    )
+finally:
+    dai._openai_document_ai = _openai_soft_original
+    dai._mistral_document_ai = _mistral_soft_original
+
+
+print("\n=== 10A1C. LATENCIA: PDF NATIVO NO USA IA REMOTA ===")
+_openai_pdf_fast_original = dai._openai_document_ai
+_mistral_pdf_fast_original = dai._mistral_document_ai
+try:
+    import fitz
+
+    llamadas_pdf_remotas = {"openai": 0, "mistral": 0}
+
+    def _openai_pdf_no(*args, **kwargs):
+        llamadas_pdf_remotas["openai"] += 1
+        return None
+
+    def _mistral_pdf_no(*args, **kwargs):
+        llamadas_pdf_remotas["mistral"] += 1
+        return None
+
+    dai._openai_document_ai = _openai_pdf_no
+    dai._mistral_document_ai = _mistral_pdf_no
+
+    doc_fast = fitz.open()
+    pg_fast = doc_fast.new_page(width=800, height=500)
+    pg_fast.insert_text((40, 50), "MOVIMIENTO BIN A BIN", fontsize=12)
+    pg_fast.insert_text((40, 80), "Id de Bin: BIN2761968", fontsize=10)
+    pg_fast.insert_text(
+        (40, 110),
+        "Proveedor Codigo Descripcion Cantidad Serial Lote Desde Hasta",
+        fontsize=9,
+    )
+    pg_fast.insert_text(
+        (40, 140),
+        "EICHER 7700149366632 Pieza prueba 68 NONE NONE WSERE PINT WSERE WINT",
+        fontsize=8,
+    )
+    bytes_fast = doc_fast.tobytes()
+    doc_fast.close()
+
+    pdf_fast = analizar_documento(
+        "BIN2761968.pdf", bytes_fast, "application/pdf")
+    check(
+        "PDF con texto nativo evita OpenAI y Mistral",
+        llamadas_pdf_remotas == {"openai": 0, "mistral": 0},
+        str(llamadas_pdf_remotas),
+    )
+    check(
+        "PDF nativo usa fast-path local",
+        pdf_fast.get("metodo") == "PDF_TEXT_FAST",
+        str(pdf_fast.get("metodo")),
+    )
+finally:
+    dai._openai_document_ai = _openai_pdf_fast_original
+    dai._mistral_document_ai = _mistral_pdf_fast_original
+
+
 print("\n=== 10A0A. DOCUMENTO MULTIFOTO / MULTIARCHIVO ===")
 multi_1 = {
     "_archivo_nombre": "pagina_1.jpg",
