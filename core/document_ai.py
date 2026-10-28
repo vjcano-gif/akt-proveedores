@@ -2839,6 +2839,42 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             propuesta["codigo_resuelto_por_prefijo"] = True
         propuestas_ia.append(propuesta)
 
+    # Respaldo visible: si Document AI leyó filas pero ninguna pudo cruzarse
+    # contra el maestro, NO se deben borrar. Se muestran como "pendientes de
+    # validar" para que el usuario pueda revisar/corregir el código en la tabla.
+    #
+    # Esto es especialmente importante en BIN reales donde el ERP imprime
+    # prefijos como MOT-001 / MOT-00D o donde el maestro aún no contiene una
+    # referencia activa. La lectura documental y la validación de maestro son
+    # dos etapas distintas.
+    propuestas_ia_no_validadas = []
+    if resultado.get("lineas_ia"):
+        for row in resultado.get("lineas_ia") or []:
+            if not isinstance(row, dict):
+                continue
+            raw_codigo = str(row.get("codigo") or "").strip()
+            qty = _num(row.get("cantidad"))
+            if not raw_codigo:
+                continue
+            key_resuelto, _ = _resolver_codigo_catalogo_documento(
+                raw_codigo, mapa_upper)
+            if key_resuelto in mapa_upper:
+                continue
+            propuestas_ia_no_validadas.append({
+                "articulo": raw_codigo,
+                "descripcion": str(row.get("descripcion") or "").strip(),
+                "cantidad_documento": float(qty or 0),
+                "cantidad_fisica": 0.0,
+                "serial": str(row.get("serial") or "").strip(),
+                "lote": str(row.get("lote") or "").strip(),
+                "ubicacion_desde": str(row.get("desde") or "").strip(),
+                "ubicacion_hasta": str(row.get("hasta") or "").strip(),
+                "confianza": 0.80,
+                "fuente": "DOCUMENT_AI_SIN_VALIDAR_MAESTRO",
+                "requiere_validacion_maestro": True,
+                "codigo_documental_raw": raw_codigo,
+            })
+
     es_imagen = bool(resultado.get("entrada_imagen"))
     metodo = str(resultado.get("metodo") or "")
     bin_score, bin_filas_texto = _score_bin_texto(resultado.get("texto", ""))
@@ -2954,6 +2990,19 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
                     "; el OCR local confirmó cantidades por columna."
                 )
             )
+    elif es_bin_imagen and propuestas_ia_no_validadas:
+        # La IA sí leyó filas, pero el cruce con maestro no encontró coincidencia.
+        # Se conservan visibles y editables; nunca se transforman en inventario
+        # automáticamente mientras sigan marcadas como no validadas.
+        fuentes_merge = propuestas_ia_no_validadas
+        resultado["diagnostico_bin"] = (
+            f"Se leyeron {len(propuestas_ia_no_validadas)} fila(s) del BIN, "
+            "pero sus códigos aún no pudieron validarse contra el maestro. "
+            "Revise/corrija el artículo antes de confirmar."
+        )
+        resultado["filas_pendientes_validacion_maestro"] = len(
+            propuestas_ia_no_validadas)
+
     elif es_bin_imagen:
         # Un rescate espacial solo puede entrar si el MISMO código apareció
         # literalmente en el OCR y existe exactamente en el maestro. Así
@@ -3120,6 +3169,10 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         if key in mapa_upper:
             depuradas.append(existentes.get(key, ln))
             vistos.add(key)
+        elif bool(ln.get("requiere_validacion_maestro")):
+            # Visible para corrección humana, pero explícitamente no validada.
+            depuradas.append(ln)
+            vistos.add(key)
     resultado["lineas"] = depuradas
 
     if resultado.get("entrada_imagen"):
@@ -3139,6 +3192,8 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     resultado["requiere_revision"] = (
         cf < 0.85 or not resultado.get("lineas")
         or any(float(x.get("cantidad_documento") or 0) <= 0
+               for x in resultado.get("lineas", []))
+        or any(bool(x.get("requiere_validacion_maestro"))
                for x in resultado.get("lineas", []))
     )
     return resultado
