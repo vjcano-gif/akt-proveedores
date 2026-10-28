@@ -3271,6 +3271,51 @@ def _analisis_local_foto_bin(data: bytes) -> dict:
     }
 
 
+def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
+    """Rescate rápido para fotos cuando la IA devuelve texto pero cero filas.
+
+    Hace UNA sola pasada RapidOCR sobre una copia reducida. No ejecuta
+    Tesseract, no prueba rotaciones y no llama servicios remotos adicionales.
+    """
+    t0 = time.perf_counter()
+    try:
+        import cv2
+        img = _decode_image(data)
+        h, w = img.shape[:2]
+        mayor = max(h, w)
+        if mayor > 1800:
+            s = 1800.0 / float(mayor)
+            img = cv2.resize(
+                img,
+                (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+                interpolation=cv2.INTER_AREA,
+            )
+        res = _rapid_engine()(img)
+        txts = list(getattr(res, "txts", None) or [])
+        texto, scores = _texto_rapid_ordenado(res)
+        filas = _extraer_bin_columnas_resultado(res, txts)
+        conf = (
+            sum(float(x) for x in scores) / len(scores)
+            if scores else 0.0
+        )
+        return {
+            "ok": bool(texto or filas),
+            "texto": texto,
+            "filas": filas,
+            "confianza": float(conf or 0.0),
+            "tiempo_s": round(time.perf_counter() - t0, 3),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "texto": "",
+            "filas": [],
+            "confianza": 0.0,
+            "tiempo_s": round(time.perf_counter() - t0, 3),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
 def _texto_pdf_nativo_rapido(data: bytes) -> str:
     """Lee únicamente la capa de texto de un PDF, sin OCR ni llamadas remotas."""
     if not data:
@@ -3480,6 +3525,29 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                 "fuente": fuente_ia,
             })
         out["bin_filas_espaciales"] = filas_ia_bin
+
+        # Si la IA devolvió texto pero CERO filas en una foto BIN, no encadenamos
+        # otro servicio remoto. Hacemos una única pasada local ligera para
+        # rescatar la geometría de la tabla.
+        if es_imagen and not filas_ia_bin:
+            t0 = time.perf_counter()
+            rescate = _rescate_rapid_bin_una_pasada(data)
+            tiempos["rapid_rescate_s"] = round(
+                time.perf_counter() - t0, 3)
+            if rescate.get("filas"):
+                out["bin_filas_espaciales"] = list(rescate["filas"])
+                out["ocr_local_ejecutado"] = True
+                out["modo_escalable"] = "RAPIDOCR_RESCATE_UNA_PASADA"
+                out["diagnostico_escalabilidad"] = (
+                    f"La IA no devolvió filas; RapidOCR rescató "
+                    f"{len(rescate['filas'])} fila(s) en una sola pasada."
+                )
+                if not texto.strip() and rescate.get("texto"):
+                    texto = str(rescate.get("texto") or "")
+                    out["texto"] = texto
+                    cf = max(cf, float(rescate.get("confianza") or 0.0))
+            elif rescate.get("error"):
+                out["diagnostico_rapid_rescate"] = rescate.get("error")
 
         if es_pdf:
             t0 = time.perf_counter()
