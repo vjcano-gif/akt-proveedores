@@ -3306,8 +3306,8 @@ def _estimar_filas_bin_texto(texto: str) -> int:
 def _inferir_ubicaciones_bin_desde_texto(texto: str) -> tuple[str, str]:
     """Infere DESDE/HASTA por consenso en filas BIN con NONE NONE.
 
-    No depende del maestro. Busca el tramo posterior a Serial/Lote y toma los
-    dos bloques de ubicación que se repiten con mayor frecuencia.
+    Prioriza anclas repetidas de ubicación (p.ej. WSERE ... WSERE ...), de modo
+    que tokens internos como PINT/WINT no se confundan con el inicio del bloque.
     """
     candidatos = []
     for raw in str(texto or "").splitlines():
@@ -3321,31 +3321,106 @@ def _inferir_ubicaciones_bin_desde_texto(texto: str) -> tuple[str, str]:
         if not resto:
             continue
 
-        # Caso estándar del BIN: dos ubicaciones consecutivas, ambas iniciadas
-        # por WSERE/WSER/MOTOS u otro token alfabético y seguidas de sus niveles.
         toks = resto.split()
-        inicios = [
-            i for i, t in enumerate(toks)
-            if re.fullmatch(r"[A-Z]{4,12}", t)
-        ]
-        if len(inicios) < 2:
-            continue
+        # Busca un token alfabético que se repita y úsalo como ancla común de
+        # DESDE y HASTA. En el documento real: WSERE PINT... WSERE WINT...
+        repetidos = []
+        for i, tok in enumerate(toks):
+            if not re.fullmatch(r"[A-Z]{4,12}", tok):
+                continue
+            posiciones = [j for j, t in enumerate(toks) if t == tok]
+            if len(posiciones) >= 2:
+                repetidos.append((tok, posiciones))
+        if repetidos:
+            # Prefiere el ancla cuya segunda aparición deja contenido a la derecha.
+            repetidos.sort(key=lambda z: (z[1][0], -len(z[1])))
+            _, pos = repetidos[0]
+            i1, i2 = pos[0], pos[1]
+            desde = " ".join(toks[i1:i2]).strip()
+            hasta = " ".join(toks[i2:]).strip()
+            if desde and hasta:
+                candidatos.append((desde, hasta))
+                continue
 
-        # Usa los dos últimos bloques alfabéticos grandes; en este formato son
-        # DESDE y HASTA y evita contaminar con descripción previa.
-        i1, i2 = inicios[-2], inicios[-1]
-        desde = " ".join(toks[i1:i2]).strip()
-        hasta = " ".join(toks[i2:]).strip()
-        if desde and hasta:
-            candidatos.append((desde, hasta))
+        # Respaldo: divide cerca de la mitad si hay dos grupos bien formados.
+        if len(toks) >= 6:
+            mitad = len(toks) // 2
+            desde = " ".join(toks[:mitad]).strip()
+            hasta = " ".join(toks[mitad:]).strip()
+            if desde and hasta:
+                candidatos.append((desde, hasta))
 
     if not candidatos:
         return "", ""
 
     from collections import Counter
-    pares = Counter(candidatos)
-    (desde, hasta), _ = pares.most_common(1)[0]
+    (desde, hasta), _ = Counter(candidatos).most_common(1)[0]
     return desde, hasta
+
+
+def _estimar_filas_bin_resultado(res) -> int:
+    """Cuenta bandas horizontales de datos aunque el código OCR esté dañado."""
+    txts = list(getattr(res, "txts", None) or [])
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or len(boxes) != len(txts):
+        return 0
+
+    dets = []
+    for txt, box in zip(txts, boxes):
+        txt = str(txt or "").strip()
+        if not txt:
+            continue
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in box]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            dets.append({
+                "txt": txt,
+                "x0": min(xs), "x1": max(xs),
+                "cy": (min(ys) + max(ys)) / 2.0,
+                "h": max(1.0, max(ys) - min(ys)),
+            })
+        except Exception:
+            continue
+
+    headers = {}
+    for d in dets:
+        n = _norm_cabecera(d["txt"])
+        if n in {"PROVEEDOR", "CODIGO", "DESCRIPCION", "CANTIDAD",
+                 "SERIAL", "LOTE", "DESDE", "HASTA"}:
+            headers[n] = d
+    if not headers:
+        return 0
+    header_y = max(d["cy"] for d in headers.values())
+
+    datos = [d for d in dets if d["cy"] > header_y + 3]
+    datos.sort(key=lambda z: (z["cy"], z["x0"]))
+    filas = []
+    for d in datos:
+        target = None
+        for f in filas:
+            if abs(d["cy"] - f["cy"]) <= max(8.0, 0.72 * max(d["h"], f["h"])):
+                target = f
+                break
+        if target is None:
+            target = {"cy": d["cy"], "h": d["h"], "items": []}
+            filas.append(target)
+        target["items"].append(d)
+        n = len(target["items"])
+        target["cy"] = ((target["cy"] * (n - 1)) + d["cy"]) / n
+        target["h"] = max(target["h"], d["h"])
+
+    total = 0
+    for f in filas:
+        textos = [str(x["txt"] or "").upper() for x in f["items"]]
+        linea = " ".join(textos)
+        # Una fila real suele tener código largo o al menos dos NONE, y varias
+        # detecciones distribuidas horizontalmente. Evita firmas/pie de página.
+        codigo_largo = bool(re.search(r"\d{10,18}", linea))
+        dos_none = linea.count("NONE") >= 2
+        if (codigo_largo or dos_none) and len(f["items"]) >= 4:
+            total += 1
+    return total
 
 
 def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
@@ -3400,6 +3475,7 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
         filas_estimadas = max(
             len(filas_ai),
             _estimar_filas_bin_texto(texto),
+            _estimar_filas_bin_resultado(res),
             int(filas_texto or 0),
         )
         desde_txt, hasta_txt = _inferir_ubicaciones_bin_desde_texto(texto)
