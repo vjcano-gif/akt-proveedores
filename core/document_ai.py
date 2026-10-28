@@ -281,40 +281,22 @@ def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> di
     raw = None
     ultimo_error = None
     resp = None
-    for intento in range(2):
-        try:
-            resp = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=(5, 28),
-            )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                ultimo_error = RuntimeError(
-                    f"OpenAI HTTP {resp.status_code}: {str(resp.text or '')[:500]}"
-                )
-                if intento == 0:
-                    time.sleep(0.7)
-                    continue
-            resp.raise_for_status()
-            raw = resp.json()
-            break
-        except Exception as e:
-            ultimo_error = e
-            # Reintenta una sola vez únicamente ante fallos transitorios.
-            transitorio = (
-                isinstance(e, (requests.Timeout, requests.ConnectionError))
-                or (resp is not None and (
-                    resp.status_code == 429 or resp.status_code >= 500
-                ))
-            )
-            if intento == 0 and transitorio:
-                time.sleep(0.7)
-                continue
-            break
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            # Límite duro: la interfaz nunca debe quedar secuestrada por una
+            # lectura documental. Un único intento; el usuario recupera control.
+            timeout=(4, 18),
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        ultimo_error = e
 
     if raw is None:
         e = ultimo_error or RuntimeError("OpenAI no devolvió respuesta")
@@ -3298,16 +3280,13 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         "motor_ia_no_disponible", "tipo_no_bin", "referencia_bin",
         "sin_filas", "fila_incompleta", "conteo_filas",
     }
+    # En imágenes NO encadenamos un segundo proveedor remoto automáticamente.
+    # Una foto debe terminar en un único intento acotado; si falla, vuelve a la
+    # UI para corrección/reintento. Esto evita esperas acumuladas de 1-2 minutos.
     requiere_fallback_remoto = bool(
-        not pdf_texto_nativo
-        and (
-            (not ia_ok)
-            or (
-                es_imagen
-                and not ia_suficiente
-                and any(r in razones_fallback_remoto for r in razones_ia)
-            )
-        )
+        not es_imagen
+        and not pdf_texto_nativo
+        and not ia_ok
     )
     if requiere_fallback_remoto:
         t0 = time.perf_counter()
