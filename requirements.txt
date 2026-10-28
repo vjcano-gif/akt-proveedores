@@ -1,9 +1,12 @@
 # Versiones verificadas en Python 3.14 (la que usa Streamlit Community Cloud).
 # Se usan mínimos en vez de fijaciones exactas para que el resolutor tome
 # siempre una rueda precompilada y no intente compilar desde fuente.
-streamlit>=1.64.0
-SQLAlchemy>=2.0.54,<2.1
-pandas>=3.0.3
+# Runtime crítico fijado: evita que un redeploy cambie silenciosamente
+# Streamlit/pandas/SQLAlchemy y rompa importaciones en producción.
+# Streamlit 1.66 y pandas 3.1 soportan Python 3.14.
+streamlit==1.66.0
+SQLAlchemy==2.0.54
+pandas==3.1.0
 plotly>=7.1.0
 openpyxl>=3.1.5
 bcrypt>=5.0.0
