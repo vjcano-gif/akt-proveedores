@@ -16,7 +16,7 @@ from core.document_ai import (analizar_documento, completar_con_catalogo,
                               estructurar, inferir_origen, lineas_desde_catalogo,
                               lineas_bin_desde_texto, resumir_ubicaciones_bin,
                               extraer_bin_columnas_pdf, _texto_rapid_ordenado,
-                              _extraer_bin_columnas_resultado)  # noqa: E402
+                              _extraer_bin_columnas_resultado, _estimar_filas_bin_resultado)  # noqa: E402
 from core.models import (Articulo, Averia, Bom, Inventario, MovimientoInventario,
                          Novedad, OrdenCompra, ProgramaProduccion, Proveedor,
                          Recibo, Ubicacion)  # noqa: E402
@@ -25,7 +25,7 @@ import core.document_ai as dai  # noqa: E402
 from core.services import campos_faltantes_proveedor, proveedor_listo_para_activar  # noqa: E402
 from core.auth import alcance_proveedor, puede  # noqa: E402
 from core.ui import catalogo_proveedores  # noqa: E402
-from app_pages.recibo import (_consolidar_extracciones,
+from app_pages.recibo import (_canonizar_ubicacion_ocr, _consolidar_extracciones,
                                _enriquecer_extraccion,
                                _guardar_soportes_consolidados)  # noqa: E402
 
@@ -1274,6 +1274,86 @@ try:
 finally:
     dai._openai_document_ai = _openai_pdf_fast_original
     dai._mistral_document_ai = _mistral_pdf_fast_original
+
+
+print("\n=== 10A0. FILAS DENSAS BIN Y UBICACIONES RUIDOSAS ===")
+
+class _FakeDenseBin:
+    pass
+
+_dense = _FakeDenseBin()
+_dense.txts = []
+_dense.boxes = []
+
+# Encabezados.
+_headers = [
+    ("Proveedor", 20), ("Código", 120), ("Descripción", 280),
+    ("Cantidad", 520), ("Serial", 610), ("Lote", 700),
+    ("Desde", 790), ("Hasta", 980),
+]
+for _txt, _x in _headers:
+    _dense.txts.append(_txt)
+    _dense.boxes.append([
+        [_x, 100], [_x + 70, 100], [_x + 70, 108], [_x, 108]
+    ])
+
+# 39 filas compactas, separadas ~12 px. La implementación anterior con
+# tolerancia fija 8-9 px tendía a fusionarlas.
+for _i in range(39):
+    _y = 120 + _i * 12
+    _cells = [
+        ("EICHER", 20),
+        (f"MOT-00D{7700149000000 + _i}", 120),
+        (f"Descripcion {_i}", 280),
+        (str(50 + (_i % 5) * 10), 520),
+        ("NONE", 610),
+        ("NONE", 700),
+        ("WSERE PINT 1 1 1", 790),
+        ("WSERE WINT 1 1 1", 980),
+    ]
+    for _txt, _x in _cells:
+        _dense.txts.append(_txt)
+        _dense.boxes.append([
+            [_x, _y], [_x + 80, _y], [_x + 80, _y + 7], [_x, _y + 7]
+        ])
+
+# Pie del reporte.
+_dense.txts.append("Continúa en la página siguiente")
+_dense.boxes.append([[700, 600], [1050, 600], [1050, 610], [700, 610]])
+
+_dense_rows = _extraer_bin_columnas_resultado(_dense)
+check(
+    "Parser BIN denso conserva 39 filas sin fusionarlas",
+    len(_dense_rows) == 39,
+    str(len(_dense_rows)),
+)
+check(
+    "Estimador geométrico reporta 39 filas",
+    _estimar_filas_bin_resultado(_dense) == 39,
+    str(_estimar_filas_bin_resultado(_dense)),
+)
+
+_ubis = ["WSERE PINT 1 1 1", "WSERE WINT 1 1 1", "TPROC-INTE-AKT"]
+check(
+    "NONE nunca se promueve a ubicación",
+    _canonizar_ubicacion_ocr("NONE", _ubis)[0] == "",
+    str(_canonizar_ubicacion_ocr("NONE", _ubis)),
+)
+check(
+    "OCR duplicado no se promueve a ubicación",
+    _canonizar_ubicacion_ocr(
+        "NONE WSERE WSERE PINT PINT WSERE WINT", _ubis
+    )[0] == "",
+    str(_canonizar_ubicacion_ocr(
+        "NONE WSERE WSERE PINT PINT WSERE WINT", _ubis
+    )),
+)
+check(
+    "Ubicación limpia sí se valida contra maestro",
+    _canonizar_ubicacion_ocr("WSERE PINT 1 1 1", _ubis)[0]
+    == "WSERE PINT 1 1 1",
+    str(_canonizar_ubicacion_ocr("WSERE PINT 1 1 1", _ubis)),
+)
 
 
 print("\n=== 10A0A. DOCUMENTO MULTIFOTO / MULTIARCHIVO ===")
