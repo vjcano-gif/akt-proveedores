@@ -1,0 +1,37 @@
+name: Import smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  imports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile source
+        run: |
+          python -m compileall -q core app_pages streamlit_app.py
+
+      - name: Import smoke test
+        env:
+          DATABASE_URL: "sqlite:////tmp/akt-smoke.db"
+          DEMO_MODE: "false"
+        run: |
+          python tests/import_smoke.py
