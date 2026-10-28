@@ -330,9 +330,16 @@ def _enriquecer_extraccion(extr, proveedor_id):
         ]
 
         # DESDE/HASTA son del BIN completo, no de cada artículo.
-        # Canoniza los valores detectados una sola vez a nivel documental.
+        # Puede venir de geometría por fila o del consenso textual recuperado
+        # por RapidOCR. No borre un valor documental ya inferido.
+        desde_previo = _norm_ubi(extr.get("bin_desde_canon") or "")
+        hasta_previo = _norm_ubi(extr.get("bin_hasta_canon") or "")
         desde_vals = list(extr.get("bin_desde_valores") or [])
         hasta_vals = list(extr.get("bin_hasta_valores") or [])
+        if desde_previo and desde_previo not in desde_vals:
+            desde_vals.append(desde_previo)
+        if hasta_previo and hasta_previo not in hasta_vals:
+            hasta_vals.append(hasta_previo)
 
         desde_canon = []
         for raw in desde_vals:
@@ -656,7 +663,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "document-ai-v41-local-first"
+    extractor_version = "document-ai-v42-coverage-locations-clean-ui"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -1350,55 +1357,33 @@ def _registrar(user):
         metodo = extr.get("metodo", "")
         diagnostico = str(extr.get("diagnostico") or "").strip()
 
-        if not extr.get("ocr_ok"):
+        lineas_visibles_ui = int(
+            extr.get("ia_filas_visibles") or len(extr.get("lineas") or []))
+        lineas_detectadas_ui = len(extr.get("lineas") or [])
+
+        if not extr.get("ocr_ok") and not lineas_detectadas_ui:
             st.error(
-                "No fue posible extraer texto del documento. "
-                "Puede continuar con captura manual o revisar el diagnóstico.")
-            if diagnostico:
-                with st.expander("Diagnóstico OCR"):
-                    st.code(diagnostico)
+                "No fue posible leer líneas del documento automáticamente. "
+                "Puede intentar otra foto o continuar con captura manual.")
         elif extr.get("requiere_revision"):
             st.warning(
-                f"Documento procesado automáticamente por {metodo} con confianza "
-                f"aproximada {cf}%. Revise los campos marcados antes de crear el recibo.")
-        else:
-            st.success(
-                f"Documento procesado automáticamente por {metodo}. "
-                f"Confianza aproximada: {cf}%.")
-
-        if extr.get("entrada_ia"):
-            st.success(
-                "Lectura principal con IA: "
-                f"**{extr.get('ia_fuente') or 'Document AI'}** · "
-                f"modelo **{extr.get('ia_modelo') or '—'}**."
+                f"Documento leído automáticamente. Se identificaron "
+                f"**{lineas_detectadas_ui} de {lineas_visibles_ui or lineas_detectadas_ui} "
+                "línea(s) estimadas**. Revise las referencias faltantes antes de confirmar."
             )
         else:
-            ia_error = str(extr.get("ia_error") or "").strip()
-            if ia_error:
-                st.warning(
-                    "La lectura remota no pudo completarse. "
-                    f"Detalle: {ia_error}"
-                )
-            else:
-                st.info(
-                    "No se utilizó un motor remoto en esta lectura."
-                )
+            st.success(
+                f"Documento leído automáticamente: **{lineas_detectadas_ui} línea(s)**."
+            )
 
         modo_escalable = str(extr.get("modo_escalable") or "").strip()
-        if modo_escalable == "IA_REMOTA":
-            st.success(
-                "Procesamiento escalable: lectura resuelta por IA remota. "
-                "No se consumió OCR pesado de la CPU de Streamlit."
-            )
-        elif modo_escalable == "IA_REMOTA_REVISION":
-            st.warning(
-                str(extr.get("diagnostico_escalabilidad") or
-                    "La lectura requiere revisión antes de confirmar.")
-            )
-        elif modo_escalable == "SIN_IA_REVISION":
-            st.error(
-                "No se ejecutó OCR local pesado automáticamente para proteger "
-                "la capacidad concurrente de la aplicación."
+        if modo_escalable in {
+            "IA_REMOTA_REVISION", "RAPIDOCR_LOCAL_FALLBACK",
+            "RAPIDOCR_RESCATE_UNA_PASADA"
+        } and extr.get("requiere_revision"):
+            st.caption(
+                "La lectura automática requiere revisión porque no se recuperó "
+                "el 100% de las líneas o metadatos del documento."
             )
 
         tiempos = extr.get("tiempos_procesamiento") or {}
@@ -1426,10 +1411,8 @@ def _registrar(user):
                 + (f" · {' · '.join(partes_t)}" if partes_t else "")
             )
 
-        if diagnostico:
-            st.caption(f"Diagnóstico OCR: {diagnostico}")
         if extr.get("diagnostico_bin"):
-            st.warning(extr["diagnostico_bin"])
+            st.caption(extr["diagnostico_bin"])
 
         if extr.get("entrada_imagen"):
             verificadas = int(extr.get("cantidades_foto_verificadas") or 0)
@@ -1645,7 +1628,10 @@ def _registrar(user):
                 base[col] = ""
 
         base = base.drop(columns=[
-            "confianza", "fuente",
+            "confianza", "fuente", "codigo_score", "descripcion_score",
+            "requiere_validacion_maestro", "codigo_documental_raw",
+            "codigo_resuelto_por_prefijo", "cantidad_verificada",
+            "cantidad_votos", "_row_cy",
             "ubicacion_desde", "ubicacion_hasta",
             "ubicacion_desde_ocr_raw", "ubicacion_desde_ocr_score",
             "ubicacion_hasta_ocr_raw", "ubicacion_hasta_ocr_score",
@@ -1786,6 +1772,15 @@ def _registrar(user):
                 key=f"rec_remote_review_{suffix}",
             )
 
+        lineas_estimadas = int(
+            (extr or {}).get("ia_filas_visibles") or len(lineas_df))
+        cobertura_incompleta = bool(
+            lineas_estimadas > 0 and len([
+                1 for _, _r in lineas_df.iterrows()
+                if str(_r.get("articulo") or "").strip()
+            ]) < lineas_estimadas
+        )
+
         b1, b2, b3 = st.columns([1.3, 1.1, 0.8])
         if b1.button(
             "✓ Marcar recibo satisfactorio y completo",
@@ -1793,7 +1788,7 @@ def _registrar(user):
             use_container_width=True,
             disabled=(
                 bool(faltan_qty) or bool(no_validos_maestro)
-                or lineas_df.empty or bloqueo_hasta
+                or cobertura_incompleta or lineas_df.empty or bloqueo_hasta
                 or not revision_cantidades_ok
             ),
             key=f"btn_completo_{suffix}",
@@ -1811,7 +1806,8 @@ def _registrar(user):
             use_container_width=True,
             disabled=(
                 lineas_df.empty or bool(no_validos_maestro)
-                or bloqueo_hasta or not revision_cantidades_ok
+                or cobertura_incompleta or bloqueo_hasta
+                or not revision_cantidades_ok
             ),
             key=f"btn_disc_{suffix}",
         ):
@@ -1854,9 +1850,20 @@ def _registrar(user):
             x for x in lineas if str(x.get("articulo") or "").strip()
         ]
         if detectadas:
-            st.caption(
-                f"{len(detectadas)} línea(s) detectada(s) automáticamente. "
-                "Puede agregar referencias faltantes antes de confirmar la recepción.")
+            esperadas = int(
+                (extr or {}).get("ia_filas_visibles") or len(detectadas))
+            faltantes = max(0, esperadas - len(detectadas))
+            if faltantes:
+                st.warning(
+                    f"Se identificaron **{len(detectadas)} de {esperadas} líneas**. "
+                    f"Faltan al menos **{faltantes} referencia(s)** por identificar. "
+                    "No confirme el recibo hasta completar la tabla."
+                )
+            else:
+                st.caption(
+                    f"Se identificaron **{len(detectadas)} de {esperadas} líneas** "
+                    "estimadas del documento."
+                )
 
     else:
         base = pd.DataFrame([{
@@ -1917,6 +1924,23 @@ def _registrar(user):
                 "Defina primero el resultado de la recepción: "
                 "satisfactoria/completa o con discrepancias.")
             return
+        lineas_estimadas_guardar = int(
+            (extr or {}).get("ia_filas_visibles") or 0)
+        lineas_con_articulo_guardar = sum(
+            1 for _, _r in lineas_df.iterrows()
+            if str(_r.get("articulo") or "").strip()
+        )
+        if (
+            modo == "Documento leído"
+            and lineas_estimadas_guardar > lineas_con_articulo_guardar
+        ):
+            ui.err(
+                f"No se puede crear el recibo: se identificaron "
+                f"{lineas_con_articulo_guardar} de {lineas_estimadas_guardar} "
+                "líneas estimadas del documento. Complete las referencias faltantes."
+            )
+            return
+
         faltan_qty = _filas_sin_cantidad_documento(lineas_df)
         if modo == "Documento leído" and faltan_qty:
             ui.err(
