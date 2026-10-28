@@ -2,16 +2,53 @@
 AKT MOTOS — App para Proveedores de Transformación
 Flujo: RECIBO -> ALMACENAMIENTO -> PRODUCCIÓN -> DESPACHO
 """
+import importlib
+import logging
+import uuid
+
 import streamlit as st
+
+logger = logging.getLogger("akt.startup")
 
 st.set_page_config(page_title="AKT · Proveedores de Transformación",
                    page_icon="🏍️", layout="wide",
                    initial_sidebar_state="expanded")
 
-from core import ui                                  # noqa: E402
-from core.auth import ROLES, autenticar, puede       # noqa: E402
-from core.db import (database_connection_hint, db_label, healthcheck,
-                     init_db)                        # noqa: E402
+# Dependencias internas: se cargan de forma controlada dentro de main().
+# Evita que una excepción en un módulo secundario derribe la app antes de que
+# Streamlit pueda mostrar una pantalla de recuperación.
+ui = None
+ROLES = {}
+autenticar = None
+puede = None
+database_connection_hint = None
+db_label = None
+healthcheck = None
+init_db = None
+
+
+def _cargar_core():
+    global ui, ROLES, autenticar, puede
+    global database_connection_hint, db_label, healthcheck, init_db
+
+    importlib.invalidate_caches()
+    from core import ui as _ui
+    from core.auth import ROLES as _ROLES, autenticar as _autenticar, puede as _puede
+    from core.db import (
+        database_connection_hint as _database_connection_hint,
+        db_label as _db_label,
+        healthcheck as _healthcheck,
+        init_db as _init_db,
+    )
+
+    ui = _ui
+    ROLES = _ROLES
+    autenticar = _autenticar
+    puede = _puede
+    database_connection_hint = _database_connection_hint
+    db_label = _db_label
+    healthcheck = _healthcheck
+    init_db = _init_db
 
 
 @st.cache_resource(show_spinner="Preparando la base de datos...")
@@ -59,6 +96,27 @@ def pantalla_login():
 
 
 def main():
+    try:
+        _cargar_core()
+    except Exception as exc:
+        error_id = uuid.uuid4().hex[:10]
+        logger.exception(
+            "Fallo cargando núcleo de la app. error_id=%s tipo=%s",
+            error_id, type(exc).__name__,
+        )
+        st.error(
+            "La aplicación no pudo cargar uno de sus componentes internos."
+        )
+        st.info(
+            "El error fue aislado antes de iniciar la operación. "
+            "No se ejecutaron movimientos ni escrituras de negocio."
+        )
+        st.caption(f"Referencia de soporte: {error_id}")
+        if st.button("Reintentar arranque", type="primary"):
+            importlib.invalidate_caches()
+            st.rerun()
+        st.stop()
+
     try:
         _arranque()
     except Exception as exc:
