@@ -2714,6 +2714,57 @@ def lineas_bin_desde_texto_maestro(
     return list(out.values())
 
 
+def _resolver_codigo_catalogo_documento(
+        raw_codigo: str, mapa_upper: dict[str, tuple[str, str]]) -> tuple[str | None, str]:
+    """Resuelve códigos documentales con prefijos ERP sin hacer fuzzy matching.
+
+    Ejemplo real del BIN:
+        MOT-0017700149366632
+    Maestro:
+        7700149366632
+
+    Solo se acepta:
+    1) coincidencia exacta, o
+    2) un ÚNICO código exacto del maestro contenido literalmente en el token
+       documental normalizado.
+
+    Nunca se corrigen dígitos ni se usa similitud aproximada aquí.
+    """
+    raw = str(raw_codigo or "").strip().upper()
+    if not raw:
+        return None, ""
+
+    compacto = re.sub(r"\s+", "", raw)
+    if compacto in mapa_upper:
+        return compacto, raw
+
+    # El OCR puede introducir guiones/puntos en el prefijo, pero el código real
+    # del artículo suele quedar intacto como secuencia alfanumérica.
+    compacto_alnum = re.sub(r"[^A-Z0-9]", "", compacto)
+    coincidencias = []
+    for key in mapa_upper:
+        k = str(key or "").strip().upper()
+        if not k:
+            continue
+        k_alnum = re.sub(r"[^A-Z0-9]", "", k)
+        if len(k_alnum) < 6:
+            continue
+        if k_alnum in compacto_alnum:
+            coincidencias.append(k)
+
+    # Prefiere la coincidencia más larga; si hay empate ambiguo, no resuelve.
+    if coincidencias:
+        max_len = max(len(re.sub(r"[^A-Z0-9]", "", x)) for x in coincidencias)
+        mejores = [
+            x for x in coincidencias
+            if len(re.sub(r"[^A-Z0-9]", "", x)) == max_len
+        ]
+        if len(mejores) == 1:
+            return mejores[0], raw
+
+    return None, raw
+
+
 def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
     """Combina OCR con maestro priorizando parsers estructurados sobre heurísticos."""
     if not resultado:
@@ -2726,9 +2777,12 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         cod = str(ln.get("articulo") or "").strip()
         if not cod:
             continue
-        key = cod.upper()
+        key, raw_documental = _resolver_codigo_catalogo_documento(
+            cod, mapa_upper)
         if key in mapa_upper:
             oficial_cod, oficial_desc = mapa_upper[key]
+            if raw_documental and raw_documental != key:
+                ln["codigo_documental_raw"] = raw_documental
             ln["articulo"] = oficial_cod
             if oficial_desc:
                 ln["descripcion"] = oficial_desc
@@ -2774,7 +2828,9 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
 
     propuestas_ia = []
     for row in resultado.get("lineas_ia", []) or []:
-        key = str(row.get("codigo") or "").strip().upper()
+        raw_codigo = str(row.get("codigo") or "").strip()
+        key, raw_documental = _resolver_codigo_catalogo_documento(
+            raw_codigo, mapa_upper)
         if key not in mapa_upper:
             continue
         qty = _num(row.get("cantidad"))
@@ -2784,7 +2840,7 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
         fuente_ia = str(
             resultado.get("ia_fuente") or "DOCUMENT_AI"
         ).strip() or "DOCUMENT_AI"
-        propuestas_ia.append({
+        propuesta = {
             "articulo": oficial_cod,
             "descripcion": oficial_desc or str(row.get("descripcion") or ""),
             "cantidad_documento": float(qty),
@@ -2795,7 +2851,11 @@ def completar_con_catalogo(resultado: dict, catalogo: dict[str, str]) -> dict:
             "ubicacion_hasta": str(row.get("hasta") or ""),
             "confianza": 0.99,
             "fuente": fuente_ia,
-        })
+        }
+        if raw_documental and raw_documental != key:
+            propuesta["codigo_documental_raw"] = raw_documental
+            propuesta["codigo_resuelto_por_prefijo"] = True
+        propuestas_ia.append(propuesta)
 
     es_imagen = bool(resultado.get("entrada_imagen"))
     metodo = str(resultado.get("metodo") or "")
