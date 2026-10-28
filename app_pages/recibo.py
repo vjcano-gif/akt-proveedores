@@ -282,13 +282,35 @@ def _normalizar_codigo_ubicacion(v):
 
 
 def _canonizar_ubicacion_ocr(valor, codigos):
-    """Mapea OCR ruidoso al código WMS más probable, solo con alta confianza."""
-    raw = str(valor or "").strip().upper()
+    """Mapea OCR ruidoso SOLO a una ubicación activa del maestro.
+
+    Nunca devuelve texto OCR crudo como ubicación operativa. Valores como
+    NONE, duplicaciones de columnas o cadenas mezcladas deben quedar vacíos y
+    activar los fallbacks contra el maestro del proveedor.
+    """
+    raw = " ".join(str(valor or "").strip().upper().split())
     if not raw:
         return "", 0.0
+
+    tokens = raw.replace("-", " ").split()
+    basura = {"NONE", "NULL", "NAN", "NA", "N/A"}
+    if not tokens or all(t in basura for t in tokens):
+        return "", 0.0
+    if tokens[0] in basura:
+        return "", 0.0
+
+    # Una ubicación real no debe contener el mismo ancla larga repetida varias
+    # veces; eso es señal de mezcla entre DESDE/HASTA o doble lectura OCR.
+    alpha_largos = [
+        t for t in tokens
+        if re.fullmatch(r"[A-Z]{4,20}", t)
+    ]
+    if any(alpha_largos.count(t) > 1 for t in set(alpha_largos)):
+        return "", 0.0
+
     nraw = _normalizar_codigo_ubicacion(raw)
     if not nraw:
-        return raw, 0.0
+        return "", 0.0
 
     candidatos = []
     for codigo in codigos:
@@ -296,20 +318,56 @@ def _canonizar_ubicacion_ocr(valor, codigos):
         if not nc:
             continue
         score = SequenceMatcher(None, nraw, nc).ratio()
-        # Premia contenido completo con ruido adicional al final/inicio.
         if nc in nraw or nraw in nc:
-            score = max(score, min(len(nraw), len(nc)) / max(len(nraw), len(nc)))
+            score = max(
+                score,
+                min(len(nraw), len(nc)) / max(len(nraw), len(nc))
+            )
         candidatos.append((score, codigo))
     if not candidatos:
-        return raw, 0.0
+        return "", 0.0
+
     candidatos.sort(reverse=True)
     best_score, best = candidatos[0]
     second = candidatos[1][0] if len(candidatos) > 1 else 0.0
 
-    # Conservador: evita transformar una lectura ambigua en un código falso.
-    if best_score >= 0.82 and (best_score - second >= 0.04 or best_score >= 0.93):
+    if best_score >= 0.82 and (
+        best_score - second >= 0.04 or best_score >= 0.93
+    ):
         return best, best_score
-    return raw, best_score
+
+    # Nunca promover una cadena OCR no validada a DESDE/HASTA.
+    return "", best_score
+
+
+def _ubicacion_maestra_evidenciada_en_texto(texto, codigo_maestro):
+    """Valida una ubicación maestra contra OCR tolerando duplicaciones.
+
+    Exige evidencia del ancla y de los tokens alfabéticos distintivos; evita
+    aceptar una ubicación solo porque aparece un '1' o un fragmento genérico.
+    """
+    esperado = " ".join(str(codigo_maestro or "").upper().replace("-", " ").split())
+    raw = " ".join(str(texto or "").upper().replace("-", " ").split())
+    if not esperado or not raw:
+        return False, 0.0
+
+    toks_e = [t for t in esperado.split() if t]
+    toks_r = raw.split()
+    alpha_e = [t for t in toks_e if re.fullmatch(r"[A-Z]{3,20}", t)]
+    if not alpha_e:
+        return False, 0.0
+
+    encontrados = sum(1 for t in alpha_e if t in toks_r)
+    cobertura = encontrados / max(1, len(alpha_e))
+
+    # Si hay al menos dos tokens alfabéticos (p.ej. WSERE + PINT/WINT),
+    # exige ambos. Para códigos de una sola pieza exige coincidencia exacta.
+    if len(alpha_e) >= 2:
+        return cobertura >= 1.0, cobertura
+    compacto_raw = _normalizar_codigo_ubicacion(raw)
+    compacto_e = _normalizar_codigo_ubicacion(esperado)
+    exacto = bool(compacto_e and compacto_e in compacto_raw)
+    return exacto, 1.0 if exacto else cobertura
 
 
 def _enriquecer_extraccion(extr, proveedor_id):
@@ -399,10 +457,17 @@ def _enriquecer_extraccion(extr, proveedor_id):
                 variantes_origen.append(norigen[5:])
 
             encontrado_origen = False
-            for nv in variantes_origen:
-                if len(nv) >= 5 and nv in texto_compacto_total:
-                    encontrado_origen = True
-                    break
+            evidencia_token, score_token = _ubicacion_maestra_evidenciada_en_texto(
+                extr.get("texto") or "", origen_maestro)
+            if evidencia_token:
+                encontrado_origen = True
+                extr["bin_desde_score_texto"] = round(float(score_token), 3)
+
+            if not encontrado_origen:
+                for nv in variantes_origen:
+                    if len(nv) >= 5 and nv in texto_compacto_total:
+                        encontrado_origen = True
+                        break
 
             if not encontrado_origen and variantes_origen:
                 filas_bin_texto = [
@@ -450,6 +515,20 @@ def _enriquecer_extraccion(extr, proveedor_id):
 
         destino_bin = _norm_ubi(extr.get("bin_hasta_canon") or "")
         candidatos_destino = {}
+
+        # Antes de buscar entre todos los proveedores, valida la ubicación HASTA
+        # esperada del proveedor seleccionado contra el texto del documento.
+        # Esto tolera OCR duplicado como "WSERE WSERE ... WINT ...".
+        if not destino_bin and seleccionado:
+            destino_sel = _norm_ubi(seleccionado.ubicacion_destino)
+            ok_dest, score_dest = _ubicacion_maestra_evidenciada_en_texto(
+                extr.get("texto") or "", destino_sel)
+            if ok_dest and destino_sel:
+                destino_bin = destino_sel
+                extr["bin_hasta_canon"] = destino_sel
+                extr["bin_hasta_canon_valores"] = [destino_sel]
+                extr["bin_hasta_detectado_por_texto"] = True
+                extr["bin_hasta_score_texto"] = round(float(score_dest), 3)
         proveedores_activos = s.query(Proveedor).filter(
             Proveedor.activo.is_(True)).all()
 
@@ -663,7 +742,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "document-ai-v42-coverage-locations-clean-ui"
+    extractor_version = "document-ai-v43-strict-locations-row-geometry"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
