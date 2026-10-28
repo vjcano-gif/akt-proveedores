@@ -3271,6 +3271,83 @@ def _analisis_local_foto_bin(data: bytes) -> dict:
     }
 
 
+def _estimar_filas_bin_texto(texto: str) -> int:
+    """Estima renglones de datos visibles sin exigir que el parser los complete.
+
+    Cuenta líneas que contienen un código documental/artículo largo. Sirve para
+    medir cobertura: p.ej. "22 de 39" aunque solo 22 filas hayan quedado
+    estructuradas correctamente.
+    """
+    total = 0
+    vistos = set()
+    for raw in str(texto or "").splitlines():
+        linea = " ".join(raw.split())
+        if not linea:
+            continue
+        # Código BIN típico: MOT-00D7700149... o secuencia numérica de 11-18.
+        m = re.search(
+            r"\b(?:[A-Z]{2,8}[- ]?[A-Z0-9-]{0,8})?"
+            r"([0-9]{11,18})\b",
+            linea, re.I,
+        )
+        if not m:
+            continue
+        # Excluye cabeceras/fechas/identificadores si no parecen fila de tabla.
+        u = linea.upper()
+        if any(x in u for x in ("ID DE BIN", "FECHA", "NIT", "USUARIO")):
+            continue
+        key = (m.group(1), linea[:80])
+        if key not in vistos:
+            vistos.add(key)
+            total += 1
+    return total
+
+
+def _inferir_ubicaciones_bin_desde_texto(texto: str) -> tuple[str, str]:
+    """Infere DESDE/HASTA por consenso en filas BIN con NONE NONE.
+
+    No depende del maestro. Busca el tramo posterior a Serial/Lote y toma los
+    dos bloques de ubicación que se repiten con mayor frecuencia.
+    """
+    candidatos = []
+    for raw in str(texto or "").splitlines():
+        linea = " ".join(raw.split()).upper()
+        if linea.count("NONE") < 2:
+            continue
+        partes = re.split(r"\bNONE\b", linea, maxsplit=2, flags=re.I)
+        if len(partes) < 3:
+            continue
+        resto = " ".join(partes[-1].split()).strip()
+        if not resto:
+            continue
+
+        # Caso estándar del BIN: dos ubicaciones consecutivas, ambas iniciadas
+        # por WSERE/WSER/MOTOS u otro token alfabético y seguidas de sus niveles.
+        toks = resto.split()
+        inicios = [
+            i for i, t in enumerate(toks)
+            if re.fullmatch(r"[A-Z]{4,12}", t)
+        ]
+        if len(inicios) < 2:
+            continue
+
+        # Usa los dos últimos bloques alfabéticos grandes; en este formato son
+        # DESDE y HASTA y evita contaminar con descripción previa.
+        i1, i2 = inicios[-2], inicios[-1]
+        desde = " ".join(toks[i1:i2]).strip()
+        hasta = " ".join(toks[i2:]).strip()
+        if desde and hasta:
+            candidatos.append((desde, hasta))
+
+    if not candidatos:
+        return "", ""
+
+    from collections import Counter
+    pares = Counter(candidatos)
+    (desde, hasta), _ = pares.most_common(1)[0]
+    return desde, hasta
+
+
 def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
     """Lectura rápida local de una foto BIN en una sola pasada.
 
@@ -3320,6 +3397,12 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
             })
 
         score_bin, filas_texto = _score_bin_texto(texto)
+        filas_estimadas = max(
+            len(filas_ai),
+            _estimar_filas_bin_texto(texto),
+            int(filas_texto or 0),
+        )
+        desde_txt, hasta_txt = _inferir_ubicaciones_bin_desde_texto(texto)
         return {
             "ok": bool(texto or filas_ai),
             "texto": texto,
@@ -3330,6 +3413,9 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
             "confianza": float(conf or 0.0),
             "score_bin": int(score_bin),
             "filas_texto": int(filas_texto),
+            "filas_estimadas": int(filas_estimadas),
+            "ubicacion_desde_texto": desde_txt,
+            "ubicacion_hasta_texto": hasta_txt,
             "tiempo_s": round(time.perf_counter() - t0, 3),
         }
     except Exception as e:
@@ -3343,6 +3429,9 @@ def _rescate_rapid_bin_una_pasada(data: bytes) -> dict:
             "confianza": 0.0,
             "score_bin": 0,
             "filas_texto": 0,
+            "filas_estimadas": 0,
+            "ubicacion_desde_texto": "",
+            "ubicacion_hasta_texto": "",
             "tiempo_s": round(time.perf_counter() - t0, 3),
             "error": f"{type(e).__name__}: {e}",
         }
@@ -3429,8 +3518,11 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                 (rapid_pre or {}).get("fecha_transaccion") or ""),
             "fecha_documento": "",
             "fecha": str((rapid_pre or {}).get("fecha_transaccion") or ""),
-            "filas_visibles": len(rapid_filas_ai),
-            "lectura_completa": True,
+            "filas_visibles": int(
+                (rapid_pre or {}).get("filas_estimadas") or len(rapid_filas_ai)),
+            "lectura_completa": bool(
+                len(rapid_filas_ai) >= int(
+                    (rapid_pre or {}).get("filas_estimadas") or len(rapid_filas_ai))),
             "filas": rapid_filas_ai,
             "modelo": "rapidocr-local",
             "usage_info": {},
@@ -3571,6 +3663,19 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             out["modo_escalable"] = "RAPIDOCR_LOCAL_FALLBACK"
             out["lineas_ia"] = list(rapid_pre.get("filas_ai") or [])
             out["bin_filas_espaciales"] = list(rapid_pre.get("filas") or [])
+            out["ia_filas_visibles"] = int(
+                rapid_pre.get("filas_estimadas") or len(out["lineas_ia"]))
+            out["ia_lectura_completa"] = bool(
+                len(out["lineas_ia"]) >= out["ia_filas_visibles"]
+            )
+            if rapid_pre.get("ubicacion_desde_texto"):
+                out["bin_desde_canon"] = str(
+                    rapid_pre.get("ubicacion_desde_texto") or "").strip().upper()
+                out["bin_desde_canon_valores"] = [out["bin_desde_canon"]]
+            if rapid_pre.get("ubicacion_hasta_texto"):
+                out["bin_hasta_canon"] = str(
+                    rapid_pre.get("ubicacion_hasta_texto") or "").strip().upper()
+                out["bin_hasta_canon_valores"] = [out["bin_hasta_canon"]]
             if rapid_pre.get("referencia"):
                 out["referencia"] = asdict(Campo(
                     rapid_pre.get("referencia"), 0.90, "RAPIDOCR_LOCAL"))
