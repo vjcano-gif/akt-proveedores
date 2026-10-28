@@ -656,7 +656,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "remote-first-v39-visible-unvalidated-rapid-rescue"
+    extractor_version = "document-ai-v40-mistral-primary"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
