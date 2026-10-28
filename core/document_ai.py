@@ -3258,19 +3258,88 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             and (ia_mistral.get("texto") or ia_mistral.get("filas"))
         )
         if mistral_ok:
-            # Mistral no expone todavía las señales explícitas de conteo, por
-            # lo que solo reemplaza OpenAI si OpenAI falló por completo.
             if not ia_ok:
                 ia = ia_mistral
                 ia_ok = True
+                ia_suficiente, razones_ia = (
+                    _ia_bin_suficiente(ia) if es_imagen else (False, [])
+                )
             else:
-                # Si ambos están disponibles, conservamos OpenAI y usamos
-                # Mistral como evidencia de respaldo sin disparar OCR local.
+                # OpenAI conserva prioridad, pero Mistral sí puede completar
+                # filas omitidas o campos vacíos del MISMO código. Antes solo
+                # guardábamos un contador de verificación y pagábamos la
+                # segunda llamada sin aprovechar sus datos.
+                filas_base = list(ia.get("filas") or [])
+                por_codigo = {
+                    str(r.get("codigo") or "").strip().upper(): r
+                    for r in filas_base
+                    if str(r.get("codigo") or "").strip()
+                }
+                agregadas = 0
+                completadas = 0
+                for respaldo in ia_mistral.get("filas") or []:
+                    if not isinstance(respaldo, dict):
+                        continue
+                    key = str(respaldo.get("codigo") or "").strip().upper()
+                    qty_respaldo = _num(respaldo.get("cantidad"))
+                    if not key:
+                        continue
+                    actual = por_codigo.get(key)
+                    if actual is None:
+                        # Una fila nueva solo entra si trae código y cantidad
+                        # positivos; así Mistral no agrega renglones incompletos.
+                        if qty_respaldo is None or qty_respaldo <= 0:
+                            continue
+                        copia = dict(respaldo)
+                        filas_base.append(copia)
+                        por_codigo[key] = copia
+                        agregadas += 1
+                        continue
+
+                    cambio = False
+                    qty_actual = _num(actual.get("cantidad"))
+                    if (
+                        (qty_actual is None or qty_actual <= 0)
+                        and qty_respaldo is not None
+                        and qty_respaldo > 0
+                    ):
+                        actual["cantidad"] = float(qty_respaldo)
+                        cambio = True
+                    for campo in (
+                        "proveedor", "descripcion", "serial",
+                        "lote", "desde", "hasta",
+                    ):
+                        if not str(actual.get(campo) or "").strip() and str(
+                                respaldo.get(campo) or "").strip():
+                            actual[campo] = respaldo.get(campo)
+                            cambio = True
+                    if cambio:
+                        completadas += 1
+
+                ia["filas"] = filas_base
+                # Si OpenAI había contado las filas visibles y la fusión alcanza
+                # exactamente ese total con datos completos, la lectura puede
+                # considerarse cerrada sin OCR local.
+                visibles = ia.get("filas_visibles")
+                if visibles is not None:
+                    try:
+                        if int(visibles) == len(filas_base) and all(
+                            str(r.get("codigo") or "").strip()
+                            and (_num(r.get("cantidad")) or 0) > 0
+                            for r in filas_base
+                        ):
+                            ia["lectura_completa"] = True
+                    except Exception:
+                        pass
+
                 ia["verificacion_remota"] = {
                     "fuente": ia_mistral.get("fuente"),
                     "filas": len(ia_mistral.get("filas") or []),
                     "referencia": ia_mistral.get("referencia"),
+                    "filas_agregadas": agregadas,
+                    "filas_completadas": completadas,
                 }
+                ia_suficiente, razones_ia = _ia_bin_suficiente(ia)
 
     # 3) Construye salida IA si existe.
     local_foto = None
