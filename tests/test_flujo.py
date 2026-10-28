@@ -1165,6 +1165,64 @@ finally:
     dai._mistral_document_ai = _mistral_soft_original
 
 
+print("\n=== 10A1B2. BIN REAL: PREFIJO MOT NO DEBE ELIMINAR FILAS ===")
+resultado_prefijo_mot = {
+    "texto": "MOVIMIENTO BIN A BIN",
+    "confianza_texto": 0.97,
+    "entrada_imagen": True,
+    "entrada_ia": True,
+    "ia_fuente": "OPENAI_VISION",
+    "origen_sugerido": "BIN_A_BIN",
+    "lineas": [],
+    "lineas_ia": [
+        {
+            "proveedor": "EICHER",
+            "codigo": "MOT-0017700149366632",
+            "descripcion": "Cal Gbo Tras Neg Hmylan 450 Mp",
+            "cantidad": 68,
+            "serial": "NONE",
+            "lote": "NONE",
+            "desde": "WSERE PINT 1 1 1",
+            "hasta": "WSERE WINT 1 1 1",
+        },
+        {
+            "proveedor": "EICHER",
+            "codigo": "MOT-0017700149543231",
+            "descripcion": "Cal Tan Der1 Honey Bear 650 Mp",
+            "cantidad": 50,
+            "serial": "NONE",
+            "lote": "NONE",
+            "desde": "WSERE PINT 1 1 1",
+            "hasta": "WSERE WINT 1 1 1",
+        },
+    ],
+    "bin_filas_espaciales": [],
+}
+catalogo_prefijo_mot = {
+    "7700149366632": "Cal Gbo Tras Neg Hmylan 450 Mp",
+    "7700149543231": "Cal Tan Der1 Honey Bear 650 Mp",
+}
+completar_con_catalogo(resultado_prefijo_mot, catalogo_prefijo_mot)
+prefijo_final = {
+    x["articulo"]: float(x["cantidad_documento"])
+    for x in resultado_prefijo_mot.get("lineas", [])
+}
+check(
+    "BIN con prefijo MOT conserva las líneas contra maestro numérico",
+    prefijo_final == {
+        "7700149366632": 68.0,
+        "7700149543231": 50.0,
+    },
+    str(prefijo_final),
+)
+check(
+    "BIN con prefijo MOT conserva código documental para auditoría",
+    all(x.get("codigo_resuelto_por_prefijo")
+        for x in resultado_prefijo_mot.get("lineas", [])),
+    str(resultado_prefijo_mot.get("lineas")),
+)
+
+
 print("\n=== 10A1C. LATENCIA: PDF NATIVO NO USA IA REMOTA ===")
 _openai_pdf_fast_original = dai._openai_document_ai
 _mistral_pdf_fast_original = dai._mistral_document_ai
