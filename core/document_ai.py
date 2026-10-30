@@ -268,7 +268,7 @@ def _gemini_document_ai(
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": schema,
-            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "LOW"},
             "maxOutputTokens": 5000,
         },
     }
