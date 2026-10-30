@@ -81,6 +81,36 @@ Streamlit Cloud lo lee con su permiso de GitHub).
 
 ---
 
+## IA documental con Gemini
+
+Para fotografías de BIN, la app prioriza Gemini Vision cuando existe una
+`GEMINI_API_KEY`. La credencial debe vivir en Streamlit Secrets y nunca
+en el repositorio.
+
+1. Cree una API key en Google AI Studio.
+2. Abra la app en Streamlit Community Cloud.
+3. **Manage app → Settings → Secrets**.
+4. Agregue:
+
+```toml
+GEMINI_API_KEY = "SU_API_KEY"
+GEMINI_VISION_MODEL = "gemini-3.8-flash"
+```
+
+5. Guarde y vuelva a cargar la app.
+
+Con Gemini configurado, las fotos BIN siguen esta ruta:
+
+```text
+Gemini Vision → validación de 100% de filas → maestro de artículos
+      ↓ si falla la llamada
+RapidOCR local (una sola pasada)
+```
+
+La salida de Gemini se mantiene mínima: número de BIN, fecha de transacción,
+DESDE/HASTA, total de filas y pares código/cantidad. La descripción se recupera
+del maestro interno para reducir latencia y errores.
+
 ## Mantenimiento
 
 - **Actualizar la app**: haga `git push`; Streamlit Cloud redespliega solo.
