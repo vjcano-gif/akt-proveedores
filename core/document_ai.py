@@ -3884,11 +3884,13 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     if es_pdf:
         tiempos["pdf_nativo_s"] = round(time.perf_counter() - t0, 3)
 
-    # Lectura local primero para FOTOS BIN. Esto garantiza que la app
-    # realmente intente leer siempre, incluso si no hay claves remotas o una API
-    # está lenta. Si recupera una tabla razonable, evita completamente la red.
+    # Con Gemini configurado evitamos pagar primero el coste local (~9 s).
+    # Gemini procesa la foto completa una sola vez; RapidOCR queda como fallback
+    # exclusivamente si la llamada remota falla. Sin Gemini se conserva el
+    # fast-path local existente.
+    gemini_configurado = bool(es_imagen and _gemini_api_key())
     rapid_pre = None
-    if es_imagen:
+    if es_imagen and not gemini_configurado:
         t0 = time.perf_counter()
         rapid_pre = _rescate_rapid_bin_una_pasada(data)
         tiempos["rapid_local_s"] = round(time.perf_counter() - t0, 3)
@@ -3905,15 +3907,21 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         )
     )
 
-    # 1) Motor remoto principal.
-    #
-    # Para FOTOS de documentos se prioriza Mistral OCR porque es un motor
-    # documental especializado y devuelve tabla/anotación estructurada. OpenAI
-    # queda como alternativa únicamente cuando Mistral NO está configurado.
-    # Nunca se encadenan dos proveedores después de un timeout.
+    # 1) Motor principal.
+    # Orden para fotos: Gemini -> (si no hay Gemini) local -> Mistral -> OpenAI.
+    # Nunca se encadenan dos proveedores remotos después de un timeout.
     ia = None
     ia_ok = False
-    if rapid_suficiente:
+    if gemini_configurado:
+        t0 = time.perf_counter()
+        ia = _gemini_document_ai(nombre, data, mime)
+        tiempos["gemini_s"] = round(time.perf_counter() - t0, 3)
+        tiempos["mistral_s"] = 0.0
+        tiempos["openai_s"] = 0.0
+        ia_ok = bool(
+            ia and ia.get("ok") and (ia.get("texto") or ia.get("filas"))
+        )
+    elif rapid_suficiente:
         ia = {
             "ok": True,
             "texto": str((rapid_pre or {}).get("texto") or ""),
@@ -3934,14 +3942,17 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
             "fuente": "RAPIDOCR_LOCAL",
         }
         ia_ok = True
+        tiempos["gemini_s"] = 0.0
         tiempos["mistral_s"] = 0.0
         tiempos["openai_s"] = 0.0
     elif pdf_texto_nativo:
+        tiempos["gemini_s"] = 0.0
         tiempos["mistral_s"] = 0.0
         tiempos["openai_s"] = 0.0
     elif es_imagen and _mistral_api_key():
         t0 = time.perf_counter()
         ia = _mistral_document_ai(nombre, data, mime)
+        tiempos["gemini_s"] = 0.0
         tiempos["mistral_s"] = round(time.perf_counter() - t0, 3)
         tiempos["openai_s"] = 0.0
         ia_ok = bool(
@@ -3950,6 +3961,7 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
     else:
         t0 = time.perf_counter()
         ia = _openai_document_ai(nombre, data, mime)
+        tiempos["gemini_s"] = 0.0
         tiempos["openai_s"] = round(time.perf_counter() - t0, 3)
         tiempos["mistral_s"] = 0.0
         ia_ok = bool(
@@ -3983,6 +3995,16 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
         if ia.get("fecha"):
             out["fecha"] = asdict(Campo(
                 ia["fecha"], 0.98, fuente_ia))
+        if ia.get("desde"):
+            desde_ia = str(ia.get("desde") or "").strip().upper()
+            if desde_ia:
+                out["bin_desde_canon"] = desde_ia
+                out["bin_desde_canon_valores"] = [desde_ia]
+        if ia.get("hasta"):
+            hasta_ia = str(ia.get("hasta") or "").strip().upper()
+            if hasta_ia:
+                out["bin_hasta_canon"] = hasta_ia
+                out["bin_hasta_canon_valores"] = [hasta_ia]
 
         filas_ia_bin = []
         for row in ia.get("filas") or []:
@@ -4052,6 +4074,13 @@ def analizar_documento(nombre: str, data: bytes, mime: str | None = None) -> dic
                     + ". OCR local pesado no se ejecutó automáticamente."
                 )
     else:
+        # Si Gemini fue el motor principal y falla, recién aquí ejecutamos una
+        # sola pasada local. Así la ruta exitosa no suma latencias.
+        if es_imagen and rapid_pre is None:
+            t0 = time.perf_counter()
+            rapid_pre = _rescate_rapid_bin_una_pasada(data)
+            tiempos["rapid_local_s"] = round(time.perf_counter() - t0, 3)
+
         # Si la red falla pero la pasada local obtuvo filas, se conservan.
         if es_imagen and rapid_pre and (rapid_pre.get("filas_ai") or rapid_pre.get("texto")):
             texto = str(rapid_pre.get("texto") or "")
