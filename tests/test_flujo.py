@@ -1165,6 +1165,83 @@ finally:
     dai._mistral_document_ai = _mistral_soft_original
 
 
+print("\n=== 10A1B1. GEMINI PRIMARIO SIN COSTE RAPIDOCR EN RUTA EXITOSA ===")
+_gem_key_original = dai._gemini_api_key
+_gem_doc_original = dai._gemini_document_ai
+_rapid_gem_original = dai._rescate_rapid_bin_una_pasada
+try:
+    llamadas = {"gemini": 0, "rapid": 0}
+
+    dai._gemini_api_key = lambda: "test-key"
+
+    def _gemini_ok(*args, **kwargs):
+        llamadas["gemini"] += 1
+        return {
+            "ok": True,
+            "texto": '{"tipo_documento":"BIN_A_BIN"}',
+            "tipo_documento": "BIN_A_BIN",
+            "referencia": "BIN2761968",
+            "fecha_transaccion": "2026-10-13-15.41.38",
+            "fecha": "2026-10-13-15.41.38",
+            "desde": "WSERE PINT 1 1 1",
+            "hasta": "WSERE WINT 1 1 1",
+            "filas_visibles": 2,
+            "lectura_completa": True,
+            "filas": [
+                {
+                    "proveedor": "", "codigo": "7700149366632",
+                    "descripcion": "", "cantidad": 68,
+                    "serial": "", "lote": "",
+                    "desde": "WSERE PINT 1 1 1",
+                    "hasta": "WSERE WINT 1 1 1",
+                },
+                {
+                    "proveedor": "", "codigo": "7700149543231",
+                    "descripcion": "", "cantidad": 50,
+                    "serial": "", "lote": "",
+                    "desde": "WSERE PINT 1 1 1",
+                    "hasta": "WSERE WINT 1 1 1",
+                },
+            ],
+            "modelo": "gemini-3.8-flash",
+            "fuente": "GEMINI_VISION",
+        }
+
+    def _rapid_no(*args, **kwargs):
+        llamadas["rapid"] += 1
+        return {"ok": False, "filas": [], "filas_ai": [], "texto": ""}
+
+    dai._gemini_document_ai = _gemini_ok
+    dai._rescate_rapid_bin_una_pasada = _rapid_no
+    gem = analizar_documento("bin.jpg", b"fake", "image/jpeg")
+
+    check(
+        "Gemini se usa una sola vez como motor principal",
+        llamadas["gemini"] == 1,
+        str(llamadas),
+    )
+    check(
+        "Ruta Gemini exitosa no ejecuta RapidOCR",
+        llamadas["rapid"] == 0,
+        str(llamadas),
+    )
+    check(
+        "Gemini conserva conteo y ubicaciones documentales",
+        gem.get("ia_filas_visibles") == 2
+        and gem.get("bin_desde_canon") == "WSERE PINT 1 1 1"
+        and gem.get("bin_hasta_canon") == "WSERE WINT 1 1 1",
+        str({
+            "filas": gem.get("ia_filas_visibles"),
+            "desde": gem.get("bin_desde_canon"),
+            "hasta": gem.get("bin_hasta_canon"),
+        }),
+    )
+finally:
+    dai._gemini_api_key = _gem_key_original
+    dai._gemini_document_ai = _gem_doc_original
+    dai._rescate_rapid_bin_una_pasada = _rapid_gem_original
+
+
 print("\n=== 10A1B2. BIN REAL: PREFIJO MOT NO DEBE ELIMINAR FILAS ===")
 resultado_prefijo_mot = {
     "texto": "MOVIMIENTO BIN A BIN",
