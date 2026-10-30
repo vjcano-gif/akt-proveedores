@@ -742,7 +742,7 @@ def _extraer_documento(soporte, proveedor_id):
     digest = digest_completo[:16]
     # Versiona la extracción y permite compartir el resultado crudo entre
     # sesiones/usuarios sin mezclar el enriquecimiento específico del proveedor.
-    extractor_version = "document-ai-v43-strict-locations-row-geometry"
+    extractor_version = "document-ai-v44-gemini-primary"
     clave = f"extract_{extractor_version}_{soporte.name}_{digest}_{proveedor_id}"
 
     if clave not in st.session_state:
@@ -1468,6 +1468,8 @@ def _registrar(user):
         tiempos = extr.get("tiempos_procesamiento") or {}
         if tiempos:
             partes_t = []
+            if float(tiempos.get("gemini_s") or 0) >= 0.01:
+                partes_t.append(f"Gemini {float(tiempos['gemini_s']):.1f}s")
             if float(tiempos.get("openai_s") or 0) >= 0.01:
                 partes_t.append(f"OpenAI {float(tiempos['openai_s']):.1f}s")
             if float(tiempos.get("mistral_s") or 0) >= 0.01:
