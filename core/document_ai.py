@@ -26,6 +26,33 @@ class Campo:
     fuente: str = ""
 
 
+def _gemini_api_key() -> str:
+    """Obtiene GEMINI_API_KEY desde entorno o Streamlit secrets."""
+    key = str(os.getenv("GEMINI_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        import streamlit as st
+        key = str(st.secrets.get("GEMINI_API_KEY", "") or "").strip()
+    except Exception:
+        key = ""
+    return key
+
+
+def _gemini_vision_model() -> str:
+    """Modelo Gemini configurable. Flash prioriza velocidad/costo."""
+    model = str(os.getenv("GEMINI_VISION_MODEL") or "").strip()
+    if not model:
+        try:
+            import streamlit as st
+            model = str(
+                st.secrets.get("GEMINI_VISION_MODEL", "") or ""
+            ).strip()
+        except Exception:
+            model = ""
+    return model or "gemini-3.8-flash"
+
+
 def _openai_api_key() -> str:
     """Obtiene OPENAI_API_KEY desde entorno o Streamlit secrets."""
     key = str(os.getenv("OPENAI_API_KEY") or "").strip()
@@ -140,6 +167,230 @@ def _imagen_api_optimizada(
     except Exception:
         pass
     return data, mime
+
+
+def _gemini_document_ai(
+        nombre: str, data: bytes, mime: str | None = None) -> dict | None:
+    """Lee un BIN con Gemini Vision y devuelve un JSON mínimo y verificable.
+
+    A diferencia del extractor genérico, solo pide los campos que realmente
+    afectan el recibo: BIN, fecha, DESDE/HASTA, total de filas, código y cantidad.
+    La descripción se completa después desde el maestro local de artículos.
+    """
+    key = _gemini_api_key()
+    if not key or not data:
+        return None
+
+    import requests
+
+    name = (nombre or "").lower()
+    mime = (mime or "").strip().lower()
+    if not mime:
+        if name.endswith(".png"):
+            mime = "image/png"
+        elif name.endswith((".jpg", ".jpeg")):
+            mime = "image/jpeg"
+        elif name.endswith(".webp"):
+            mime = "image/webp"
+        else:
+            mime = "image/jpeg"
+    if not mime.startswith("image/"):
+        return None
+
+    # Conserva mucha resolución: estos BIN tienen ~39 renglones de letra pequeña.
+    data_api, mime_api = _imagen_api_optimizada(data, mime, max_side=3000)
+    encoded = base64.b64encode(data_api).decode("ascii")
+    model = _gemini_vision_model()
+
+    prompt = (
+        "Eres un extractor documental. Lee la fotografía de un reporte "
+        "MOVIMIENTO BIN A BIN. Devuelve exclusivamente los datos visibles, "
+        "sin inferir ni corregir caracteres. Prioridad absoluta: recuperar "
+        "TODAS las filas de artículos. Cuenta cada renglón de la tabla entre "
+        "el encabezado y el pie 'Continúa en la página siguiente'. "
+        "Para cada fila devuelve SOLO codigo y cantidad. El codigo es el valor "
+        "de la columna Código tal como aparece impreso; cantidad es SOLO la "
+        "columna Cantidad, nunca números de la descripción. "
+        "Extrae referencia del campo 'Id de Bin', fecha_transaccion del campo "
+        "'Fecha Transacción', y DESDE/HASTA de las columnas respectivas. "
+        "Como DESDE/HASTA se repiten, devuelve el valor modal limpio de cada "
+        "columna. Valores Serial/Lote como NONE NO son ubicaciones. "
+        "total_filas debe ser el número real de renglones visibles de datos. "
+        "lectura_completa=true únicamente si el número de objetos en filas "
+        "coincide con total_filas y todos tienen código y cantidad positiva. "
+        "No omitas filas aunque una descripción sea ilegible."
+    )
+
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "tipo_documento": {
+                "type": "STRING",
+                "enum": ["BIN_A_BIN", "OTRO"],
+            },
+            "referencia": {"type": "STRING"},
+            "fecha_transaccion": {"type": "STRING"},
+            "desde": {"type": "STRING"},
+            "hasta": {"type": "STRING"},
+            "total_filas": {"type": "INTEGER"},
+            "lectura_completa": {"type": "BOOLEAN"},
+            "filas": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "codigo": {"type": "STRING"},
+                        "cantidad": {"type": "NUMBER"},
+                    },
+                    "required": ["codigo", "cantidad"],
+                },
+            },
+        },
+        "required": [
+            "tipo_documento", "referencia", "fecha_transaccion",
+            "desde", "hasta", "total_filas", "lectura_completa", "filas",
+        ],
+    }
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": prompt},
+                {
+                    "inlineData": {
+                        "mimeType": mime_api,
+                        "data": encoded,
+                    }
+                },
+            ],
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+            "temperature": 0,
+            "maxOutputTokens": 5000,
+        },
+    }
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    resp = None
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "x-goog-api-key": key,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=(4, 16),
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        detalle = str(e)
+        try:
+            if resp is not None and getattr(resp, "text", None):
+                detalle += " · " + str(resp.text or "")[:700]
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "error": f"{type(e).__name__}: {detalle}",
+            "texto": "",
+            "filas": [],
+            "fuente": "GEMINI_VISION",
+            "modelo": model,
+        }
+
+    output_text = ""
+    try:
+        for cand in raw.get("candidates") or []:
+            for part in ((cand.get("content") or {}).get("parts") or []):
+                if part.get("text"):
+                    output_text += str(part.get("text"))
+            if output_text:
+                break
+    except Exception:
+        output_text = ""
+
+    if not output_text.strip():
+        return {
+            "ok": False,
+            "error": "Gemini no devolvió salida estructurada.",
+            "texto": "",
+            "filas": [],
+            "fuente": "GEMINI_VISION",
+            "modelo": model,
+        }
+
+    try:
+        anot = json.loads(output_text)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"JSON inválido de Gemini: {type(e).__name__}: {e}",
+            "texto": output_text,
+            "filas": [],
+            "fuente": "GEMINI_VISION",
+            "modelo": model,
+        }
+
+    desde = str(anot.get("desde") or "").strip()
+    hasta = str(anot.get("hasta") or "").strip()
+    filas = []
+    for row in anot.get("filas") or []:
+        if not isinstance(row, dict):
+            continue
+        codigo = str(row.get("codigo") or "").strip()
+        qty = _num(row.get("cantidad"))
+        filas.append({
+            "proveedor": "",
+            "codigo": codigo,
+            "descripcion": "",
+            "cantidad": qty,
+            "serial": "",
+            "lote": "",
+            "desde": desde,
+            "hasta": hasta,
+        })
+
+    try:
+        visibles = int(anot.get("total_filas"))
+    except Exception:
+        visibles = len(filas)
+
+    uso = raw.get("usageMetadata") or {}
+    return {
+        "ok": True,
+        "texto": output_text,
+        "tipo_documento": str(
+            anot.get("tipo_documento") or "BIN_A_BIN").strip().upper(),
+        "referencia": str(anot.get("referencia") or "").strip(),
+        "fecha_transaccion": str(
+            anot.get("fecha_transaccion") or "").strip(),
+        "fecha_documento": "",
+        "fecha": str(anot.get("fecha_transaccion") or "").strip(),
+        "desde": desde,
+        "hasta": hasta,
+        "filas_visibles": visibles,
+        "lectura_completa": bool(
+            anot.get("lectura_completa")
+            and visibles == len(filas)
+            and all(
+                str(x.get("codigo") or "").strip()
+                and (_num(x.get("cantidad")) or 0) > 0
+                for x in filas
+            )
+        ),
+        "filas": filas,
+        "modelo": model,
+        "usage_info": uso,
+        "fuente": "GEMINI_VISION",
+    }
 
 
 def _openai_document_ai(nombre: str, data: bytes, mime: str | None = None) -> dict | None:
